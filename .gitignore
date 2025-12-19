@@ -1,0 +1,30 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 构建产物
+*.dll
+*.dylib
+*.so
+*.a
+*.lib
+
+# 绑定生成（自动生成）
+bindings/dart/bridge_generated.dart
+
+# 日志
+*.log
+
+# macOS
+.DS_Store
+
+# 临时文件
+*.tmp
+*.temp
