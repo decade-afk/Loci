@@ -3,86 +3,97 @@ name = "loci"
 version = "0.1.0"
 edition = "2021"
 authors = ["Creative Studio Team"]
-description = "Local AI inference core for Creative Studio -端侧AI推理核心"
+description = "Local AI inference core for Creative Studio - Phase 1 Implementation"
 license = "MIT"
 repository = "https://github.com/your-org/loci"
 readme = "README.md"
 
 # 关键配置：支持多种库类型以适配不同平台
 [lib]
-# cdylib: 动态库 (.dll / .dylib / .so) - 用于 Tauri Desktop 动态链接
-# staticlib: 静态库 (.a / .lib) - 用于 iOS
-# rlib: Rust 库 - 用于开发阶段静态链接
 crate-type = ["cdylib", "staticlib", "rlib"]
 
+# ==================== Phase 1: 直接集成依赖 ====================
 [dependencies]
-# ==================== AI 推理核心 ====================
-# llama.cpp 的 Rust 绑定，支持本地 LLM 推理
-# 注意：WSL 开发环境使用最小特性集（CPU + OpenMP）
-# - 移除 vulkan: WSL 不支持
-# - 移除 mtmd: tools 目录缺失
-# Windows 发布构建时可以启用完整特性：["openmp", "vulkan", "sampler", "mtmd"]
-llama-cpp-2 = { version = "0.1.130", features = ["openmp", "sampler"] }
+# 零拷贝文件加载
+memmap2 = "0.9"
 
-# ==================== 异步运行时 ====================
+# 异步运行时
 tokio = { version = "1", features = ["full"] }
 
-# ==================== 并发原语 ====================
-# 高性能的读写锁实现
+# 高性能锁
 parking_lot = "0.12"
 
-# ==================== 系统信息 ====================
-# 硬件检测和系统信息获取
+# 系统信息检测
 sysinfo = "0.32"
 
-# ==================== 序列化 ====================
+# 序列化
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# ==================== 错误处理 ====================
+# 错误处理
 thiserror = "1.0"
+anyhow = "1.0"
 
-# ==================== UUID 生成 ====================
+# UUID生成
 uuid = { version = "1.19.0", features = ["v4"] }
 
-# ==================== FFI 支持 ====================
-# Flutter Rust Bridge（用于 Mobile 端集成）
-flutter_rust_bridge = "2"
+# 字节序处理（GGUF解析）
+byteorder = "1.5"
 
+# 日志
+log = "0.4"
+env_logger = "0.11"
+
+# CPU信息检测
+num_cpus = "1.16"
+
+# ==================== Phase 1: 构建依赖 ====================
 [build-dependencies]
-# 用于构建时代码生成（Flutter Rust Bridge）
-# flutter_rust_bridge_codegen = "2"  # 暂时注释，避免编译问题
+cmake = "0.1"
+cc = "1.0"
+bindgen = "0.70"  # FFI绑定生成
 
 [dev-dependencies]
-# 测试框架
 tokio-test = "0.4"
+criterion = "0.5"  # 性能基准测试
 
+# ==================== 编译优化配置 ====================
 [profile.release]
-# 发布优化配置
-opt-level = 3          # 最高优化级别
-lto = true             # 链接时优化
-codegen-units = 1      # 单编译单元（更好的优化）
-strip = true           # 移除调试符号（减小体积）
-panic = "abort"        # Panic 时直接中止（减小体积）
+opt-level = 3          # 最高优化
+lto = "fat"            # 链接时优化（更激进）
+codegen-units = 1      # 单编译单元
+strip = true           # 移除调试符号
+panic = "abort"        # Panic直接中止
 
 [profile.dev]
-# 开发优化配置
-opt-level = 0          # 无优化（快速编译）
-debug = true           # 保留调试信息
+opt-level = 0
+debug = true
 
-# ==================== Features ====================
+# ==================== Phase 1: Feature Flags ====================
 [features]
-# 默认特性
-default = []
+default = ["cpu"]
 
-# GPU 加速支持
-gpu = ["llama-cpp-2/vulkan"]
+# 基础后端
+cpu = []
+avx2 = []
+avx512 = []
 
-# Metal 加速（macOS/iOS）
-metal = ["llama-cpp-2/metal"]
+# GPU加速
+cuda = []
+metal = []
+rocm = []
+vulkan = []
 
-# CUDA 加速（NVIDIA）
-cuda = ["llama-cpp-2/cuda"]
+# OpenMP支持
+openmp = []
 
-# Flutter FFI 绑定
-flutter-bridge = []
+# 开发特性
+debug-logging = []
+
+# ==================== Workspace配置 ====================
+[[example]]
+name = "loci-cli"
+path = "examples/loci-cli/src/main.rs"
+
+[workspace]
+members = ["examples/loci-cli"]

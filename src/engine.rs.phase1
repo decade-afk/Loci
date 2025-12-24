@@ -43,9 +43,9 @@ pub struct LlamaModelParams {
     pub n_gpu_layers: i32,
     pub split_mode: i32,
     pub main_gpu: i32,
-    pub vocab_only: u8,    // C的bool是uint8_t
-    pub use_mmap: u8,
-    pub use_mlock: u8,
+    pub vocab_only: bool,
+    pub use_mmap: bool,
+    pub use_mlock: bool,
 }
 
 #[repr(C)]
@@ -103,10 +103,6 @@ extern "C" {
     fn llama_sampler_chain_init(params: LlamaSamplerParams) -> *mut LlamaSampler;
     fn llama_sampler_free(sampler: *mut LlamaSampler);
     fn llama_sampler_sample(sampler: *mut LlamaSampler, ctx: *mut LlamaContext, idx: i32) -> i32;
-
-    // 修复P1-3：添加EOS token查询
-    fn llama_token_eos(model: *const LlamaModel) -> i32;
-    fn llama_token_bos(model: *const LlamaModel) -> i32;
 }
 
 #[repr(C)]
@@ -255,8 +251,8 @@ impl LociEngine {
         // 步骤5：加载llama.cpp模型
         let mut model_params = unsafe { llama_model_default_params() };
         model_params.n_gpu_layers = n_gpu_layers;
-        model_params.use_mmap = 1;  // Phase 1要求：零拷贝 (true)
-        model_params.use_mlock = 0;  // false
+        model_params.use_mmap = true;  // Phase 1要求：零拷贝
+        model_params.use_mlock = false;
 
         let model_path_c = std::ffi::CString::new(config.model_path.as_str())
             .context("Invalid model path")?;
@@ -338,14 +334,9 @@ impl LociEngine {
         let mut inner = self.inner.write().unwrap();
 
         let context = inner.context.ok_or_else(|| anyhow::anyhow!("Context not initialized"))?;
-        let model = inner.model.ok_or_else(|| anyhow::anyhow!("Model not initialized"))?;
         let sampler = inner.sampler.ok_or_else(|| anyhow::anyhow!("Sampler not initialized"))?;
 
         eprintln!("🔮 Generating (max_tokens={})...", max_tokens);
-
-        // 修复P1-3：动态查询EOS token
-        let eos_token = unsafe { llama_token_eos(model) };
-        eprintln!("   EOS token: {}", eos_token);
 
         // ========== 步骤1：Tokenize ==========
         let prompt_c = std::ffi::CString::new(prompt)?;
@@ -406,21 +397,14 @@ impl LociEngine {
         let eval_start = std::time::Instant::now();
         let mut current_pos = tokens.len() as i32;
 
-        // 预分配buffer，避免每次循环创建新Vec（修复P0-2内存安全问题）
-        let mut next_tokens_buf = vec![0i32];
-        let mut next_pos_buf = vec![0i32];
-        let mut next_seq_id_buf = vec![1i32];
-        let mut next_logits_buf = vec![1i8];
-
         for i in 0..max_tokens {
             // 3.1 采样下一个token
             let next_token = unsafe {
                 llama_sampler_sample(sampler, context, -1)
             };
 
-            // 修复P1-3：使用动态查询的EOS token
-            if next_token == eos_token {
-                eprintln!("   Reached EOS (token={})", eos_token);
+            if next_token == 2 {  // EOS token (通常是2)
+                eprintln!("   Reached EOS");
                 break;
             }
 
@@ -437,35 +421,31 @@ impl LociEngine {
             };
 
             if piece_len > 0 {
-                let piece_bytes = unsafe {
-                    std::slice::from_raw_parts(piece_buf.as_ptr() as *const u8, piece_len as usize)
+                let piece = unsafe {
+                    std::str::from_utf8_unchecked(
+                        std::slice::from_raw_parts(piece_buf.as_ptr() as *const u8, piece_len as usize)
+                    )
                 };
-                // 修复P1-5：添加UTF-8验证
-                match std::str::from_utf8(piece_bytes) {
-                    Ok(piece) => {
-                        generated_text.push_str(piece);
-                        print!("{}", piece);
-                        std::io::Write::flush(&mut std::io::stdout()).ok();
-                    }
-                    Err(_) => {
-                        eprintln!("⚠️  Invalid UTF-8 in token {}", next_token);
-                    }
-                }
+                generated_text.push_str(piece);
+                print!("{}", piece);
+                std::io::Write::flush(&mut std::io::stdout()).ok();
             }
 
             // 3.3 Forward pass (下一轮)
-            // 复用预分配的buffer（修复P0-2）
-            next_tokens_buf[0] = next_token;
-            next_pos_buf[0] = current_pos;
+            // 构建单token batch并decode
+            let mut next_tokens = vec![next_token];
+            let mut next_pos = vec![current_pos];
+            let mut next_seq_id = vec![1i32];
+            let mut next_logits = vec![1i8];  // 需要下一个token的logits
 
             let next_batch = LlamaBatch {
                 n_tokens: 1,
-                tokens: next_tokens_buf.as_mut_ptr(),
+                tokens: next_tokens.as_mut_ptr(),
                 embd: std::ptr::null_mut(),
-                pos: next_pos_buf.as_mut_ptr(),
-                n_seq_id: next_seq_id_buf.as_mut_ptr(),
+                pos: next_pos.as_mut_ptr(),
+                n_seq_id: next_seq_id.as_mut_ptr(),
                 seq_id: std::ptr::null_mut(),
-                logits: next_logits_buf.as_mut_ptr(),
+                logits: next_logits.as_mut_ptr(),
             };
 
             let ret = unsafe { llama_decode(context, &next_batch) };

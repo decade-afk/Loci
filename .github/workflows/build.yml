@@ -1,0 +1,276 @@
+name: Build Loci AI Engine
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows-gnu:
+    name: Build Windows (MinGW)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "19.1"
+          directory: ${{ runner.temp }}/llvm
+
+      - name: Set LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=${{ runner.temp }}/llvm/bin" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Setup Rust (GNU toolchain)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable-x86_64-pc-windows-gnu
+          target: x86_64-pc-windows-gnu
+
+      - name: Install MinGW
+        run: |
+          choco install mingw -y
+          echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" >> $GITHUB_PATH
+        shell: bash
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build Loci (Release)
+        run: cargo build --release --target x86_64-pc-windows-gnu
+
+      - name: List build artifacts
+        run: |
+          echo "=== Build Artifacts ==="
+          ls -lh target/x86_64-pc-windows-gnu/release/*.dll 2>/dev/null || echo "No DLL found"
+          ls -lh target/x86_64-pc-windows-gnu/release/*.a 2>/dev/null || echo "No .a found"
+          ls -lh target/x86_64-pc-windows-gnu/release/*.lib 2>/dev/null || echo "No .lib found"
+        shell: bash
+
+      - name: Upload DLL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: loci-windows-gnu-dll
+          path: target/x86_64-pc-windows-gnu/release/loci.dll
+          if-no-files-found: error
+
+      - name: Upload static library
+        uses: actions/upload-artifact@v4
+        with:
+          name: loci-windows-gnu-static
+          path: target/x86_64-pc-windows-gnu/release/libloci.a
+          if-no-files-found: warn
+
+      - name: Upload C header
+        uses: actions/upload-artifact@v4
+        with:
+          name: loci-c-header
+          path: loci.h
+          if-no-files-found: warn
+
+  build-windows-msvc:
+    name: Build Windows (MSVC)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "19.1"
+          directory: ${{ runner.temp }}/llvm
+
+      - name: Set LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=${{ runner.temp }}/llvm/bin" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Setup Rust (MSVC toolchain)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+          target: x86_64-pc-windows-msvc
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-msvc-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-msvc-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-msvc-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build Loci (Release)
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: List build artifacts
+        run: |
+          echo "=== Build Artifacts ==="
+          ls -lh target/x86_64-pc-windows-msvc/release/*.dll 2>/dev/null || echo "No DLL found"
+          ls -lh target/x86_64-pc-windows-msvc/release/*.lib 2>/dev/null || echo "No .lib found"
+        shell: bash
+
+      - name: Upload DLL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: loci-windows-msvc-dll
+          path: target/x86_64-pc-windows-msvc/release/loci.dll
+          if-no-files-found: error
+
+      - name: Upload import library
+        uses: actions/upload-artifact@v4
+        with:
+          name: loci-windows-msvc-lib
+          path: target/x86_64-pc-windows-msvc/release/loci.lib
+          if-no-files-found: warn
+
+  build-linux:
+    name: Build Linux (GNU)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-dev libclang-dev clang
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build Loci (Release)
+        run: cargo build --release
+
+      - name: List build artifacts
+        run: |
+          echo "=== Build Artifacts ==="
+          ls -lh target/release/*.so 2>/dev/null || echo "No .so found"
+          ls -lh target/release/*.a 2>/dev/null || echo "No .a found"
+
+      - name: Upload shared library
+        uses: actions/upload-artifact@v4
+        with:
+          name: loci-linux-so
+          path: target/release/libloci.so
+          if-no-files-found: error
+
+      - name: Upload static library
+        uses: actions/upload-artifact@v4
+        with:
+          name: loci-linux-static
+          path: target/release/libloci.a
+          if-no-files-found: warn
+
+  build-macos:
+    name: Build macOS (Apple Silicon)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build Loci (Release)
+        run: cargo build --release
+
+      - name: List build artifacts
+        run: |
+          echo "=== Build Artifacts ==="
+          ls -lh target/release/*.dylib 2>/dev/null || echo "No .dylib found"
+          ls -lh target/release/*.a 2>/dev/null || echo "No .a found"
+
+      - name: Upload dynamic library
+        uses: actions/upload-artifact@v4
+        with:
+          name: loci-macos-dylib
+          path: target/release/libloci.dylib
+          if-no-files-found: error
+
+      - name: Upload static library
+        uses: actions/upload-artifact@v4
+        with:
+          name: loci-macos-static
+          path: target/release/libloci.a
+          if-no-files-found: warn

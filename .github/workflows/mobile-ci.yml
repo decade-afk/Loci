@@ -1,0 +1,140 @@
+# Loci Mobile CI
+# 基于Gemini和Grok审计报告的最终版本
+# 支持Android和iOS跨平台编译
+
+name: Mobile CI
+
+# 触发条件：手动触发或PR（避免干扰Day 1-2开发）
+on:
+  workflow_dispatch:  # 手动触发
+  pull_request:       # PR时运行
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'build.rs'
+      - '.github/workflows/mobile-ci.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ========== Android编译 ==========
+  android-build:
+    name: Android ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-linux-android    # ARM64 (主流)
+          - armv7-linux-androideabi  # ARMv7 (兼容老设备)
+          - x86_64-linux-android     # x86_64模拟器
+          - i686-linux-android       # x86模拟器
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Android SDK/NDK
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 34        # Android 14 (2025年推荐)
+          ndk: '26.3.11579264' # NDK 26 (2025年最新LTS)
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Build Android library
+        run: |
+          # Gemini审计关键补丁：显式传递NDK路径
+          export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264
+
+          # 编译（约5-10分钟）
+          cargo ndk -t ${{ matrix.target }} build -p loci --release
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: loci-android-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/libloci.so
+          retention-days: 30
+
+  # ========== iOS编译 ==========
+  ios-build:
+    name: iOS (Universal)
+    runs-on: macos-14  # M系列Mac (GitHub Actions最新)
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ios-universal
+
+      - name: Install cargo-lipo
+        run: cargo install cargo-lipo
+
+      - name: Build iOS universal library
+        run: |
+          # Grok审计补丁：支持真机+模拟器（M1/M2兼容）
+          cargo lipo --release -p loci --targets aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - name: Verify universal library
+        run: |
+          lipo -info target/universal/release/libloci.a
+          echo "✅ iOS universal library created successfully"
+
+      - name: Upload iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: loci-ios-universal
+          path: target/universal/release/libloci.a
+          retention-days: 30
+
+  # ========== 产物汇总 ==========
+  package-artifacts:
+    name: Package mobile artifacts
+    runs-on: ubuntu-latest
+    needs: [android-build, ios-build]
+    if: github.event_name == 'workflow_dispatch'  # 仅手动触发时打包
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release package
+        run: |
+          cd artifacts
+          tar -czf loci-mobile-${{ github.sha }}.tar.gz *
+          echo "✅ Mobile libraries packaged"
+
+      - name: Upload release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: loci-mobile-release
+          path: artifacts/loci-mobile-${{ github.sha }}.tar.gz
+          retention-days: 90
