@@ -1,0 +1,180 @@
+# Loci Helm Chart Values
+# 使用方法：helm install loci ./kubernetes/helm/loci -f custom-values.yaml
+
+# ==================== 镜像配置 ====================
+image:
+  repository: loci/loci-server
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+
+# ==================== 副本配置 ====================
+replicaCount: 3
+
+# ==================== 服务配置 ====================
+service:
+  type: ClusterIP
+  grpc:
+    port: 50051
+    targetPort: 50051
+  rest:
+    port: 8080
+    targetPort: 8080
+
+# ==================== Ingress 配置 ====================
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+  hosts:
+    - host: loci.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: loci-tls
+      hosts:
+        - loci.example.com
+
+# ==================== 资源配置 ====================
+resources:
+  limits:
+    cpu: "4"
+    memory: "16Gi"
+    nvidia.com/gpu: "1"  # GPU 支持
+  requests:
+    cpu: "2"
+    memory: "8Gi"
+
+# ==================== 自动扩缩容 ====================
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# ==================== 持久化存储 ====================
+persistence:
+  enabled: true
+  storageClass: "fast-ssd"
+  size: 50Gi
+  accessMode: ReadWriteOnce
+  annotations: {}
+
+# ==================== 环境变量 ====================
+env:
+  # 日志级别
+  RUST_LOG: "info"
+
+  # 多租户配置
+  LOCI_MULTI_TENANCY: "true"
+  LOCI_DEFAULT_QUOTA: "enterprise"
+
+  # 性能配置
+  LOCI_N_THREADS: "8"
+  LOCI_N_GPU_LAYERS: "-1"
+
+# ==================== Secrets ====================
+secrets:
+  # 模型加密密钥（Base64 编码）
+  modelEncryptionKey: ""
+
+  # PostgreSQL 连接
+  postgresPassword: ""
+
+# ==================== 节点选择 ====================
+nodeSelector:
+  kubernetes.io/arch: amd64
+  # 可选：GPU 节点
+  # nvidia.com/gpu.present: "true"
+
+# ==================== 容忍度 ====================
+tolerations:
+  - key: "nvidia.com/gpu"
+    operator: "Exists"
+    effect: "NoSchedule"
+
+# ==================== 亲和性 ====================
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - loci
+          topologyKey: kubernetes.io/hostname
+
+# ==================== 健康检查 ====================
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 3
+  successThreshold: 1
+
+# ==================== 服务账号 ====================
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# ==================== Pod 安全策略 ====================
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+# ==================== 监控配置 ====================
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+
+# ==================== PostgreSQL (子 Chart) ====================
+postgresql:
+  enabled: true
+  auth:
+    database: loci_marketplace
+    username: loci
+    existingSecret: loci-postgres-secret
+  primary:
+    persistence:
+      enabled: true
+      size: 10Gi
+
+# ==================== Redis (子 Chart) ====================
+redis:
+  enabled: true
+  architecture: standalone
+  auth:
+    enabled: false
+  master:
+    persistence:
+      enabled: true
+      size: 5Gi

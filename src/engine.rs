@@ -12,9 +12,7 @@
  */
 
 use std::sync::{Arc, RwLock};
-use std::path::Path;
 use anyhow::{Result, Context, bail};
-use parking_lot::Mutex;
 
 use crate::backend::{ComputeBackend, detect_backend};
 use crate::gguf::GGUFModel;
@@ -89,6 +87,7 @@ extern "C" {
         batch: *const LlamaBatch,
     ) -> i32;
 
+    #[allow(dead_code)]
     fn llama_get_logits(ctx: *mut LlamaContext) -> *const f32;
 
     fn llama_token_to_piece(
@@ -106,6 +105,7 @@ extern "C" {
 
     // 修复P1-3：添加EOS token查询
     fn llama_token_eos(model: *const LlamaModel) -> i32;
+    #[allow(dead_code)]
     fn llama_token_bos(model: *const LlamaModel) -> i32;
 }
 
@@ -153,9 +153,11 @@ struct EngineInner {
     sampler: Option<*mut LlamaSampler>,
 
     /// GGUF模型（用于元数据访问）
+    #[allow(dead_code)]
     gguf: Option<Arc<GGUFModel>>,
 
     /// 配置参数
+    #[allow(dead_code)]
     config: EngineConfig,
 
     /// 性能统计

@@ -77,8 +77,8 @@ fn main() -> Result<()> {
 
     // 模式3：Benchmark
     if args.benchmark {
-        if let Some(model_path) = args.model_path {
-            return run_benchmark(&model_path, &args);
+        if let Some(ref model_path) = args.model_path {
+            return run_benchmark(model_path, &args);
         } else {
             eprintln!("❌ --benchmark requires --model");
             std::process::exit(1);
@@ -86,8 +86,8 @@ fn main() -> Result<()> {
     }
 
     // 模式4：交互式生成
-    if let Some(model_path) = args.model_path {
-        return run_interactive(&model_path, &args);
+    if let Some(ref model_path) = args.model_path {
+        return run_interactive(model_path, &args);
     }
 
     // 默认：显示帮助
@@ -325,7 +325,7 @@ fn run_interactive(model_path: &PathBuf, args: &CliArgs) -> Result<()> {
     print!("{}", prompt);
     std::io::Write::flush(&mut std::io::stdout()).ok();
 
-    let generated = engine.generate(prompt, args.max_tokens)?;
+    let _generated = engine.generate(prompt, args.max_tokens)?;
 
     println!();
     println!("─────────────────────────────────────");

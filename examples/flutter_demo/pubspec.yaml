@@ -1,0 +1,29 @@
+# Loci Flutter 集成示例
+# 演示如何在 Flutter 应用中集成 Loci 推理引擎
+
+name: loci_flutter_demo
+description: A Flutter demo for Loci AI inference engine
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  ffi: ^2.1.0          # FFI 支持
+  path: ^1.8.3         # 路径处理
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
+
+  # 包含示例模型（需要单独下载）
+  assets:
+    - assets/models/

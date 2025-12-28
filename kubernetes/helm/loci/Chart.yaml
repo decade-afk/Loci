@@ -1,0 +1,18 @@
+# Loci Helm Chart
+apiVersion: v2
+name: loci
+description: High-performance local AI inference engine for Kubernetes
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - ai
+  - inference
+  - llm
+  - ml
+home: https://loci.dev
+sources:
+  - https://github.com/decade-afk/Loci
+maintainers:
+  - name: Loci Team
+    email: team@loci.dev

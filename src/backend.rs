@@ -70,6 +70,7 @@ impl std::fmt::Display for BackendType {
 // ==================== CUDA Backend ====================
 
 pub struct CudaBackend {
+    #[allow(dead_code)]
     device_id: i32,
     initialized: bool,
     device_name: String,
