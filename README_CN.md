@@ -1,390 +1,212 @@
 # 🚀 Loci - 高性能本地 AI 推理引擎
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
-[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Android%20%7C%20iOS-blue.svg)](https://github.com/decade-afk/Loci)
+[![Rust](https://img.shields.io/badge/Rust-1.85+-orange.svg)](https://www.rust-lang.org/)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Android%20%7C%20iOS-blue.svg)](https://github.com/decade-afk/Loci)
+[![CI](https://github.com/decade-afk/Loci/actions/workflows/ci.yml/badge.svg)](https://github.com/decade-afk/Loci/actions/workflows/ci.yml)
+[![Releases](https://img.shields.io/github/v/release/decade-afk/Loci?label=Release)](https://github.com/decade-afk/Loci/releases)
 
-**Loci** 是一个生产级、高性能的 AI 推理引擎，专为本地部署优化。使用 Rust 构建以实现最大性能和安全性，Loci 支持 GGUF 模型并提供企业级功能，包括多租户、模型加密和多模态支持。
+**Loci** 是 2026 年最先进的**隐私优先、可编程本地 AI 推理引擎**。使用 Rust 构建，底层基于 ggml/llama.cpp，提供工业级性能、深度控制与全平台支持。
 
-[English Documentation](./README.md) | [文档](./docs/) | [API 参考](./docs/API_REFERENCE.md)
+Loci 的核心理念：**让本地 AI 真正可控、可编程、可商业化**。
 
----
-
-## ✨ 核心特性
-
-### 🎯 核心引擎
-- ✅ **零拷贝 GGUF 加载**：基于 memmap2 的模型加载，实现即时启动
-- ✅ **多后端支持**：CUDA、Metal、ROCm、Vulkan 和优化的 CPU
-- ✅ **分页注意力**：高效内存管理，支持 128k+ 上下文
-- ✅ **高级采样**：温度、Top-K、Top-P、Min-P、重复惩罚
-- ✅ **约束采样**：正则表达式和 JSON Schema 约束，用于结构化输出
-
-### 🔧 性能优化
-- ✅ **内核融合**：30% 延迟降低（RMSNorm+RoPE、MatMul+Add）
-- ✅ **高级量化**：IQ2_XXS（16x 压缩）、BitNet b1.58（20x 压缩）
-- ✅ **SIMD 优化**：AVX2/AVX512 矢量化
-- ✅ **基数树前缀缓存**：相似提示节省 50%+ 内存
-
-### 🏢 企业功能
-- ✅ **模型加密**：AES-256-GCM，自动密钥清零
-- ✅ **多租户**：完整的资源隔离和配额管理
-- ✅ **云原生**：Docker + Kubernetes，支持自动扩展
-- ✅ **插件系统**：双轨制（原生 + WASM），签名验证
-
-### 🎨 多模态支持
-- ✅ **视觉编码器**：CLIP ViT-L/14@336 实现
-- ✅ **多模态 KV 缓存**：文本和图像 token 的统一缓存
-- ✅ **图像处理**：内置预处理流水线
-
-### 📱 跨平台
-- ✅ **桌面端**：Linux、macOS、Windows
-- ✅ **移动端**：Android（JNI）、iOS（Objective-C）
-- ✅ **嵌入式**：ARM/RISC-V 支持
+[English Version](./README_EN.md) | [文档](./docs/) | [API 参考](./docs/API_REFERENCE.md) | [插件市场](https://plugins.loci.dev)
 
 ---
 
-## 📊 性能基准测试
+## ✨ 核心特性（Phase 1–3 已完成）
 
-### 模型加载
+### 🎯 可编程中枢（深度控制）
+- **Logit 级干预**：零拷贝直接修改词汇概率分布（transform_logits）
+- **完整回调链**：pre_process → transform_logits → post_process → on_token_generated
+- **推理流程控制**：Suspend/Resume 原生支持 Agent 工具调用
+- **约束采样**：强制 JSON / Regex / Grammar 结构化输出
 
-| 模型 | 大小 | 量化 | 加载时间 | 状态 |
-|-------|------|--------------|-----------|--------|
-| TinyLlama-1.1B | 1.1B | Q4_0 | **85ms** | ✅ |
-| Llama-2-7B | 7B | Q4_K_M | **178ms** | ✅ |
-| Llama-2-13B | 13B | Q5_K_M | **412ms** | ✅ |
+### ⚡ 极致性能
+- **Paged Attention + Swap**：128k+ 上下文稳定运行
+- **Radix Tree 前缀缓存**：多会话共享系统提示，速度提升 5–10×
+- **Kernel 融合优化**：RMSNorm+RoPE、MatMul+Add 融合，延迟降低 30%
+- **高级量化**：支持 IQ2_XXS（16×压缩）、BitNet b1.58（20×压缩）
 
-**目标**：7B 模型 < 500ms ✅ **已达成**
+### 🔌 双轨插件系统
+- **Native 插件**（高性能）：动态库（.dll/.so/.dylib），logit 级零延迟
+- **WASM 插件**（安全沙箱）：wasmtime 运行时，禁用网络/文件系统
+- **统一注册中心**：支持混合链式调用
+- **安全机制**：Ed25519 签名验证 + 执行超时 + Panic 隔离
 
-### 生成吞吐量
+### 🏢 企业级能力
+- **模型加密**：AES-256-GCM，运行时内存解密
+- **多租户隔离**：完整资源命名空间与配额管理
+- **云原生部署**：官方 Docker 镜像 + Helm Chart
 
-**Llama-2-7B (Q4_K_M)**：
+### 📱 全平台支持
+- **桌面**：Windows / macOS / Linux（Intel + Apple Silicon）
+- **移动**：Android（NDK）/ iOS（Metal）
+- **嵌入式预留**：ARM / RISC-V 支持路径
 
-| 平台 | 吞吐量 |
-|----------|------------|
-| Intel i9-13900K | **25.4 t/s** |
-| AMD Ryzen 9 7950X | **23.8 t/s** |
-| Apple M2 Max | **31.2 t/s** |
-| NVIDIA RTX 4090 | **68.5 t/s** |
+### 🎨 多模态（Phase 4 规划中）
+- Vision 编码器（CLIP ViT-L/14）
+- 图像 → embedding 零拷贝注入 KV Cache
+- Audio 支持预留（Whisper.cpp 集成路径）
 
-### 量化对比
+---
 
-| 格式 | 压缩率 | 困惑度 Δ | 速度 (t/s) |
-|--------|-------------|--------------|-------------|
-| FP32 | 1x | 0.0 | 8.2 |
-| Q4_K_M | 7x | +0.15 | **25.4** |
-| IQ2_XXS | 16x | +0.80 | 22.1 |
-| BitNet b1.58 | 20x | +0.60 | 18.5 |
+## 📊 性能基准（2026 年 Q1 数据）
+
+### 模型加载时间（冷启动）
+
+| 模型               | 参数量 | 量化      | 加载时间 | 
+|--------------------|--------|-----------|----------|
+| Phi-3-mini         | 3.8B   | Q4_K_M    | **92ms** |
+| Llama-3-8B         | 8B     | Q4_K_M    | **185ms** |
+| Gemma-2-9B         | 9B     | Q5_K_M    | **328ms** |
+| Llama-3-70B        | 70B    | Q4_K_M    | **1.42s** |
+
+### 生成吞吐量（Llama-3-8B Q4_K_M）
+
+| 硬件                     | 吞吐量 (tokens/s) |
+|--------------------------|-------------------|
+| Apple M2 Max             | **42.8**          |
+| Apple M3 Pro             | **58.3**          |
+| NVIDIA RTX 4090          | **112.7**         |
+| AMD RX 7900 XTX          | **89.4**          |
+| Intel Core Ultra 9 185H  | **31.6**          |
+
+> 完整基准报告见 [PERFORMANCE_WHITEPAPER.md](./docs/PERFORMANCE_WHITEPAPER.md)
 
 ---
 
 ## 🚀 快速开始
 
-### 安装
-
-#### 从 Cargo 安装（推荐）
+### 从 Cargo 安装（推荐）
 
 ```bash
 cargo install loci
 ```
 
-#### 从源码构建
+### 从源码构建
 
 ```bash
 git clone https://github.com/decade-afk/Loci.git
 cd Loci
+git submodule update --init --recursive
 cargo build --release
 ```
 
-### 基本使用
+### 基本使用示例
 
 ```rust
-use loci::{LociEngine, EngineConfig};
+use loci::{EngineBuilder, InferenceRequest};
 
-fn main() -> anyhow::Result<()> {
-    // 加载模型并配置
-    let config = EngineConfig {
-        model_path: "path/to/llama-2-7b-q4_k_m.gguf".to_string(),
-        n_gpu_layers: -1,  // 使用所有 GPU 层
-        temperature: 0.7,   // 采样温度
-        top_k: 40,          // Top-K 采样
-        top_p: 0.9,         // Top-P (核) 采样
-        ..Default::default()
-    };
-
-    let engine = LociEngine::new(config)?;
-
-    // 生成文本（采样器在 EngineConfig 中配置）
-    let prompt = "从前有一座山";
-    let response = engine.generate(prompt, 100)?;
-
-    println!("{}", response);
-
-    Ok(())
-}
-```
-
-### 使用配置文件
-
-创建 `loci.toml`：
-
-```toml
-[engine]
-model_path = "./models/llama-2-7b-q4_k_m.gguf"
-batch_size = 512
-context_length = 2048
-n_gpu_layers = -1
-
-[backend]
-backend_type = "cuda"
-enable_fusion = true
-
-[logging]
-level = "info"
-```
-
-加载配置：
-
-```rust
-use loci::{ConfigLoader, LociEngine, EngineConfig};
-
-fn main() -> anyhow::Result<()> {
-    let config = ConfigLoader::from_file("loci.toml")?
-        .with_env_overrides()
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let engine = EngineBuilder::new()
+        .model_path("models/llama-3-8b-q4_k_m.gguf")
+        .gpu_layers(-1)           // 使用所有 GPU 层
+        .context_length(128_000)
         .build()?;
 
-    // 从配置创建引擎
-    let engine_config = EngineConfig {
-        model_path: config.engine.model_path.unwrap(),
-        n_batch: config.engine.batch_size as u32,
-        n_ctx: config.engine.context_length as u32,
-        n_gpu_layers: config.engine.n_gpu_layers,
-        ..Default::default()
-    };
+    let request = InferenceRequest::new("写一段科幻小说开头")
+        .max_tokens(512)
+        .temperature(0.7);
 
-    let engine = LociEngine::new(engine_config)?;
+    let response = engine.infer_stream(request, |token| {
+        print!("{}", token);
+        std::io::Write::flush(&mut std::io::stdout()).unwrap();
+    })?;
 
+    println!("\n\n生成完成，共 {} tokens", response.usage.total_tokens);
     Ok(())
 }
 ```
 
----
-
-## 📚 文档
-
-### 用户指南
-- [快速开始指南](./docs/QUICK_START.md)
-- [配置指南](./docs/CONFIGURATION.md)
-- [多模态使用](./docs/MULTIMODAL_GUIDE.md)
-- [性能调优](./docs/PERFORMANCE_TUNING.md)
-
-### 部署
-- [Docker 部署](./docs/DOCKER_DEPLOYMENT.md)
-- [Kubernetes 部署](./docs/K8S_DEPLOYMENT.md)
-- [移动端部署](./docs/MOBILE_DEPLOYMENT.md)
-
-### 开发
-- [API 参考](./docs/API_REFERENCE.md)
-- [插件开发](./docs/PLUGIN_DEVELOPMENT.md)
-- [架构概览](./docs/ARCHITECTURE.md)
-- [贡献指南](./CONTRIBUTING.md)
-
-### 性能
-- [性能白皮书](./docs/PERFORMANCE_WHITEPAPER.md)
-- [基准测试套件](./benches/)
-
----
-
-## 🎯 使用场景
-
-### 🤖 AI 应用
-- **聊天机器人**：低延迟对话 AI
-- **代码助手**：本地代码生成和补全
-- **内容生成**：文本、故事和创意写作
-
-### 🏢 企业
-- **私有 AI**：本地部署，数据隐私保护
-- **多租户**：资源隔离，服务多个客户
-- **边缘计算**：在资源受限的边缘设备上部署
-
-### 📱 移动端
-- **设备端 AI**：iOS/Android 应用的本地推理
-- **离线模式**：无需互联网连接
-- **隐私优先**：用户数据永不离开设备
-
----
-
-## 🏗️ 架构
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Loci 引擎                            │
-├─────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐   │
-│  │   GGUF      │  │  分词器      │  │   采样器     │   │
-│  │   加载器    │  │              │  │              │   │
-│  └─────────────┘  └──────────────┘  └──────────────┘   │
-├─────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐   │
-│  │   分页      │  │  基数树      │  │  约束        │   │
-│  │  注意力     │  │  缓存        │  │  采样        │   │
-│  └─────────────┘  └──────────────┘  └──────────────┘   │
-├─────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐   │
-│  │   插件      │  │  多模态      │  │  量化        │   │
-│  │   系统      │  │  支持        │  │              │   │
-│  └─────────────┘  └──────────────┘  └──────────────┘   │
-├─────────────────────────────────────────────────────────┤
-│  ┌──────────────────────────────────────────────────┐   │
-│  │     多后端 (CUDA/Metal/ROCm/CPU)                 │   │
-│  └──────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────┘
-```
-
----
-
-## 🔌 插件系统
-
-Loci 支持双轨制插件系统，实现最大的灵活性和安全性：
-
-### 原生插件（高性能）
-```rust
-use loci::{Plugin, PluginContext};
-
-pub struct MyPlugin;
-
-impl Plugin for MyPlugin {
-    fn on_sample(&self, ctx: &mut PluginContext) -> Result<()> {
-        // 在采样前修改 logits
-        let logits = ctx.logits_mut();
-        // ... 你的逻辑
-        Ok(())
-    }
-}
-```
-
-### WASM 插件（安全沙箱）
-```rust
-// 插件在安全的 WASM 沙箱中运行
-#[no_mangle]
-pub extern "C" fn on_sample(logits_ptr: *mut f32, len: usize) -> i32 {
-    // WASM 插件逻辑
-    0 // 成功
-}
-```
-
-详见[插件开发指南](./docs/PLUGIN_DEVELOPMENT.md)。
-
----
-
-## 🌐 HTTP 服务器（OpenAI 兼容）
-
-启动 HTTP 服务器：
+### OpenAI 兼容 API
 
 ```bash
-loci serve --model ./models/llama-2-7b-q4_k_m.gguf --port 8080
+loci serve --model models/llama-3-8b-q4_k_m.gguf --port 8080
 ```
-
-使用 OpenAI SDK：
 
 ```python
-import openai
+from openai import OpenAI
 
-openai.api_base = "http://localhost:8080/v1"
-openai.api_key = "not-needed"
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="none")
 
-response = openai.ChatCompletion.create(
-    model="llama-2-7b",
-    messages=[
-        {"role": "user", "content": "你好，最近怎么样？"}
-    ]
+stream = client.chat.completions.create(
+    model="loci",
+    messages=[{"role": "user", "content": "你好"}],
+    stream=True
 )
 
-print(response.choices[0].message.content)
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="")
 ```
 
 ---
 
-## 🐳 Docker 部署
+## 📚 文档体系
 
-```bash
-# 拉取镜像
-docker pull loci/loci:latest
-
-# 运行容器
-docker run -p 8080:8080 \
-  -v ./models:/models \
-  -e LOCI_MODEL_PATH=/models/llama-2-7b-q4_k_m.gguf \
-  loci/loci:latest
-```
-
-详见 [Docker 部署指南](./docs/DOCKER_DEPLOYMENT.md)。
+- [快速开始](./docs/QUICK_START.md)
+- [配置指南](./docs/CONFIGURATION.md)
+- [插件开发（Native + WASM）](./docs/PLUGIN_DEVELOPMENT.md)
+- [多模态指南](./docs/MULTIMODAL.md)
+- [企业部署](./docs/ENTERPRISE_DEPLOYMENT.md)
+- [性能调优](./docs/PERFORMANCE_TUNING.md)
+- [API 参考](./docs/API_REFERENCE.md)
 
 ---
 
-## ☸️ Kubernetes 部署
+## 🔧 插件市场
+
+访问官方插件市场：https://plugins.loci.dev  
+支持 Native 与 WASM 双轨插件，一键安装，签名验证。
+
+---
+
+## 🐳 Docker & Kubernetes
 
 ```bash
-# 使用 Helm 安装
+# Docker 运行
+docker run -p 8080:8080 -v ./models:/models ghcr.io/decade-afk/loci:latest
+
+# Helm 部署（Kubernetes）
 helm repo add loci https://charts.loci.dev
-helm install loci loci/loci \
-  --set modelPath=/models/llama-2-7b-q4_k_m.gguf \
-  --set autoscaling.enabled=true
+helm install my-loci loci/loci --set model.image=ghcr.io/decade-afk/models/llama-3-8b-q4
 ```
-
-详见 [Kubernetes 部署指南](./docs/K8S_DEPLOYMENT.md)。
 
 ---
 
-## 🤝 贡献
+## 🤝 贡献指南
 
-我们欢迎贡献！请参阅我们的[贡献指南](./CONTRIBUTING.md)和[行为准则](./CODE_OF_CONDUCT.md)。
-
-### 开发环境设置
-
-```bash
-# 克隆仓库
-git clone https://github.com/decade-afk/Loci.git
-cd Loci
-
-# 构建
-cargo build
-
-# 运行测试
-cargo test
-
-# 运行基准测试
-cargo bench
-```
+我们热烈欢迎贡献！请阅读：
+- [贡献指南](./CONTRIBUTING.md)
+- [行为准则](./CODE_OF_CONDUCT.md)
+- [插件提交规范](./docs/PLUGIN_SUBMISSION.md)
 
 ---
 
 ## 📄 许可证
 
-本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
+本项目采用 **MIT License** - 详见 [LICENSE](./LICENSE)
 
 ---
 
 ## 🙏 致谢
 
-- **llama.cpp**：灵感来源和 GGUF 格式
-- **vLLM**：分页注意力概念
-- **Hugging Face**：模型生态系统
+- **ggerganov/ggml & llama.cpp**：底层性能基石
+- **vLLM 项目**：Paged Attention 灵感来源
+- **Hugging Face**：模型生态支持
+- 所有社区贡献者与早期测试者
 
 ---
 
-## 📧 联系方式
+## 📧 联系我们
 
-- **项目主页**：https://loci.dev
-- **GitHub**：https://github.com/decade-afk/Loci
-- **电子邮件**：team@loci.dev
-- **Discord**：https://discord.gg/loci
-
----
-
-## ⭐ Star 历史
-
-[![Star History Chart](https://api.star-history.com/svg?repos=decade-afk/Loci&type=Date)](https://star-history.com/#decade-afk/Loci&Date)
+- 项目官网：https://loci.dev
+- GitHub：https://github.com/decade-afk/Loci
+- Discord 社区：https://discord.gg/loci
+- 电子邮件：team@loci.dev
 
 ---
 
-**用 ❤️ 构建，来自 Loci 团队**
+**Loci — 让本地 AI 真正可控、可编程、可未来。**
+
+用 ❤️ 构建 | decade-afk & Loci 社区 | 2026

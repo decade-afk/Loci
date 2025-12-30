@@ -333,9 +333,11 @@ impl LociEngine {
         })
     }
 
-    /// Phase 1核心方法：文本生成
+    /// Phase 1核心方法：文本生成（阻塞式，返回完整结果）
     ///
     /// 实现完整的推理循环：Tokenize -> Forward -> Sample -> Detokenize
+    ///
+    /// **注意**: 此方法会阻塞直到生成完成。如需流式输出，请使用 `generate_stream`。
     pub fn generate(&self, prompt: &str, max_tokens: usize) -> Result<String> {
         let mut inner = self.inner.write().unwrap();
 
@@ -491,6 +493,212 @@ impl LociEngine {
                  if inner.stats.eval_tokens_per_second() > 10.0 { "🎯" } else { "⚠️" });
 
         Ok(generated_text)
+    }
+
+    /// Generate text with streaming token-level callbacks.
+    ///
+    /// Implements the complete inference loop, invoking the callback
+    /// immediately for each generated token.
+    ///
+    /// # Parameters
+    /// - `prompt`: Input prompt text
+    /// - `max_tokens`: Maximum number of tokens to generate
+    /// - `callback`: Streaming callback (implements `StreamCallback` trait)
+    ///
+    /// # Returns
+    /// - `StreamStats`: Generation statistics
+    ///
+    /// # Example
+    /// ```no_run
+    /// use loci::{LociEngine, EngineConfig, ConsoleCallback};
+    ///
+    /// let engine = LociEngine::new(EngineConfig::default())?;
+    /// let stats = engine.generate_stream(
+    ///     "Hello",
+    ///     50,
+    ///     &mut ConsoleCallback::new(true)
+    /// )?;
+    /// println!("Generated {} tokens", stats.generated_tokens);
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    pub fn generate_stream<C>(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        callback: &mut C,
+    ) -> Result<crate::streaming::StreamStats>
+    where
+        C: crate::streaming::StreamCallback,
+    {
+        use crate::streaming::{StreamStats, StreamControlFlow, safe_callback_invoke};
+
+        let mut inner = self.inner.write().unwrap();
+
+        let context = inner.context.ok_or_else(|| anyhow::anyhow!("Context not initialized"))?;
+        let model = inner.model.ok_or_else(|| anyhow::anyhow!("Model not initialized"))?;
+        let sampler = inner.sampler.ok_or_else(|| anyhow::anyhow!("Sampler not initialized"))?;
+
+        eprintln!("🔮 Generating (stream, max_tokens={})...", max_tokens);
+
+        let eos_token = unsafe { llama_token_eos(model) };
+
+        let mut stats = StreamStats::new();
+        let total_start = std::time::Instant::now();
+
+        // Step 1: Tokenize prompt
+        let prompt_c = std::ffi::CString::new(prompt)?;
+        let mut tokens = vec![0i32; 4096];
+
+        let n_tokens = unsafe {
+            llama_tokenize(
+                context,
+                prompt_c.as_ptr(),
+                prompt.len() as i32,
+                tokens.as_mut_ptr(),
+                tokens.len() as i32,
+                true,
+                true,
+            )
+        };
+
+        if n_tokens < 0 {
+            bail!("Tokenization failed");
+        }
+
+        tokens.truncate(n_tokens as usize);
+        stats.prompt_tokens = n_tokens as usize;
+        eprintln!("   Prompt tokens: {}", n_tokens);
+
+        // Step 2: Evaluate prompt
+        let prompt_eval_start = std::time::Instant::now();
+
+        let mut pos_data: Vec<i32> = (0..tokens.len() as i32).collect();
+        let mut seq_id_data = vec![1i32; tokens.len()];
+        let mut logits_data = vec![0i8; tokens.len()];
+        logits_data[tokens.len() - 1] = 1;
+
+        let batch = LlamaBatch {
+            n_tokens: tokens.len() as i32,
+            tokens: tokens.as_mut_ptr(),
+            embd: std::ptr::null_mut(),
+            pos: pos_data.as_mut_ptr(),
+            n_seq_id: seq_id_data.as_mut_ptr(),
+            seq_id: std::ptr::null_mut(),
+            logits: logits_data.as_mut_ptr(),
+        };
+
+        let ret = unsafe { llama_decode(context, &batch) };
+        if ret != 0 {
+            let error = anyhow::anyhow!("Prompt evaluation failed: llama_decode returned {}", ret);
+            callback.on_error(&error);
+            return Err(error);
+        }
+
+        let prompt_eval_time = prompt_eval_start.elapsed();
+        stats.prompt_time_ms = prompt_eval_time.as_millis() as u64;
+
+        eprintln!("   ✅ Prompt evaluated: {:.2} tokens/s",
+                 (stats.prompt_tokens as f64 / stats.prompt_time_ms as f64) * 1000.0);
+
+        // Step 3: Streaming generation loop
+        let eval_start = std::time::Instant::now();
+        let mut current_pos = tokens.len() as i32;
+
+        // Pre-allocate buffers to avoid allocations in the hot loop
+        let mut next_tokens_buf = vec![0i32];
+        let mut next_pos_buf = vec![0i32];
+        let mut next_seq_id_buf = vec![1i32];
+        let mut next_logits_buf = vec![1i8];
+
+        for i in 0..max_tokens {
+            let next_token = unsafe {
+                llama_sampler_sample(sampler, context, -1)
+            };
+
+            if next_token == eos_token {
+                eprintln!("   Reached EOS (token={})", eos_token);
+                break;
+            }
+
+            // Detokenize the sampled token
+            let mut piece_buf = vec![0i8; 256];
+            let piece_len = unsafe {
+                llama_token_to_piece(
+                    context,
+                    next_token,
+                    piece_buf.as_mut_ptr(),
+                    piece_buf.len() as i32,
+                    false,
+                )
+            };
+
+            if piece_len > 0 {
+                let piece_bytes = unsafe {
+                    std::slice::from_raw_parts(piece_buf.as_ptr() as *const u8, piece_len as usize)
+                };
+
+                match std::str::from_utf8(piece_bytes) {
+                    Ok(piece) => {
+                        match safe_callback_invoke(callback, piece, next_token, i) {
+                            Ok(StreamControlFlow::Continue) => {}
+                            Ok(StreamControlFlow::Stop) => {
+                                eprintln!("   ⏹️  User requested stop at token {}", i);
+                                break;
+                            }
+                            Err(e) => {
+                                eprintln!("   ⚠️  Callback error: {}", e);
+                                callback.on_error(&e);
+                                return Err(e);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("⚠️  Invalid UTF-8 in token {}", next_token);
+                    }
+                }
+            }
+
+            // Forward pass for next iteration
+            next_tokens_buf[0] = next_token;
+            next_pos_buf[0] = current_pos;
+
+            let next_batch = LlamaBatch {
+                n_tokens: 1,
+                tokens: next_tokens_buf.as_mut_ptr(),
+                embd: std::ptr::null_mut(),
+                pos: next_pos_buf.as_mut_ptr(),
+                n_seq_id: next_seq_id_buf.as_mut_ptr(),
+                seq_id: std::ptr::null_mut(),
+                logits: next_logits_buf.as_mut_ptr(),
+            };
+
+            let ret = unsafe { llama_decode(context, &next_batch) };
+            if ret != 0 {
+                eprintln!("   ⚠️  Decode failed for token {}, stopping generation", i);
+                break;
+            }
+
+            current_pos += 1;
+            stats.generated_tokens += 1;
+        }
+
+        let eval_time = eval_start.elapsed();
+        stats.generation_time_ms = eval_time.as_millis() as u64;
+        stats.total_tokens = stats.prompt_tokens + stats.generated_tokens;
+        stats.total_time_ms = total_start.elapsed().as_millis() as u64;
+        stats.calculate_tps();
+
+        callback.on_complete(&stats);
+
+        eprintln!("   ✅ Generated {} tokens: {:.2} tokens/s {}",
+                 stats.generated_tokens,
+                 stats.tokens_per_second,
+                 if stats.tokens_per_second > 10.0 { "🎯" } else { "⚠️" });
+
+        inner.stats.eval_count = stats.generated_tokens as u64;
+        inner.stats.eval_time_ms = stats.generation_time_ms;
+
+        Ok(stats)
     }
 
     /// 获取性能统计

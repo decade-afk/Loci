@@ -16,6 +16,9 @@ Cargo.lock
 *.a
 *.lib
 
+# 自动生成的 C 头文件（由 cbindgen 生成）
+loci.h
+
 # 绑定生成（自动生成）
 bindings/dart/bridge_generated.dart
 

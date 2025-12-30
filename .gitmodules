@@ -1,0 +1,4 @@
+[submodule "deps/llama.cpp"]
+	path = deps/llama.cpp
+	url = https://github.com/decade-afk/llama.cpp.git
+	branch = master

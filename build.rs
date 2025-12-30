@@ -24,6 +24,9 @@ fn main() {
 
     // 配置 llama.cpp 编译选项（所有平台通用）
     configure_llama_cpp(&target);
+
+    // 生成 C 头文件（loci.h）
+    generate_c_header();
 }
 
 /// Android NDK 工具链配置
@@ -261,12 +264,25 @@ fn configure_llama_cpp(target: &str) {
     // 执行构建
     let dst = cmake_config.build();
 
-    // 添加库搜索路径
-    println!("cargo:rustc-link-search=native={}/lib", dst.display());
-    println!("cargo:rustc-link-search=native={}/lib64", dst.display());
+    // 添加多个可能的库搜索路径（llama.cpp 的目录结构可能因版本而异）
+    let possible_lib_dirs = vec![
+        dst.join("lib"),
+        dst.join("lib64"),
+        dst.join("build/ggml/src"),
+        dst.join("build/src"),
+        dst.join("ggml/src"),
+        dst.join("src"),
+        dst.join("bin"),  // Windows 可能将 DLL 放在 bin 目录
+    ];
 
-    // 添加ggml库搜索路径
-    println!("cargo:rustc-link-search=native={}/build/ggml/src", dst.display());
+    for lib_dir in &possible_lib_dirs {
+        if lib_dir.exists() {
+            println!("cargo:rustc-link-search=native={}", lib_dir.display());
+            println!("cargo:warning=✅ Found library directory: {}", lib_dir.display());
+        } else {
+            println!("cargo:warning=⚠️ Library directory not found: {}", lib_dir.display());
+        }
+    }
 
     // 链接 ggml 和 llama 静态库（注意顺序：llama依赖ggml，所以llama在前）
     println!("cargo:rustc-link-lib=static=llama");
@@ -292,5 +308,88 @@ fn configure_llama_cpp(target: &str) {
     let opt_level = env::var("OPT_LEVEL").unwrap_or_else(|_| "0".to_string());
     if opt_level == "3" || opt_level == "z" || opt_level == "s" {
         println!("cargo:warning=Building with optimization level: {}", opt_level);
+    }
+}
+
+/// 生成 C 头文件（loci.h）
+///
+/// 使用 cbindgen 从 Rust FFI 代码生成 C/C++ 兼容的头文件
+fn generate_c_header() {
+    let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let header_path = PathBuf::from(&crate_dir).join("loci.h");
+
+    println!("cargo:warning=Generating C header file at: {}", header_path.display());
+    println!("cargo:rerun-if-changed=src/ffi.rs");
+    println!("cargo:rerun-if-changed=src/mobile_ffi.rs");
+
+    // 使用 cbindgen 生成头文件
+    match cbindgen::Builder::new()
+        .with_crate(crate_dir)
+        .with_language(cbindgen::Language::C)
+        .with_include_guard("LOCI_H")
+        .with_documentation(true)
+        .with_parse_deps(true)
+        .with_parse_include(&["loci"])
+        .generate()
+    {
+        Ok(bindings) => {
+            bindings.write_to_file(&header_path);
+            println!("cargo:warning=✅ C header file generated successfully: {}", header_path.display());
+        }
+        Err(e) => {
+            println!("cargo:warning=⚠️ Failed to generate C header: {}", e);
+            println!("cargo:warning=Creating fallback header file...");
+
+            // 创建一个基本的头文件作为后备
+            create_fallback_header(&header_path);
+        }
+    }
+}
+
+/// 创建后备的 C 头文件（当 cbindgen 失败时）
+fn create_fallback_header(path: &PathBuf) {
+    use std::fs::File;
+    use std::io::Write;
+
+    let fallback_content = r#"#ifndef LOCI_H
+#define LOCI_H
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Loci AI Engine C API
+// This is a fallback header. Please run cbindgen to generate the full API.
+
+// Error codes
+#define LOCI_OK 0
+#define LOCI_ERR_NULL_POINTER -1
+#define LOCI_ERR_INVALID_ARG -2
+#define LOCI_ERR_GENERATION_FAILED -3
+
+// Opaque handle types
+typedef void* LociEngine;
+typedef void* LociSession;
+
+// Basic functions (placeholders - see full API documentation)
+// int32_t loci_engine_new(const char* model_path, LociEngine* out_engine);
+// int32_t loci_engine_free(LociEngine engine);
+// int32_t loci_generate(LociEngine engine, const char* prompt, int32_t max_tokens, char* out_text, int32_t out_len);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // LOCI_H
+"#;
+
+    if let Ok(mut file) = File::create(path) {
+        let _ = file.write_all(fallback_content.as_bytes());
+        println!("cargo:warning=✅ Fallback header created at: {}", path.display());
+    } else {
+        println!("cargo:warning=❌ Failed to create fallback header");
     }
 }

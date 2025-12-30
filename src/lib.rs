@@ -217,6 +217,17 @@ pub mod kernel_fusion;
 /// - 配置热重载
 pub mod config;
 
+/// [Phase 2 Enhancement] 流式输出系统
+///
+/// 核心特性：
+/// - 统一的流式回调接口（StreamCallback trait）
+/// - 控制流管理（Continue/Stop）
+/// - Token 批处理支持
+/// - 错误处理和 Panic 捕获
+/// - 性能统计（StreamStats）
+/// - 零拷贝设计
+pub mod streaming;
+
 // ==================== 重导出 ====================
 
 pub use backend::{
@@ -403,6 +414,18 @@ pub use config::{
     LoggingSettings,
     ServerSettings,
     ConfigLoader,
+};
+
+pub use streaming::{
+    StreamCallback,
+    StreamControlFlow,
+    StreamToken,
+    StreamStats,
+    ClosureCallback,
+    BatchedCallback,
+    ConsoleCallback,
+    AccumulatorCallback,
+    safe_callback_invoke,
 };
 
 // ==================== 版本信息 ====================

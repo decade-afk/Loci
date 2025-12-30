@@ -40,19 +40,20 @@ pub const LOCI_ERR_INIT_FAILED: c_int = -3;
 pub const LOCI_ERR_GENERATION_FAILED: c_int = -4;
 pub const LOCI_ERR_MODEL_NOT_FOUND: c_int = -5;
 pub const LOCI_ERR_OUT_OF_MEMORY: c_int = -6;
+pub const LOCI_ERR_INVALID_ARG: c_int = -7;
 
-// ==================== 流式生成回调 ====================
+// ==================== Streaming Callback ====================
 
-/// 流式生成回调函数类型（C 兼容）
+/// Streaming generation callback function type (C-compatible).
 ///
-/// 参数：
-/// - user_data: 用户自定义数据指针
-/// - token: 当前生成的 token 字符串（UTF-8）
-/// - token_len: token 长度
+/// # Parameters
+/// - `user_data`: User-defined data pointer
+/// - `token`: Current generated token string (UTF-8)
+/// - `token_len`: Token length
 ///
-/// 返回值：
-/// - 1: 继续生成
-/// - 0: 停止生成
+/// # Returns
+/// - `1`: Continue generation
+/// - `0`: Stop generation
 pub type StreamCallback = unsafe extern "C" fn(
     user_data: *mut c_void,
     token: *const c_char,
@@ -171,7 +172,7 @@ pub unsafe extern "C" fn loci_generate(
 
     let handle = engine as usize;
 
-    // 获取引擎实例
+    // Get engine instance
     let registry = ENGINE_REGISTRY.lock().unwrap();
     let engine_arc = match registry.get(&handle) {
         Some(e) => e.clone(),
@@ -179,7 +180,7 @@ pub unsafe extern "C" fn loci_generate(
     };
     drop(registry);
 
-    // 转换输入
+    // Convert input
     let prompt_str = match CStr::from_ptr(prompt).to_str() {
         Ok(s) => s,
         Err(_) => return LOCI_ERR_NULL_POINTER,
@@ -196,8 +197,17 @@ pub unsafe extern "C" fn loci_generate(
     };
 
     // 写入输出缓冲区
+    // 安全检查：防止缓冲区溢出
+    if out_len <= 0 {
+        eprintln!("[loci_generate] ERROR: Invalid buffer size: {}", out_len);
+        return LOCI_ERR_INVALID_ARG;
+    }
+
     let result_bytes = result.as_bytes();
-    let copy_len = std::cmp::min(result_bytes.len(), (out_len - 1) as usize);
+    // 确保有空间存放 null terminator
+    let available_space = (out_len - 1) as usize;
+    let copy_len = std::cmp::min(result_bytes.len(), available_space);
+
     std::ptr::copy_nonoverlapping(result_bytes.as_ptr(), out_text as *mut u8, copy_len);
     *out_text.add(copy_len) = 0; // 添加空字符终止符
 
@@ -206,16 +216,21 @@ pub unsafe extern "C" fn loci_generate(
 
 /// 流式生成文本（回调式）
 ///
-/// # 参数
-/// - engine: 引擎句柄
-/// - prompt: 输入提示词
-/// - max_tokens: 最大生成 token 数
-/// - callback: 流式回调函数
-/// - user_data: 传递给回调的用户数据
+/// # Parameters
+/// - `engine`: Engine handle
+/// - `prompt`: Input prompt text
+/// - `max_tokens`: Maximum number of tokens to generate
+/// - `callback`: Streaming callback function
+/// - `user_data`: User data passed to callback
 ///
-/// # 返回值
-/// - LOCI_OK: 成功
-/// - 错误码: 失败
+/// # Returns
+/// - `LOCI_OK`: Success
+/// - Error code: Failure
+///
+/// # Features
+/// - True token-level streaming (callback invoked for each token)
+/// - Supports user interruption (callback returns 0)
+/// - Zero-copy design
 #[no_mangle]
 pub unsafe extern "C" fn loci_generate_stream(
     engine: *mut c_void,
@@ -230,7 +245,7 @@ pub unsafe extern "C" fn loci_generate_stream(
 
     let handle = engine as usize;
 
-    // 获取引擎实例
+    // Get engine instance
     let registry = ENGINE_REGISTRY.lock().unwrap();
     let engine_arc = match registry.get(&handle) {
         Some(e) => e.clone(),
@@ -238,44 +253,60 @@ pub unsafe extern "C" fn loci_generate_stream(
     };
     drop(registry);
 
-    // 转换输入
+    // Convert input
     let prompt_str = match CStr::from_ptr(prompt).to_str() {
         Ok(s) => s,
         Err(_) => return LOCI_ERR_NULL_POINTER,
     };
 
-    // 流式生成（使用回调）
-    let engine = engine_arc.lock().unwrap();
+    // Create C callback adapter
+    struct CFfiCallback {
+        callback: StreamCallback,
+        user_data: *mut c_void,
+    }
 
-    // TODO: 实现真正的流式生成（需要引擎支持）
-    // 当前简化实现：先生成完整文本，再逐 token 回调
-    let result = match engine.generate(prompt_str, max_tokens as usize) {
-        Ok(text) => text,
-        Err(e) => {
-            eprintln!("[loci_generate_stream] ERROR: {}", e);
-            return LOCI_ERR_GENERATION_FAILED;
-        }
-    };
+    // Manually implement Send (caller guarantees thread safety)
+    unsafe impl Send for CFfiCallback {}
 
-    // 逐 token 回调（简化：按空格分割）
-    for token in result.split_whitespace() {
-        let token_cstr = match CString::new(token) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
+    impl crate::streaming::StreamCallback for CFfiCallback {
+        fn on_token(&mut self, token: &str, _token_id: i32, _position: usize) -> crate::streaming::StreamControlFlow {
+            // Convert to C string
+            let token_cstr = match CString::new(token) {
+                Ok(s) => s,
+                Err(_) => return crate::streaming::StreamControlFlow::Stop,
+            };
 
-        let should_continue = callback(
-            user_data,
-            token_cstr.as_ptr(),
-            token.len() as c_int,
-        );
+            // Invoke C callback
+            let should_continue = unsafe {
+                (self.callback)(
+                    self.user_data,
+                    token_cstr.as_ptr(),
+                    token.len() as c_int,
+                )
+            };
 
-        if should_continue == 0 {
-            break; // 用户请求停止
+            if should_continue == 0 {
+                crate::streaming::StreamControlFlow::Stop
+            } else {
+                crate::streaming::StreamControlFlow::Continue
+            }
         }
     }
 
-    LOCI_OK
+    // Execute streaming generation
+    let engine = engine_arc.lock().unwrap();
+    let mut ffi_callback = CFfiCallback {
+        callback,
+        user_data,
+    };
+
+    match engine.generate_stream(prompt_str, max_tokens as usize, &mut ffi_callback) {
+        Ok(_stats) => LOCI_OK,
+        Err(e) => {
+            eprintln!("[loci_generate_stream] ERROR: {}", e);
+            LOCI_ERR_GENERATION_FAILED
+        }
+    }
 }
 
 /// 销毁引擎

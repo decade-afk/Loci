@@ -107,15 +107,32 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake
+          sudo apt-get install -y build-essential cmake llvm-dev libclang-dev clang
+
+      - name: Set LIBCLANG_PATH (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: echo "LIBCLANG_PATH=/usr/lib/llvm-14/lib" >> $GITHUB_ENV
 
       # macOS: Install build dependencies
       - name: Install dependencies (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          brew install cmake
+          brew install cmake llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
 
-      # Windows: Set up MSVC
+      # Windows: Install LLVM and set up MSVC
+      - name: Install LLVM (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "19.1"
+          directory: ${{ runner.temp }}/llvm
+
+      - name: Set LIBCLANG_PATH (Windows)
+        if: matrix.os == 'windows-latest'
+        run: echo "LIBCLANG_PATH=${{ runner.temp }}/llvm/bin" >> $GITHUB_ENV
+        shell: bash
+
       - name: Set up MSVC (Windows)
         if: matrix.os == 'windows-latest'
         uses: ilammy/msvc-dev-cmd@v1
@@ -168,15 +185,32 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake
+          sudo apt-get install -y build-essential cmake llvm-dev libclang-dev clang
+
+      - name: Set LIBCLANG_PATH (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: echo "LIBCLANG_PATH=/usr/lib/llvm-14/lib" >> $GITHUB_ENV
 
       # macOS: Install build dependencies
       - name: Install dependencies (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          brew install cmake
+          brew install cmake llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
 
-      # Windows: Set up MSVC
+      # Windows: Install LLVM and set up MSVC
+      - name: Install LLVM (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "19.1"
+          directory: ${{ runner.temp }}/llvm
+
+      - name: Set LIBCLANG_PATH (Windows)
+        if: matrix.os == 'windows-latest'
+        run: echo "LIBCLANG_PATH=${{ runner.temp }}/llvm/bin" >> $GITHUB_ENV
+        shell: bash
+
       - name: Set up MSVC (Windows)
         if: matrix.os == 'windows-latest'
         uses: ilammy/msvc-dev-cmd@v1
@@ -224,7 +258,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake
+          sudo apt-get install -y build-essential cmake llvm-dev libclang-dev clang
+
+      - name: Set LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=/usr/lib/llvm-14/lib" >> $GITHUB_ENV
 
       - name: Build benchmarks
         run: cargo build --benches --all-features
@@ -269,7 +306,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake
+          sudo apt-get install -y build-essential cmake llvm-dev libclang-dev clang
+
+      - name: Set LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=/usr/lib/llvm-14/lib" >> $GITHUB_ENV
 
       - name: Build documentation
         run: cargo doc --no-deps --all-features
@@ -363,7 +403,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake
+          sudo apt-get install -y build-essential cmake llvm-dev libclang-dev clang
+
+      - name: Set LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=/usr/lib/llvm-14/lib" >> $GITHUB_ENV
 
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked

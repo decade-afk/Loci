@@ -59,8 +59,10 @@ jobs:
 
       - name: Build Android library
         run: |
-          # Gemini审计关键补丁：显式传递NDK路径
+          # Gemini审计关键补丁：显式传递NDK路径（兼容 build.rs 的多种环境变量检测）
           export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264
+          export ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/26.3.11579264
+          export NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264
 
           # 编译（约5-10分钟）
           cargo ndk -t ${{ matrix.target }} build -p loci --release

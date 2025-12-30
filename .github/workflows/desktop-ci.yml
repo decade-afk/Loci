@@ -33,6 +33,16 @@ jobs:
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Install LLVM
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "19.1"
+          directory: ${{ runner.temp }}/llvm
+
+      - name: Set LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=${{ runner.temp }}/llvm/bin" >> $GITHUB_ENV
+        shell: bash
+
       - name: Install CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.16
         with:
@@ -72,7 +82,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake clang
+          sudo apt-get install -y cmake clang llvm-dev libclang-dev
+
+      - name: Set LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=/usr/lib/llvm-14/lib" >> $GITHUB_ENV
 
       - name: Build with AVX512
         run: cargo build --release --features avx512
@@ -102,6 +115,11 @@ jobs:
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
+
+      - name: Install LLVM
+        run: |
+          brew install llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
 
       - name: Build with Metal
         run: cargo build --release --features metal
@@ -134,7 +152,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake clang
+        run: sudo apt-get update && sudo apt-get install -y cmake clang llvm-dev libclang-dev
+
+      - name: Set LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=/usr/lib/llvm-14/lib" >> $GITHUB_ENV
 
       - name: Build loci-cli
         run: cargo build --release --example loci-cli

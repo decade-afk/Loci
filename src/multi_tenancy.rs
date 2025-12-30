@@ -138,8 +138,9 @@ pub struct TenantResourceUsage {
 
 impl TenantResourceUsage {
     /// 检查是否超限
+    /// 修复：使用 > 而非 >= 以允许使用满配额（例如 max_sessions=10 应允许创建第10个会话）
     pub fn check_quota(&self, quota: &TenantQuota) -> Result<()> {
-        if self.active_sessions >= quota.max_sessions {
+        if self.active_sessions > quota.max_sessions {
             bail!("Session quota exceeded: {}/{}", self.active_sessions, quota.max_sessions);
         }
 
@@ -148,11 +149,11 @@ impl TenantResourceUsage {
                 self.memory_bytes, quota.max_memory_bytes);
         }
 
-        if self.loaded_plugins >= quota.max_plugin_count {
+        if self.loaded_plugins > quota.max_plugin_count {
             bail!("Plugin quota exceeded: {}/{}", self.loaded_plugins, quota.max_plugin_count);
         }
 
-        if self.concurrent_requests >= quota.max_concurrent_requests {
+        if self.concurrent_requests > quota.max_concurrent_requests {
             bail!("Concurrent request quota exceeded: {}/{}",
                 self.concurrent_requests, quota.max_concurrent_requests);
         }
@@ -222,10 +223,17 @@ impl TenantContext {
     }
 
     /// 增加会话计数
+    /// 修复：先检查配额再递增，防止失败时污染计数
     pub fn increment_sessions(&self) -> Result<()> {
         let mut usage = self.usage.write();
+        // 预先检查是否会超额（克隆当前状态并模拟递增）
+        let mut temp_usage = usage.clone();
+        temp_usage.active_sessions += 1;
+        temp_usage.check_quota(&self.quota)?;
+
+        // 检查通过后才真正递增
         usage.active_sessions += 1;
-        usage.check_quota(&self.quota)
+        Ok(())
     }
 
     /// 减少会话计数
@@ -244,11 +252,19 @@ impl TenantContext {
     }
 
     /// 增加并发请求计数
+    /// 修复：先检查配额再递增，防止失败时污染计数
     pub fn increment_concurrent_requests(&self) -> Result<()> {
         let mut usage = self.usage.write();
+        // 预先检查是否会超额（克隆当前状态并模拟递增）
+        let mut temp_usage = usage.clone();
+        temp_usage.concurrent_requests += 1;
+        temp_usage.total_requests += 1;
+        temp_usage.check_quota(&self.quota)?;
+
+        // 检查通过后才真正递增
         usage.concurrent_requests += 1;
         usage.total_requests += 1;
-        usage.check_quota(&self.quota)
+        Ok(())
     }
 
     /// 减少并发请求计数
