@@ -1,18 +1,8 @@
-/**
- * Loci Phase 4 Week 1: 多租户隔离系统
- *
- * 核心特性：
- * 1. 租户级别资源隔离（Session/KV Cache/Plugin）
- * 2. 细粒度资源配额控制
- * 3. 租户生命周期管理
- * 4. 资源使用统计与监控
- *
- * 隔离策略：
- * - Session ID 添加租户前缀
- * - 每个租户独立的 KV Cache 分配器
- * - 每个租户独立的 Plugin Registry
- * - 全局内存预算按租户分配
- */
+//! Multi Tenancy Module
+//!
+//! This module provides core functionality for the Loci project.
+//!
+
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,121 +14,135 @@ use crate::paged_attention::{SessionManager, SessionId};
 use crate::plugin_system::PluginRegistry;
 use crate::radix_tree::KVCacheManager;
 
-// ==================== 租户 ID ====================
 
-/// 租户 ID（全局唯一）
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    /// TenantID structure
 pub struct TenantID(pub Uuid);
 
+// Implementation for TenantID
 impl TenantID {
-    /// 生成新的租户 ID
+    
+    /// new function
     pub fn new() -> Self {
         TenantID(Uuid::new_v4())
     }
 
-    /// 从字符串解析
+    
+    /// from_str function
     pub fn from_str(s: &str) -> Result<Self> {
         let uuid = Uuid::parse_str(s)
             .context("Invalid tenant ID format")?;
         Ok(TenantID(uuid))
     }
 
-    /// 转换为字符串
+    
+    /// to_string function
     pub fn to_string(&self) -> String {
         self.0.to_string()
     }
 }
 
+// Implementation for Default
 impl Default for TenantID {
     fn default() -> Self {
         Self::new()
     }
 }
 
-// ==================== 租户资源配额 ====================
 
-/// 租户资源配额
+
+
 #[derive(Debug, Clone)]
+    /// TenantQuota structure
 pub struct TenantQuota {
-    /// 最大会话数
+    
     pub max_sessions: usize,
 
-    /// 最大上下文长度（每个会话）
+    
     pub max_context_length: usize,
 
-    /// 最大内存使用（字节）
+    
     pub max_memory_bytes: u64,
 
-    /// 最大插件数量
+    
     pub max_plugin_count: usize,
 
-    /// 最大并发请求数
+    
     pub max_concurrent_requests: usize,
 }
 
+// Implementation for Default
 impl Default for TenantQuota {
     fn default() -> Self {
         Self {
             max_sessions: 10,
-            max_context_length: 32768,       // 32k tokens
-            max_memory_bytes: 4 * 1024 * 1024 * 1024,  // 4GB
+            max_context_length: 32768,       
+            max_memory_bytes: 4 * 1024 * 1024 * 1024,  
             max_plugin_count: 20,
             max_concurrent_requests: 5,
         }
     }
 }
 
+// Implementation for TenantQuota
 impl TenantQuota {
-    /// 企业级配额（更高的资源限制）
+    
+    /// enterprise function
     pub fn enterprise() -> Self {
         Self {
             max_sessions: 100,
-            max_context_length: 131072,      // 128k tokens
-            max_memory_bytes: 64 * 1024 * 1024 * 1024,  // 64GB
+            max_context_length: 131072,      
+            max_memory_bytes: 64 * 1024 * 1024 * 1024,  
             max_plugin_count: 100,
             max_concurrent_requests: 50,
         }
     }
 
-    /// 免费级配额（受限资源）
+    
+    /// free function
     pub fn free() -> Self {
         Self {
             max_sessions: 3,
-            max_context_length: 8192,        // 8k tokens
-            max_memory_bytes: 1 * 1024 * 1024 * 1024,  // 1GB
+            max_context_length: 8192,        
+            max_memory_bytes: 1 * 1024 * 1024 * 1024,  
             max_plugin_count: 5,
             max_concurrent_requests: 2,
         }
     }
 }
 
-// ==================== 租户资源使用统计 ====================
 
-/// 租户资源使用统计
+
+
 #[derive(Debug, Clone, Default)]
+    /// TenantResourceUsage structure
 pub struct TenantResourceUsage {
-    /// 当前会话数
+    
     pub active_sessions: usize,
 
-    /// 当前内存使用（字节）
+    
     pub memory_bytes: u64,
 
-    /// 当前加载的插件数
+    
     pub loaded_plugins: usize,
 
-    /// 当前并发请求数
+    
     pub concurrent_requests: usize,
 
-    /// 累计请求数
+    
     pub total_requests: u64,
 
-    /// 累计生成 token 数
+    
     pub total_tokens_generated: u64,
 }
 
+// Implementation for TenantResourceUsage
 impl TenantResourceUsage {
-    /// 检查是否超限
-    /// 修复：使用 > 而非 >= 以允许使用满配额（例如 max_sessions=10 应允许创建第10个会话）
+    
+    
+    /// check_quota function
     pub fn check_quota(&self, quota: &TenantQuota) -> Result<()> {
         if self.active_sessions > quota.max_sessions {
             bail!("Session quota exceeded: {}/{}", self.active_sessions, quota.max_sessions);
@@ -162,40 +166,43 @@ impl TenantResourceUsage {
     }
 }
 
-// ==================== 租户上下文 ====================
 
-/// 租户上下文（每个租户的独立资源空间）
+
+
+    /// TenantContext structure
 pub struct TenantContext {
-    /// 租户 ID
+    
     pub id: TenantID,
 
-    /// 租户名称
+    
     pub name: String,
 
-    /// 资源配额
+    
     pub quota: TenantQuota,
 
-    /// 资源使用统计
+    
     pub usage: RwLock<TenantResourceUsage>,
 
-    /// Session 管理器
+    
     pub session_manager: Arc<RwLock<SessionManager>>,
 
-    /// Plugin Registry
+    
     pub plugin_registry: Arc<RwLock<PluginRegistry>>,
 
-    /// KV Cache 管理器
+    
     pub kv_cache_manager: Arc<RwLock<KVCacheManager>>,
 
-    /// 租户创建时间
+    
     pub created_at: std::time::SystemTime,
 
-    /// 是否启用
+    
     pub enabled: RwLock<bool>,
 }
 
+// Implementation for TenantContext
 impl TenantContext {
-    /// 创建新的租户上下文
+    
+    /// new function
     pub fn new(id: TenantID, name: String, quota: TenantQuota) -> Self {
         Self {
             id,
@@ -203,9 +210,9 @@ impl TenantContext {
             quota: quota.clone(),
             usage: RwLock::new(TenantResourceUsage::default()),
             session_manager: Arc::new(RwLock::new(SessionManager::new(
-                4096,  // 4GB VRAM
-                8192,  // 8GB RAM
-                256,   // 256KB block size
+                4096,  
+                8192,  
+                256,   
             ))),
             plugin_registry: Arc::new(RwLock::new(
                 PluginRegistry::new(crate::plugin_system::ResourceQuota::new(1000, 16 * 1024 * 1024))
@@ -216,27 +223,30 @@ impl TenantContext {
         }
     }
 
-    /// 检查配额是否允许新操作
+    
+    /// check_quota function
     pub fn check_quota(&self) -> Result<()> {
         let usage = self.usage.read();
         usage.check_quota(&self.quota)
     }
 
-    /// 增加会话计数
-    /// 修复：先检查配额再递增，防止失败时污染计数
+    
+    
+    /// increment_sessions function
     pub fn increment_sessions(&self) -> Result<()> {
         let mut usage = self.usage.write();
-        // 预先检查是否会超额（克隆当前状态并模拟递增）
+        
         let mut temp_usage = usage.clone();
         temp_usage.active_sessions += 1;
         temp_usage.check_quota(&self.quota)?;
 
-        // 检查通过后才真正递增
+        
         usage.active_sessions += 1;
         Ok(())
     }
 
-    /// 减少会话计数
+    
+    /// decrement_sessions function
     pub fn decrement_sessions(&self) {
         let mut usage = self.usage.write();
         if usage.active_sessions > 0 {
@@ -244,30 +254,33 @@ impl TenantContext {
         }
     }
 
-    /// 更新内存使用
+    
+    /// update_memory_usage function
     pub fn update_memory_usage(&self, bytes: u64) -> Result<()> {
         let mut usage = self.usage.write();
         usage.memory_bytes = bytes;
         usage.check_quota(&self.quota)
     }
 
-    /// 增加并发请求计数
-    /// 修复：先检查配额再递增，防止失败时污染计数
+    
+    
+    /// increment_concurrent_requests function
     pub fn increment_concurrent_requests(&self) -> Result<()> {
         let mut usage = self.usage.write();
-        // 预先检查是否会超额（克隆当前状态并模拟递增）
+        
         let mut temp_usage = usage.clone();
         temp_usage.concurrent_requests += 1;
         temp_usage.total_requests += 1;
         temp_usage.check_quota(&self.quota)?;
 
-        // 检查通过后才真正递增
+        
         usage.concurrent_requests += 1;
         usage.total_requests += 1;
         Ok(())
     }
 
-    /// 减少并发请求计数
+    
+    /// decrement_concurrent_requests function
     pub fn decrement_concurrent_requests(&self) {
         let mut usage = self.usage.write();
         if usage.concurrent_requests > 0 {
@@ -275,40 +288,47 @@ impl TenantContext {
         }
     }
 
-    /// 获取资源使用统计
+    
+    /// get_usage function
     pub fn get_usage(&self) -> TenantResourceUsage {
         self.usage.read().clone()
     }
 
-    /// 禁用租户
+    
+    /// disable function
     pub fn disable(&self) {
         *self.enabled.write() = false;
     }
 
-    /// 启用租户
+    
+    /// enable function
     pub fn enable(&self) {
         *self.enabled.write() = true;
     }
 
-    /// 检查是否启用
+    
+    /// is_enabled function
     pub fn is_enabled(&self) -> bool {
         *self.enabled.read()
     }
 }
 
-// ==================== 租户管理器 ====================
 
-/// 租户管理器（全局单例）
+
+
+    /// TenantManager structure
 pub struct TenantManager {
-    /// 租户映射表
+    
     tenants: RwLock<HashMap<TenantID, Arc<TenantContext>>>,
 
-    /// 默认租户（用于单租户模式）
+    
     default_tenant: Arc<TenantContext>,
 }
 
+// Implementation for TenantManager
 impl TenantManager {
-    /// 创建新的租户管理器
+    
+    /// new function
     pub fn new() -> Self {
         let default_id = TenantID::new();
         let default_tenant = Arc::new(TenantContext::new(
@@ -326,14 +346,16 @@ impl TenantManager {
         }
     }
 
-    /// 获取全局单例
+    
+    /// global function
     pub fn global() -> &'static TenantManager {
         static INSTANCE: once_cell::sync::Lazy<TenantManager> =
             once_cell::sync::Lazy::new(|| TenantManager::new());
         &INSTANCE
     }
 
-    /// 创建新租户
+    
+    /// create_tenant function
     pub fn create_tenant(&self, name: String, quota: TenantQuota) -> TenantID {
         let id = TenantID::new();
         let context = Arc::new(TenantContext::new(id, name.clone(), quota));
@@ -345,7 +367,8 @@ impl TenantManager {
         id
     }
 
-    /// 获取租户上下文
+    
+    /// get_tenant function
     pub fn get_tenant(&self, id: TenantID) -> Result<Arc<TenantContext>> {
         let tenants = self.tenants.read();
         tenants.get(&id)
@@ -353,67 +376,74 @@ impl TenantManager {
             .ok_or_else(|| anyhow::anyhow!("Tenant not found: {}", id.to_string()))
     }
 
-    /// 删除租户（清理所有资源）
+    
+    /// remove_tenant function
     pub fn remove_tenant(&self, id: TenantID) -> Result<()> {
         let mut tenants = self.tenants.write();
 
         let context = tenants.remove(&id)
             .ok_or_else(|| anyhow::anyhow!("Tenant not found: {}", id.to_string()))?;
 
-        // 清理资源
+        
         println!("[TenantManager] Cleaning up tenant: {}", context.name);
 
-        // 清理 Session Manager
+        
         {
             let _session_mgr = context.session_manager.write();
-            // TODO: 清理所有会话
+            
         }
 
-        // 清理 Plugin Registry
+        
         {
             let _plugin_registry = context.plugin_registry.write();
-            // TODO: 卸载所有插件
+            
         }
 
-        // 清理 KV Cache
+        
         {
             let _kv_cache = context.kv_cache_manager.write();
-            // TODO: 释放所有缓存
+            
         }
 
         println!("[TenantManager] Tenant removed: {}", context.name);
         Ok(())
     }
 
-    /// 列出所有租户
+    
+    /// list_tenants function
     pub fn list_tenants(&self) -> Vec<TenantID> {
         let tenants = self.tenants.read();
         tenants.keys().copied().collect()
     }
 
-    /// 获取默认租户
+    
+    /// default_tenant function
     pub fn default_tenant(&self) -> Arc<TenantContext> {
         self.default_tenant.clone()
     }
 
-    /// 获取租户数量
+    
+    /// tenant_count function
     pub fn tenant_count(&self) -> usize {
         self.tenants.read().len()
     }
 
-    /// 检查租户配额
+    
+    /// check_tenant_quota function
     pub fn check_tenant_quota(&self, id: TenantID) -> Result<()> {
         let context = self.get_tenant(id)?;
         context.check_quota()
     }
 
-    /// 获取租户资源使用统计
+    
+    /// get_tenant_usage function
     pub fn get_tenant_usage(&self, id: TenantID) -> Result<TenantResourceUsage> {
         let context = self.get_tenant(id)?;
         Ok(context.get_usage())
     }
 
-    /// 禁用租户
+    
+    /// disable_tenant function
     pub fn disable_tenant(&self, id: TenantID) -> Result<()> {
         let context = self.get_tenant(id)?;
         context.disable();
@@ -421,7 +451,8 @@ impl TenantManager {
         Ok(())
     }
 
-    /// 启用租户
+    
+    /// enable_tenant function
     pub fn enable_tenant(&self, id: TenantID) -> Result<()> {
         let context = self.get_tenant(id)?;
         context.enable();
@@ -430,32 +461,37 @@ impl TenantManager {
     }
 }
 
+// Implementation for Default
 impl Default for TenantManager {
     fn default() -> Self {
         Self::new()
     }
 }
 
-// ==================== 租户隔离的 Session ID ====================
 
-/// 租户隔离的 Session ID
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    /// TenantSessionID structure
 pub struct TenantSessionID {
     pub tenant_id: TenantID,
     pub session_id: SessionId,
 }
 
+// Implementation for TenantSessionID
 impl TenantSessionID {
+    /// new function
     pub fn new(tenant_id: TenantID, session_id: SessionId) -> Self {
         Self { tenant_id, session_id }
     }
 
+    /// to_string function
     pub fn to_string(&self) -> String {
         format!("{}:{}", self.tenant_id.to_string(), self.session_id.0)
     }
 }
 
-// ==================== 单元测试 ====================
+
 
 #[cfg(test)]
 mod tests {
@@ -487,13 +523,13 @@ mod tests {
         let id = manager.create_tenant("quota-test".to_string(), quota);
         let context = manager.get_tenant(id).unwrap();
 
-        // 第一个会话：成功
+        
         assert!(context.increment_sessions().is_ok());
 
-        // 第二个会话：成功
+        
         assert!(context.increment_sessions().is_ok());
 
-        // 第三个会话：失败（超限）
+        
         assert!(context.increment_sessions().is_err());
     }
 
@@ -546,6 +582,6 @@ mod tests {
         let usage = context.get_usage();
         assert_eq!(usage.active_sessions, 0);
         assert_eq!(usage.concurrent_requests, 0);
-        assert_eq!(usage.total_requests, 1);  // 累计请求不变
+        assert_eq!(usage.total_requests, 1);  
     }
 }

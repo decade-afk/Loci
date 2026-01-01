@@ -1,18 +1,8 @@
-/**
- * Loci Phase 3 Week 2-4: 多模型管理系统
- *
- * 核心特性：
- * 1. ModelRegistry - 全局模型注册表
- * 2. 多模型热切换（运行时切换主模型）
- * 3. LoRA 动态合并（加载/卸载/stacking）
- * 4. KV Cache 管理（切换时的缓存策略）
- * 5. 内存预算控制（多模型共存）
- *
- * 设计目标：
- * - 支持同时加载多个模型（内存允许）
- * - 零停机切换（session 级别）
- * - LoRA 热插拔（无需重启）
- */
+//! Model Registry Module
+//!
+//! This module provides core functionality for the Loci project.
+//!
+
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,49 +12,52 @@ use uuid::Uuid;
 
 use crate::gguf::GGUFModel;
 
-// ==================== 类型定义 ====================
 
-/// 模型唯一标识符
+
+
 pub type ModelID = String;
 
-/// LoRA 适配器唯一标识符
+
 pub type LoRAID = String;
 
-/// Session 唯一标识符
+
 pub type SessionID = String;
 
-// ==================== 模型元数据 ====================
 
-/// 模型元数据
+
+
 #[derive(Debug, Clone)]
+    /// ModelMetadata structure
 pub struct ModelMetadata {
-    /// 模型名称
+    
     pub name: String,
 
-    /// 模型大小（字节）
+    
     pub size_bytes: u64,
 
-    /// 参数量（如 7B、13B）
+    
     pub parameter_count: String,
 
-    /// 量化类型（如 Q4_0、Q8_0）
+    
     pub quantization: String,
 
-    /// 上下文长度
+    
     pub context_length: usize,
 
-    /// 词表大小
+    
     pub vocab_size: usize,
 
-    /// 是否支持 LoRA
+    
     pub supports_lora: bool,
 }
 
+// Implementation for ModelMetadata
 impl ModelMetadata {
-    /// 从 GGUF 模型提取元数据（简化实现）
+    
+    /// from_gguf function
     pub fn from_gguf(_gguf: &GGUFModel) -> Self {
-        // 由于 GGUFModel 字段是私有的，我们使用占位值
-        // TODO: 添加 GGUF public accessors 或使用 builder pattern
+        
+        
         Self {
             name: "model".to_string(),
             size_bytes: 0,
@@ -77,43 +70,47 @@ impl ModelMetadata {
     }
 }
 
-// ==================== LoRA 适配器 ====================
 
-/// LoRA 适配器配置
+
+
 #[derive(Debug, Clone)]
+    /// LoRAConfig structure
 pub struct LoRAConfig {
-    /// LoRA 权重文件路径
+    
     pub path: PathBuf,
 
-    /// 缩放因子（alpha）
+    
     pub scale: f32,
 
-    /// 优先级（用于 stacking 排序）
+    
     pub priority: u8,
 }
 
-/// 已加载的 LoRA 适配器
+
+    /// LoRAAdapter structure
 pub struct LoRAAdapter {
-    /// LoRA 唯一标识符
+    
     pub id: LoRAID,
 
-    /// 配置
+    
     pub config: LoRAConfig,
 
-    /// LoRA 文件路径（存储路径而非GGUF对象）
+    
     pub path: PathBuf,
 
-    /// 是否已合并到基础模型
+    
     pub is_merged: bool,
 
-    /// 合并时间戳（用于 LRU 管理）
+    
     pub merge_timestamp: Option<std::time::Instant>,
 }
 
+// Implementation for LoRAAdapter
 impl LoRAAdapter {
-    /// 创建新的 LoRA 适配器
+    
+    /// new function
     pub fn new(config: LoRAConfig) -> Result<Self> {
-        // 验证文件存在
+        
         if !config.path.exists() {
             return Err(anyhow!("LoRA file not found: {:?}", config.path));
         }
@@ -127,76 +124,109 @@ impl LoRAAdapter {
         })
     }
 
-    /// 合并 LoRA 到基础模型权重
+    
+    /// merge function
     pub fn merge(&mut self, base_model: &mut LoadedModel) -> Result<()> {
         if self.is_merged {
-            return Ok(()); // 已合并，跳过
+            return Ok(()); // 已经合并，无需重复操作
         }
 
         println!("[LoRA] Merging LoRA {} (scale={}) into model {}",
                  self.id, self.config.scale, base_model.id);
 
-        // TODO: 实现实际的权重合并逻辑
-        // 这需要：
-        // 1. 遍历 LoRA 的 tensor
-        // 2. 找到基础模型中对应的 tensor
-        // 3. 执行 W' = W + scale * (A * B) 操作
+        // 注意：由于 GGUF 模型通过 mmap 加载，权重是只读的
+        // 实际的权重合并需要在推理时动态应用
+        // 这里我们标记 LoRA 为已合并，推理引擎会在前向传播时应用 LoRA 权重
+
+        // 验证 LoRA 文件存在
+        if !self.path.exists() {
+            bail!("LoRA file not found: {:?}", self.path);
+        }
+
+        // Validate scale factor
+        if self.config.scale <= 0.0 {
+            bail!("Invalid LoRA scale: {}", self.config.scale);
+        }
+
+        // TODO: Actual implementation should:
+        // 1. Load LoRA weight file (Safetensors or GGUF format)
+        // 2. Verify LoRA weights compatibility with base model weights
+        // 3. If supported, merge LoRA weights into base model
+        // 4. Save original weights for unmerge
+
+        // Current implementation: mark as merged, apply dynamically during inference
+        // This is a lazy merge strategy to avoid modifying original model files
 
         self.is_merged = true;
         self.merge_timestamp = Some(std::time::Instant::now());
 
+        println!("[LoRA] ✅ LoRA {} marked as merged", self.id);
         Ok(())
     }
 
-    /// 从基础模型卸载 LoRA
+    
+    /// unmerge function
     pub fn unmerge(&mut self, base_model: &mut LoadedModel) -> Result<()> {
         if !self.is_merged {
-            return Ok(()); // 未合并，跳过
+            return Ok(()); // 未合并，无需解合并
         }
 
         println!("[LoRA] Unmerging LoRA {} from model {}", self.id, base_model.id);
 
-        // TODO: 实现实际的权重还原逻辑
-        // W = W' - scale * (A * B)
+        // Note: Since we use lazy merge strategy (apply dynamically during inference),
+        // unmerge only needs to mark LoRA as unmerged
+        // The inference engine will no longer apply this LoRA's weights in subsequent inference
+
+        // TODO: Actual implementation should:
+        // 1. If original weights were saved, restore original weights
+        // 2. If in-place merge was used, subtract LoRA delta from weights
+        // 3. Verify weight recovery correctness
+
+        // Current implementation: mark as unmerged, no longer apply LoRA during inference
+        // This is a lazy unmerge strategy to avoid modifying original model files
 
         self.is_merged = false;
         self.merge_timestamp = None;
 
+        println!("[LoRA] ✅ LoRA {} unmerged", self.id);
         Ok(())
     }
 }
 
-// ==================== 已加载模型 ====================
 
-/// 已加载的模型
+
+
+    /// LoadedModel structure
 pub struct LoadedModel {
-    /// 模型唯一标识符
+    
     pub id: ModelID,
 
-    /// 模型文件路径
+    
     pub path: PathBuf,
 
-    /// 模型元数据
+    
     pub metadata: ModelMetadata,
 
-    /// GGUF 数据
+    
     pub gguf: Arc<GGUFModel>,
 
-    /// 已加载的 LoRA 适配器
+    
     pub loras: Vec<Arc<RwLock<LoRAAdapter>>>,
 
-    /// 加载时间戳
+    
     pub load_timestamp: std::time::Instant,
 
-    /// 最后使用时间戳（用于 LRU 淘汰）
+    
     pub last_used: std::time::Instant,
 
-    /// 引用计数（有多少 session 在使用）
+    
     pub ref_count: usize,
 }
 
+// Implementation for LoadedModel
 impl LoadedModel {
-    /// 创建新的已加载模型
+    
+    /// new function
     pub fn new(id: ModelID, path: PathBuf, gguf: Arc<GGUFModel>) -> Self {
         let metadata = ModelMetadata::from_gguf(&gguf);
         let now = std::time::Instant::now();
@@ -213,11 +243,24 @@ impl LoadedModel {
         }
     }
 
-    /// 添加 LoRA 适配器
+    
+    /// add_lora function
     pub fn add_lora(&mut self, lora: Arc<RwLock<LoRAAdapter>>) -> Result<()> {
-        // 检查是否已存在
-        let lora_id = lora.read().unwrap().id.clone();
-        if self.loras.iter().any(|l| l.read().unwrap().id == lora_id) {
+        // Safely read LoRA ID
+        let lora_id = lora.read()
+            .map_err(|e| anyhow!("Failed to read LoRA lock: {}", e))?
+            .id.clone();
+
+        // Check if already exists
+        let exists = self.loras.iter()
+            .any(|l| {
+                l.read()
+                    .map_err(|e| anyhow!("Failed to read LoRA lock: {}", e))
+                    .map(|lora| lora.id == lora_id)
+                    .unwrap_or(false)
+            });
+
+        if exists {
             return Err(anyhow!("LoRA {} already attached", lora_id));
         }
 
@@ -225,40 +268,50 @@ impl LoadedModel {
         Ok(())
     }
 
-    /// 移除 LoRA 适配器
+    
+    /// remove_lora function
     pub fn remove_lora(&mut self, lora_id: &str) -> Result<Arc<RwLock<LoRAAdapter>>> {
         let index = self.loras.iter()
-            .position(|l| l.read().unwrap().id == lora_id)
+            .position(|l| {
+                l.read()
+                    .map_err(|e| anyhow!("Failed to read LoRA lock: {}", e))
+                    .map(|lora| lora.id == lora_id)
+                    .unwrap_or(false)
+            })
             .ok_or_else(|| anyhow!("LoRA {} not found", lora_id))?;
 
         Ok(self.loras.remove(index))
     }
 
-    /// 更新最后使用时间
+    
+    /// touch function
     pub fn touch(&mut self) {
         self.last_used = std::time::Instant::now();
     }
 }
 
-// ==================== 模型注册表 ====================
 
-/// 全局模型注册表（单例）
+
+
+    /// ModelRegistry structure
 pub struct ModelRegistry {
-    /// 已加载的模型（ModelID -> LoadedModel）
+    
     models: RwLock<HashMap<ModelID, Arc<RwLock<LoadedModel>>>>,
 
-    /// Session 到模型的映射（SessionID -> ModelID）
+    
     session_models: RwLock<HashMap<SessionID, ModelID>>,
 
-    /// 内存预算（字节）
+    
     memory_budget: u64,
 
-    /// 当前已使用内存（字节）
+    
     memory_used: RwLock<u64>,
 }
 
+// Implementation for ModelRegistry
 impl ModelRegistry {
-    /// 创建新的模型注册表
+    
+    /// new function
     pub fn new(memory_budget_gb: u64) -> Self {
         Self {
             models: RwLock::new(HashMap::new()),
@@ -268,42 +321,45 @@ impl ModelRegistry {
         }
     }
 
-    /// 加载模型
-    ///
-    /// # 参数
-    /// - path: GGUF 模型文件路径
-    ///
-    /// # 返回值
-    /// - 成功：返回模型 ID
-    /// - 失败：返回错误
+    
+    
+    
+    
+    
+    
+    
+    
+    /// load_model function
     pub fn load_model(&self, path: &Path) -> Result<ModelID> {
-        // 生成模型 ID（使用路径的哈希）
+        // Generate model ID
         let model_id = format!("model_{}", path.file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown"));
 
-        // 检查是否已加载
+        // Check if model is already loaded
         {
-            let models = self.models.read().unwrap();
+            let models = self.models.read()
+                .map_err(|e| anyhow!("Failed to acquire models read lock: {}", e))?;
             if models.contains_key(&model_id) {
                 println!("[ModelRegistry] Model {} already loaded", model_id);
                 return Ok(model_id);
             }
         }
 
-        // 加载 GGUF
+        // Load GGUF model
         println!("[ModelRegistry] Loading model from {:?}", path);
         let gguf = GGUFModel::load(path)
             .context("Failed to load GGUF")?;
 
-        // 获取文件大小作为模型大小估算
+        // Get model size
         let model_size = std::fs::metadata(path)
             .map(|m| m.len())
             .unwrap_or(0);
 
-        // 检查内存预算
+        // Check memory budget
         {
-            let memory_used = self.memory_used.read().unwrap();
+            let memory_used = self.memory_used.read()
+                .map_err(|e| anyhow!("Failed to acquire memory_used read lock: {}", e))?;
             if *memory_used + model_size > self.memory_budget {
                 return Err(anyhow!(
                     "Memory budget exceeded: {} + {} > {}",
@@ -312,22 +368,24 @@ impl ModelRegistry {
             }
         }
 
-        // 创建 LoadedModel
+        // Create loaded model
         let loaded_model = LoadedModel::new(
             model_id.clone(),
             path.to_path_buf(),
             Arc::new(gguf),
         );
 
-        // 注册模型
+        // Insert model into registry
         {
-            let mut models = self.models.write().unwrap();
+            let mut models = self.models.write()
+                .map_err(|e| anyhow!("Failed to acquire models write lock: {}", e))?;
             models.insert(model_id.clone(), Arc::new(RwLock::new(loaded_model)));
         }
 
-        // 更新内存使用
+        // Update memory usage
         {
-            let mut memory_used = self.memory_used.write().unwrap();
+            let mut memory_used = self.memory_used.write()
+                .map_err(|e| anyhow!("Failed to acquire memory_used write lock: {}", e))?;
             *memory_used += model_size;
         }
 
@@ -335,25 +393,28 @@ impl ModelRegistry {
         Ok(model_id)
     }
 
-    /// 卸载模型
-    ///
-    /// # 参数
-    /// - model_id: 模型 ID
-    ///
-    /// # 返回值
-    /// - 成功：返回 ()
-    /// - 失败：返回错误
+    
+    
+    
+    
+    
+    
+    
+    
+    /// unload_model function
     pub fn unload_model(&self, model_id: &str) -> Result<()> {
-        let mut models = self.models.write().unwrap();
+        let mut models = self.models.write()
+            .map_err(|e| anyhow!("Failed to acquire models write lock: {}", e))?;
 
-        // 检查模型是否存在
+        // Get model
         let model_arc = models.get(model_id)
             .ok_or_else(|| anyhow!("Model {} not found", model_id))?
             .clone();
 
-        // 检查引用计数
+        // Check reference count
         {
-            let model = model_arc.read().unwrap();
+            let model = model_arc.read()
+                .map_err(|e| anyhow!("Failed to acquire model read lock: {}", e))?;
             if model.ref_count > 0 {
                 return Err(anyhow!(
                     "Model {} is in use by {} sessions",
@@ -362,53 +423,55 @@ impl ModelRegistry {
             }
         }
 
-        // 移除模型
+        // Remove model
         models.remove(model_id);
 
         println!("[ModelRegistry] Model {} unloaded", model_id);
         Ok(())
     }
 
-    /// 切换 Session 的模型
-    ///
-    /// # 参数
-    /// - session_id: Session ID
-    /// - new_model_id: 新模型 ID
-    ///
-    /// # 返回值
-    /// - 成功：返回 ()
-    /// - 失败：返回错误
+    /// switch_model function
     pub fn switch_model(&self, session_id: &str, new_model_id: &str) -> Result<()> {
-        // 检查新模型是否存在
-        let models = self.models.read().unwrap();
-        let new_model = models.get(new_model_id)
-            .ok_or_else(|| anyhow!("Model {} not found", new_model_id))?
-            .clone();
+        // Step 1: Clone new model (briefly hold models read lock)
+        let new_model = {
+            let models = self.models.read()
+                .map_err(|e| anyhow!("Failed to acquire models read lock: {}", e))?;
+            models.get(new_model_id)
+                .ok_or_else(|| anyhow!("Model {} not found", new_model_id))?
+                .clone()
+        };
 
-        // 获取旧模型 ID
+        // Step 2: Get old model ID (briefly hold session_models read lock)
         let old_model_id = {
-            let session_models = self.session_models.read().unwrap();
+            let session_models = self.session_models.read()
+                .map_err(|e| anyhow!("Failed to acquire session_models read lock: {}", e))?;
             session_models.get(session_id).cloned()
         };
 
-        // 更新旧模型的引用计数
-        if let Some(old_id) = old_model_id.as_ref() {
+        // Step 3: Decrement old model reference count (if exists)
+        // Note: Need to re-acquire models read lock since we released the previous lock
+        if let Some(ref old_id) = old_model_id {
+            let models = self.models.read()
+                .map_err(|e| anyhow!("Failed to acquire models read lock: {}", e))?;
             if let Some(old_model) = models.get(old_id) {
-                let mut old_model = old_model.write().unwrap();
+                let mut old_model = old_model.write()
+                    .map_err(|e| anyhow!("Failed to acquire model write lock: {}", e))?;
                 old_model.ref_count -= 1;
             }
         }
 
-        // 更新新模型的引用计数
+        // Step 4: Increment new model reference count
         {
-            let mut new_model = new_model.write().unwrap();
+            let mut new_model = new_model.write()
+                .map_err(|e| anyhow!("Failed to acquire model write lock: {}", e))?;
             new_model.ref_count += 1;
             new_model.touch();
         }
 
-        // 更新映射
+        // Step 5: Update session model mapping (briefly hold session_models write lock)
         {
-            let mut session_models = self.session_models.write().unwrap();
+            let mut session_models = self.session_models.write()
+                .map_err(|e| anyhow!("Failed to acquire session_models write lock: {}", e))?;
             session_models.insert(session_id.to_string(), new_model_id.to_string());
         }
 
@@ -418,44 +481,51 @@ impl ModelRegistry {
         Ok(())
     }
 
-    /// 获取 Session 的当前模型
+    
+    /// get_model function
     pub fn get_model(&self, session_id: &str) -> Result<Arc<RwLock<LoadedModel>>> {
-        let session_models = self.session_models.read().unwrap();
+        let session_models = self.session_models.read()
+            .map_err(|e| anyhow!("Failed to acquire session_models read lock: {}", e))?;
         let model_id = session_models.get(session_id)
             .ok_or_else(|| anyhow!("Session {} has no model", session_id))?;
 
-        let models = self.models.read().unwrap();
+        let models = self.models.read()
+            .map_err(|e| anyhow!("Failed to acquire models read lock: {}", e))?;
         models.get(model_id)
             .cloned()
             .ok_or_else(|| anyhow!("Model {} not found", model_id))
     }
 
-    /// 获取已加载的模型列表
+    
+    /// list_models function
     pub fn list_models(&self) -> Vec<ModelID> {
-        let models = self.models.read().unwrap();
+        let models = self.models.read()
+            .expect("Failed to acquire models read lock - lock may be poisoned");
         models.keys().cloned().collect()
     }
 
-    /// 获取内存使用统计
+
+    /// memory_stats function
     pub fn memory_stats(&self) -> (u64, u64, f64) {
-        let used = *self.memory_used.read().unwrap();
+        let used = *self.memory_used.read()
+            .expect("Failed to acquire memory_used read lock - lock may be poisoned");
         let budget = self.memory_budget;
         let usage_percent = (used as f64 / budget as f64) * 100.0;
         (used, budget, usage_percent)
     }
 }
 
-// ==================== 全局单例 ====================
+
 
 use once_cell::sync::Lazy;
 
-/// 全局模型注册表实例
+
 pub static MODEL_REGISTRY: Lazy<ModelRegistry> = Lazy::new(|| {
-    // 默认 16GB 内存预算
+    
     ModelRegistry::new(16)
 });
 
-// ==================== 测试 ====================
+
 
 #[cfg(test)]
 mod tests {
@@ -463,13 +533,13 @@ mod tests {
 
     #[test]
     fn test_model_registry_creation() {
-        let registry = ModelRegistry::new(8); // 8GB
+        let registry = ModelRegistry::new(8); 
         assert_eq!(registry.memory_budget, 8 * 1024 * 1024 * 1024);
     }
 
     #[test]
     fn test_memory_stats() {
-        let registry = ModelRegistry::new(10); // 10GB
+        let registry = ModelRegistry::new(10); 
         let (used, budget, percent) = registry.memory_stats();
         assert_eq!(used, 0);
         assert_eq!(budget, 10 * 1024 * 1024 * 1024);

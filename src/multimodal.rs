@@ -1,42 +1,37 @@
-/**
- * Loci Phase 4 Week 3-4: 多模态支持（Vision）
- *
- * 核心特性：
- * 1. Vision Encoder 接口（CLIP/SigLIP）
- * 2. CLIP ViT-L/14@336 实现
- * 3. 图像预处理 pipeline
- * 4. 多模态 KV Cache 扩展
- * 5. 图像 + 文本混合推理
- *
- * 架构：
- * - 图像 → Resize → Normalize → Patch Extraction → ViT Encoder → Embedding
- * - Embedding → Projector → 注入 KV Cache → 文本生成
- */
+//! Multimodal Module
+//!
+//! This module provides core functionality for the Loci project.
+//!
+
 
 use anyhow::{Result, bail};
 use std::path::Path;
 
-// ==================== 图像数据类型 ====================
 
-/// RGB 图像缓冲区
+
+
 #[derive(Debug, Clone)]
+    /// ImageBuffer structure
 pub struct ImageBuffer {
     pub width: u32,
     pub height: u32,
-    pub data: Vec<u8>,  // RGB 格式，每像素 3 字节
+    pub data: Vec<u8>,  
 }
 
+// Implementation for ImageBuffer
 impl ImageBuffer {
-    /// 从文件加载图像
+    
+    /// from_file function
     pub fn from_file(path: &Path) -> Result<Self> {
-        // TODO: 使用 image crate 加载图像
-        // let img = image::open(path)?;
-        // let rgb = img.to_rgb8();
+        
+        
+        
 
         bail!("Image loading requires 'image' crate dependency");
     }
 
-    /// 创建空白图像
+    
+    /// new function
     pub fn new(width: u32, height: u32) -> Self {
         Self {
             width,
@@ -45,13 +40,15 @@ impl ImageBuffer {
         }
     }
 
-    /// 获取像素值（RGB）
+    
+    /// get_pixel function
     pub fn get_pixel(&self, x: u32, y: u32) -> (u8, u8, u8) {
         let idx = ((y * self.width + x) * 3) as usize;
         (self.data[idx], self.data[idx + 1], self.data[idx + 2])
     }
 
-    /// 设置像素值（RGB）
+    
+    /// set_pixel function
     pub fn set_pixel(&mut self, x: u32, y: u32, rgb: (u8, u8, u8)) {
         let idx = ((y * self.width + x) * 3) as usize;
         self.data[idx] = rgb.0;
@@ -60,16 +57,19 @@ impl ImageBuffer {
     }
 }
 
-// ==================== Tensor 类型 ====================
 
-/// 简单的 Tensor 类型（用于图像处理）
+
+
 #[derive(Debug, Clone)]
+    /// Tensor structure
 pub struct Tensor {
     pub shape: Vec<usize>,
     pub data: Vec<f32>,
 }
 
+// Implementation for Tensor
 impl Tensor {
+    /// new function
     pub fn new(shape: Vec<usize>) -> Self {
         let size: usize = shape.iter().product();
         Self {
@@ -78,6 +78,7 @@ impl Tensor {
         }
     }
 
+    /// from_vec function
     pub fn from_vec(data: Vec<f32>, shape: &[usize]) -> Self {
         assert_eq!(data.len(), shape.iter().product::<usize>());
         Self {
@@ -86,75 +87,80 @@ impl Tensor {
         }
     }
 
+    /// size function
     pub fn size(&self) -> usize {
         self.data.len()
     }
 }
 
-// ==================== Vision Encoder 接口 ====================
 
-/// Vision Encoder 接口（统一抽象）
+
+
 pub trait VisionEncoder: Send + Sync {
-    /// 编码图像为 embedding
+    
     fn encode_image(&self, image: &ImageBuffer) -> Result<Vec<f32>>;
 
-    /// Embedding 维度
+    
     fn embedding_dim(&self) -> usize;
 
-    /// 支持的图像尺寸
+    
     fn supported_sizes(&self) -> Vec<(u32, u32)>;
 
-    /// 模型名称
+    
     fn model_name(&self) -> &str;
 }
 
-// ==================== CLIP ViT-L/14 实现 ====================
 
-/// CLIP ViT-L/14@336 Vision Encoder
+
+
+    /// CLIPVisionEncoder structure
 pub struct CLIPVisionEncoder {
-    /// 图像尺寸（CLIP ViT-L/14@336 使用 336×336）
+    
     image_size: u32,
 
-    /// Patch 大小（ViT-L/14 使用 14×14）
+    
     patch_size: u32,
 
-    /// Embedding 维度（ViT-L 为 1024）
+    
     embedding_dim: usize,
 
-    /// ImageNet 归一化参数（mean）
+    
     normalize_mean: [f32; 3],
 
-    /// ImageNet 归一化参数（std）
+    
     normalize_std: [f32; 3],
 
-    // TODO: 实际的 ViT 模型权重
-    // model_weights: GGUFModel,
+    
+    
 }
 
+// Implementation for CLIPVisionEncoder
 impl CLIPVisionEncoder {
-    /// 创建新的 CLIP encoder
+    
+    /// new function
     pub fn new() -> Self {
         Self {
             image_size: 336,
             patch_size: 14,
             embedding_dim: 1024,
-            // ImageNet 归一化参数
+            
             normalize_mean: [0.48145466, 0.4578275, 0.40821073],
             normalize_std: [0.26862954, 0.26130258, 0.27577711],
         }
     }
 
-    /// 预处理图像
-    ///
-    /// 步骤：
-    /// 1. Resize 到 336×336
-    /// 2. 归一化（ImageNet mean/std）
-    /// 3. 转换为 Tensor（C×H×W 格式）
+    
+    
+    
+    
+    
+    
+    /// preprocess_image function
     pub fn preprocess_image(&self, image: &ImageBuffer) -> Result<Tensor> {
-        // 1. Resize（简化实现：使用最近邻插值）
+        
         let resized = self.resize_image(image, self.image_size, self.image_size)?;
 
-        // 2. 归一化并转换为 Tensor
+        
         let mut tensor_data = Vec::with_capacity((3 * self.image_size * self.image_size) as usize);
 
         for c in 0..3 {
@@ -168,7 +174,7 @@ impl CLIPVisionEncoder {
                         _ => unreachable!(),
                     };
 
-                    // 归一化: (pixel/255 - mean) / std
+                    
                     let normalized = ((pixel as f32 / 255.0) - self.normalize_mean[c]) / self.normalize_std[c];
                     tensor_data.push(normalized);
                 }
@@ -181,7 +187,7 @@ impl CLIPVisionEncoder {
         ))
     }
 
-    /// Resize 图像（最近邻插值）
+    
     fn resize_image(&self, image: &ImageBuffer, new_width: u32, new_height: u32) -> Result<ImageBuffer> {
         let mut resized = ImageBuffer::new(new_width, new_height);
 
@@ -201,9 +207,10 @@ impl CLIPVisionEncoder {
         Ok(resized)
     }
 
-    /// 提取 patches（将图像分割为 14×14 的 patches）
+    
+    /// extract_patches function
     pub fn extract_patches(&self, tensor: &Tensor) -> Result<Vec<Vec<f32>>> {
-        assert_eq!(tensor.shape[0], 3);  // RGB
+        assert_eq!(tensor.shape[0], 3);  
         assert_eq!(tensor.shape[1] as u32, self.image_size);
         assert_eq!(tensor.shape[2] as u32, self.image_size);
 
@@ -238,54 +245,58 @@ impl CLIPVisionEncoder {
         Ok(patches)
     }
 
-    /// ViT Forward Pass（简化实现）
-    ///
-    /// 真实实现需要：
-    /// - Patch Embedding
-    /// - Position Embedding
-    /// - Transformer Encoder (12 layers for ViT-L)
-    /// - Layer Normalization
-    /// - CLS Token Pooling
+    
+    
+    
+    
+    
+    
+    
+    
+    /// forward function
     pub fn forward(&self, patches: Vec<Vec<f32>>) -> Result<Vec<f32>> {
-        // TODO: 实现完整的 ViT forward pass
-        // 当前返回 mock embedding
+        
+        
 
         println!("[CLIP] Processing {} patches", patches.len());
         println!("[CLIP] Patch dimension: {}", patches[0].len());
 
-        // Mock: 返回随机 embedding
+        
         Ok(vec![0.1; self.embedding_dim])
     }
 
-    /// Pooling（从 patch embeddings 中提取全局特征）
-    ///
-    /// CLIP 使用 CLS token 的输出
+    
+    
+    
+    /// pool_embeddings function
     pub fn pool_embeddings(&self, embeddings: Vec<f32>) -> Vec<f32> {
-        // 简化：直接返回（实际应提取 CLS token）
+        
         embeddings
     }
 }
 
+// Implementation for Default
 impl Default for CLIPVisionEncoder {
     fn default() -> Self {
         Self::new()
     }
 }
 
+// Implementation for VisionEncoder
 impl VisionEncoder for CLIPVisionEncoder {
     fn encode_image(&self, image: &ImageBuffer) -> Result<Vec<f32>> {
-        // 1. 预处理
+        
         let tensor = self.preprocess_image(image)?;
         println!("[CLIP] Preprocessed tensor shape: {:?}", tensor.shape);
 
-        // 2. 提取 patches
+        
         let patches = self.extract_patches(&tensor)?;
         println!("[CLIP] Extracted {} patches", patches.len());
 
-        // 3. ViT Forward Pass
+        
         let embeddings = self.forward(patches)?;
 
-        // 4. Pooling
+        
         let pooled = self.pool_embeddings(embeddings);
 
         Ok(pooled)
@@ -304,42 +315,47 @@ impl VisionEncoder for CLIPVisionEncoder {
     }
 }
 
-// ==================== Token 类型扩展 ====================
 
-/// Token 类型（扩展支持图像 token）
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    /// TokenType enumeration
 pub enum TokenType {
-    /// 文本 token
+    
     Text,
 
-    /// 图像 token（关联图像 ID）
+    
     Image { image_id: usize },
 }
 
-/// 带类型的 Token
+
 #[derive(Debug, Clone)]
+    /// TypedToken structure
 pub struct TypedToken {
     pub id: u32,
     pub token_type: TokenType,
 }
 
-// ==================== 多模态 KV Cache ====================
 
-/// 多模态 KV Cache
-///
-/// 扩展标准 KV Cache 以支持图像 token
+
+
+
+
+    /// MultimodalKVCache structure
 pub struct MultimodalKVCache {
-    /// 文本 token 的 KV pairs
-    pub text_cache: Vec<(Vec<f32>, Vec<f32>)>,  // (Key, Value)
+    
+    pub text_cache: Vec<(Vec<f32>, Vec<f32>)>,  
 
-    /// 图像 token 的 KV pairs
+    
     pub image_cache: Vec<(Vec<f32>, Vec<f32>)>,
 
-    /// Token 类型序列（记录每个位置的 token 类型）
+    
     pub token_types: Vec<TokenType>,
 }
 
+// Implementation for MultimodalKVCache
 impl MultimodalKVCache {
+    /// new function
     pub fn new() -> Self {
         Self {
             text_cache: Vec::new(),
@@ -348,19 +364,22 @@ impl MultimodalKVCache {
         }
     }
 
-    /// 添加文本 token 的 KV
+    
+    /// append_text function
     pub fn append_text(&mut self, key: Vec<f32>, value: Vec<f32>) {
         self.text_cache.push((key, value));
         self.token_types.push(TokenType::Text);
     }
 
-    /// 添加图像 token 的 KV
+    
+    /// append_image function
     pub fn append_image(&mut self, key: Vec<f32>, value: Vec<f32>, image_id: usize) {
         self.image_cache.push((key, value));
         self.token_types.push(TokenType::Image { image_id });
     }
 
-    /// 获取指定位置的 KV（根据 token 类型）
+    
+    /// get function
     pub fn get(&self, pos: usize) -> Option<(&Vec<f32>, &Vec<f32>)> {
         if pos >= self.token_types.len() {
             return None;
@@ -384,24 +403,27 @@ impl MultimodalKVCache {
         }
     }
 
-    /// 获取总 token 数
+    
+    /// len function
     pub fn len(&self) -> usize {
         self.token_types.len()
     }
 
-    /// 检查是否为空
+    
+    /// is_empty function
     pub fn is_empty(&self) -> bool {
         self.token_types.is_empty()
     }
 }
 
+// Implementation for Default
 impl Default for MultimodalKVCache {
     fn default() -> Self {
         Self::new()
     }
 }
 
-// ==================== 单元测试 ====================
+
 
 #[cfg(test)]
 mod tests {

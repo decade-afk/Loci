@@ -1,42 +1,36 @@
-/**
- * Loci Phase 4 Week 7-8: Advanced Quantization Formats
- *
- * 核心特性：
- * 1. IQ2_XXS: Ultra-low precision quantization (2-bit with importance weighting)
- * 2. BitNet b1.58: 1.58-bit quantization with ternary weights {-1, 0, +1}
- * 3. 统一量化接口
- * 4. 运行时反量化
- *
- * 性能目标：
- * - IQ2_XXS: 16x 内存压缩（vs FP16）
- * - BitNet b1.58: 10x 内存压缩 + 特殊硬件加速
- * - 反量化延迟 < 1ms per layer
- */
+//! Quantization Module
+//!
+//! This module provides core functionality for the Loci project.
+//!
+
 
 use anyhow::{Result, bail};
 use std::sync::Arc;
 
-// ==================== Quantization Types ====================
 
-/// 量化类型枚举
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    /// QuantizationType enumeration
 pub enum QuantizationType {
-    /// 无量化（FP32）
+    
     None,
-    /// FP16 半精度
+    
     FP16,
-    /// 8-bit 整数量化
+    
     Q8_0,
-    /// 4-bit 整数量化
+    
     Q4_0,
-    /// 2-bit 超低精度量化（重要性加权）
+    
     Iq2Xxs,
-    /// BitNet 1.58-bit 三元量化 {-1, 0, +1}
+    
     BitNet158,
 }
 
+// Implementation for QuantizationType
 impl QuantizationType {
-    /// 获取每个元素的比特数
+    
+    /// bits_per_element function
     pub fn bits_per_element(&self) -> f32 {
         match self {
             Self::None => 32.0,
@@ -48,31 +42,33 @@ impl QuantizationType {
         }
     }
 
-    /// 计算压缩率（相对于 FP32）
+    
+    /// compression_ratio function
     pub fn compression_ratio(&self) -> f32 {
         32.0 / self.bits_per_element()
     }
 
-    /// 是否需要特殊硬件加速
+    
+    /// requires_special_hardware function
     pub fn requires_special_hardware(&self) -> bool {
         matches!(self, Self::BitNet158)
     }
 }
 
-// ==================== Quantization Trait ====================
 
-/// 统一量化接口
+
+
 pub trait QuantizationScheme: Send + Sync {
-    /// 量化类型
+    
     fn quantization_type(&self) -> QuantizationType;
 
-    /// 量化 FP32 张量
+    
     fn quantize(&self, data: &[f32]) -> Result<QuantizedTensor>;
 
-    /// 反量化到 FP32
+    
     fn dequantize(&self, tensor: &QuantizedTensor) -> Result<Vec<f32>>;
 
-    /// 估计量化误差（MSE）
+    
     fn estimate_error(&self, original: &[f32], quantized: &QuantizedTensor) -> f32 {
         let dequantized = self.dequantize(quantized).unwrap_or_default();
         if dequantized.len() != original.len() {
@@ -88,48 +84,52 @@ pub trait QuantizationScheme: Send + Sync {
     }
 }
 
-/// 量化后的张量
+
 #[derive(Debug, Clone)]
+    /// QuantizedTensor structure
 pub struct QuantizedTensor {
-    /// 量化类型
+    
     pub qtype: QuantizationType,
-    /// 量化数据（字节流）
+    
     pub data: Vec<u8>,
-    /// 元数据（scales, zero points, etc.）
+    
     pub metadata: QuantizationMetadata,
-    /// 原始形状
+    
     pub shape: Vec<usize>,
 }
 
-/// 量化元数据
+
 #[derive(Debug, Clone)]
+    /// QuantizationMetadata structure
 pub struct QuantizationMetadata {
-    /// Scale 因子（每个 block）
+    
     pub scales: Vec<f32>,
-    /// Zero point（每个 block）
+    
     pub zero_points: Vec<f32>,
-    /// Block 大小
+    
     pub block_size: usize,
-    /// 重要性权重（IQ2_XXS 专用）
+    
     pub importance_weights: Option<Vec<f32>>,
 }
 
-// ==================== IQ2_XXS Implementation ====================
 
-/// Iq2Xxs: 2-bit 量化 + 重要性加权
-///
-/// 核心思想：
-/// 1. 将权重分组为 blocks（默认 32 个元素）
-/// 2. 每个 block 计算 scale + zero_point
-/// 3. 计算重要性权重（基于梯度/激活幅度）
-/// 4. 重要性高的 block 使用更高精度的 scale
+
+
+
+
+
+
+
+
+    /// Iq2Xxs structure
 pub struct Iq2Xxs {
-    /// Block 大小
+    
     pub block_size: usize,
-    /// 重要性权重阈值（超过此值使用更高精度）
+    
     pub importance_threshold: f32,
 }
 
+// Implementation for Default
 impl Default for Iq2Xxs {
     fn default() -> Self {
         Self {
@@ -139,8 +139,9 @@ impl Default for Iq2Xxs {
     }
 }
 
+// Implementation for Iq2Xxs
 impl Iq2Xxs {
-    /// 计算重要性权重（简化版：基于标准差）
+    
     fn compute_importance(&self, block: &[f32]) -> f32 {
         let mean = block.iter().sum::<f32>() / block.len() as f32;
         let variance = block.iter()
@@ -149,12 +150,12 @@ impl Iq2Xxs {
         variance.sqrt()
     }
 
-    /// 量化单个 block 到 2-bit
+    
     fn quantize_block(&self, block: &[f32]) -> (Vec<u8>, f32, f32) {
         let min = block.iter().copied().fold(f32::INFINITY, f32::min);
         let max = block.iter().copied().fold(f32::NEG_INFINITY, f32::max);
 
-        let scale = (max - min) / 3.0; // 2-bit: 4 个级别 (0, 1, 2, 3)
+        let scale = (max - min) / 3.0; 
         let zero_point = min;
 
         let mut quantized = Vec::new();
@@ -166,7 +167,7 @@ impl Iq2Xxs {
                 } else {
                     0
                 };
-                byte |= q << (i * 2); // 每个元素占 2 bits
+                byte |= q << (i * 2); 
             }
             quantized.push(byte);
         }
@@ -175,6 +176,7 @@ impl Iq2Xxs {
     }
 }
 
+// Implementation for QuantizationScheme
 impl QuantizationScheme for Iq2Xxs {
     fn quantization_type(&self) -> QuantizationType {
         QuantizationType::Iq2Xxs
@@ -221,7 +223,7 @@ impl QuantizationScheme for Iq2Xxs {
             .zip(tensor.metadata.zero_points.iter())
             .enumerate()
         {
-            let bytes_per_block = (self.block_size + 3) / 4; // 每 4 个元素占 1 字节
+            let bytes_per_block = (self.block_size + 3) / 4; 
 
             for i in 0..bytes_per_block {
                 if data_offset + i >= tensor.data.len() {
@@ -247,20 +249,22 @@ impl QuantizationScheme for Iq2Xxs {
     }
 }
 
-// ==================== BitNet b1.58 Implementation ====================
 
-/// BitNet b1.58: 三元量化 {-1, 0, +1}
-///
-/// 核心思想：
-/// 1. 权重只有 3 个可能值：-1, 0, +1
-/// 2. 使用 2 bits 编码：00 = -1, 01 = 0, 10 = +1
-/// 3. 平均每个权重 1.58 bits（因为有统计偏差）
-/// 4. 可使用特殊硬件（位运算 + 查找表）加速
+
+
+
+
+
+
+
+
+    /// BitNet158 structure
 pub struct BitNet158 {
-    /// 阈值（abs(x) < threshold 则量化为 0）
+    
     pub zero_threshold: f32,
 }
 
+// Implementation for Default
 impl Default for BitNet158 {
     fn default() -> Self {
         Self {
@@ -269,8 +273,9 @@ impl Default for BitNet158 {
     }
 }
 
+// Implementation for BitNet158
 impl BitNet158 {
-    /// 量化单个值到 {-1, 0, +1}
+    
     fn quantize_value(&self, val: f32, scale: f32) -> i8 {
         let normalized = val / scale;
         if normalized.abs() < self.zero_threshold {
@@ -282,45 +287,46 @@ impl BitNet158 {
         }
     }
 
-    /// 将三元值编码为 2 bits
+    
     fn encode_ternary(val: i8) -> u8 {
         match val {
             -1 => 0b00,
             0 => 0b01,
             1 => 0b10,
-            _ => 0b11, // Invalid
+            _ => 0b11, 
         }
     }
 
-    /// 从 2 bits 解码三元值
+    
     fn decode_ternary(bits: u8) -> i8 {
         match bits & 0b11 {
             0b00 => -1,
             0b01 => 0,
             0b10 => 1,
-            _ => 0, // Default to 0 for invalid
+            _ => 0, 
         }
     }
 }
 
+// Implementation for QuantizationScheme
 impl QuantizationScheme for BitNet158 {
     fn quantization_type(&self) -> QuantizationType {
         QuantizationType::BitNet158
     }
 
     fn quantize(&self, data: &[f32]) -> Result<QuantizedTensor> {
-        // 计算全局 scale（基于最大绝对值）
+        
         let max_abs = data.iter()
             .map(|x| x.abs())
             .fold(0.0f32, f32::max);
         let scale = max_abs.max(1e-8);
 
-        // 量化到 {-1, 0, +1}
+        
         let ternary: Vec<i8> = data.iter()
             .map(|&val| self.quantize_value(val, scale))
             .collect();
 
-        // 编码为字节流（每 4 个值占 1 字节）
+        
         let mut encoded = Vec::new();
         for chunk in ternary.chunks(4) {
             let mut byte = 0u8;
@@ -368,15 +374,18 @@ impl QuantizationScheme for BitNet158 {
     }
 }
 
-// ==================== Quantization Manager ====================
 
-/// 量化方案管理器
+
+
+    /// QuantizationManager structure
 pub struct QuantizationManager {
     schemes: std::collections::HashMap<QuantizationType, Arc<dyn QuantizationScheme>>,
 }
 
+// Implementation for QuantizationManager
 impl QuantizationManager {
-    /// 创建默认管理器（包含所有内置方案）
+    
+    /// new function
     pub fn new() -> Self {
         let mut schemes: std::collections::HashMap<QuantizationType, Arc<dyn QuantizationScheme>> = std::collections::HashMap::new();
 
@@ -392,19 +401,22 @@ impl QuantizationManager {
         Self { schemes }
     }
 
-    /// 获取量化方案
+    
+    /// get_scheme function
     pub fn get_scheme(&self, qtype: QuantizationType) -> Option<Arc<dyn QuantizationScheme>> {
         self.schemes.get(&qtype).cloned()
     }
 
-    /// 量化张量
+    
+    /// quantize function
     pub fn quantize(&self, data: &[f32], qtype: QuantizationType) -> Result<QuantizedTensor> {
         let scheme = self.get_scheme(qtype)
             .ok_or_else(|| anyhow::anyhow!("Unsupported quantization type: {:?}", qtype))?;
         scheme.quantize(data)
     }
 
-    /// 反量化张量
+    
+    /// dequantize function
     pub fn dequantize(&self, tensor: &QuantizedTensor) -> Result<Vec<f32>> {
         let scheme = self.get_scheme(tensor.qtype)
             .ok_or_else(|| anyhow::anyhow!("Unsupported quantization type: {:?}", tensor.qtype))?;
@@ -412,13 +424,14 @@ impl QuantizationManager {
     }
 }
 
+// Implementation for Default
 impl Default for QuantizationManager {
     fn default() -> Self {
         Self::new()
     }
 }
 
-// ==================== 单元测试 ====================
+
 
 #[cfg(test)]
 mod tests {
@@ -442,7 +455,7 @@ mod tests {
         let dequantized = scheme.dequantize(&quantized).unwrap();
         assert_eq!(dequantized.len(), data.len());
 
-        // 验证误差在合理范围内
+        
         let mse = scheme.estimate_error(&data, &quantized);
         assert!(mse < 2.0, "MSE too high: {}", mse);
     }
@@ -458,7 +471,7 @@ mod tests {
         let dequantized = scheme.dequantize(&quantized).unwrap();
         assert_eq!(dequantized.len(), data.len());
 
-        // 验证量化到 {-1, 0, +1}
+        
         for &val in &dequantized {
             let normalized = val / quantized.metadata.scales[0];
             assert!(
@@ -485,12 +498,12 @@ mod tests {
         let manager = QuantizationManager::new();
         let data = vec![1.0, 2.0, 3.0, 4.0];
 
-        // Iq2Xxs
+        
         let q1 = manager.quantize(&data, QuantizationType::Iq2Xxs).unwrap();
         let d1 = manager.dequantize(&q1).unwrap();
         assert_eq!(d1.len(), data.len());
 
-        // BitNet b1.58
+        
         let q2 = manager.quantize(&data, QuantizationType::BitNet158).unwrap();
         let d2 = manager.dequantize(&q2).unwrap();
         assert_eq!(d2.len(), data.len());
@@ -506,8 +519,8 @@ mod tests {
 
         assert_eq!(dequantized.len(), data.len());
 
-        // 验证压缩率
-        let original_bytes = data.len() * 4; // FP32
+        
+        let original_bytes = data.len() * 4; 
         let compressed_bytes = quantized.data.len();
         let compression = original_bytes as f32 / compressed_bytes as f32;
         assert!(compression > 10.0, "Compression ratio too low: {}", compression);

@@ -1,43 +1,38 @@
-/**
- * Phase 1: Backend抽象层
- *
- * 实现ComputeBackend trait统一接口，支持：
- * - CUDA (NVIDIA GPU)
- * - Metal (Apple Silicon)
- * - ROCm (AMD GPU)
- * - CPU (Fallback + AVX512)
- *
- * 运行时自动探测并选择最优Backend
- */
+//! Backend Module
+//!
+//! This module provides core functionality for the Loci project.
+//!
+
 
 use std::sync::Arc;
 use anyhow::{Result, Context};
 
-// ==================== Backend Trait定义 ====================
 
-/// 统一的计算后端接口
+
+
 pub trait ComputeBackend: Send + Sync {
-    /// Backend名称
+    
     fn name(&self) -> &str;
 
-    /// 是否可用
+    
     fn is_available(&self) -> bool;
 
-    /// 初始化Backend
+    
     fn initialize(&mut self) -> Result<()>;
 
-    /// 获取设备信息
+    
     fn device_info(&self) -> DeviceInfo;
 
-    /// 获取推荐的GPU层数（0表示纯CPU）
+    
     fn recommended_gpu_layers(&self) -> u32;
 
-    /// 预分配显存暂存区（Scratch Buffer）
+    
     fn allocate_scratch_buffer(&mut self, size_mb: usize) -> Result<()>;
 }
 
-/// 设备信息
+
 #[derive(Debug, Clone)]
+    /// DeviceInfo structure
 pub struct DeviceInfo {
     pub name: String,
     pub memory_total_mb: u64,
@@ -47,6 +42,7 @@ pub struct DeviceInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    /// BackendType enumeration
 pub enum BackendType {
     Cuda,
     Metal,
@@ -55,6 +51,7 @@ pub enum BackendType {
     Cpu,
 }
 
+// Implementation for std
 impl std::fmt::Display for BackendType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -67,8 +64,9 @@ impl std::fmt::Display for BackendType {
     }
 }
 
-// ==================== CUDA Backend ====================
 
+
+    /// CudaBackend structure
 pub struct CudaBackend {
     #[allow(dead_code)]
     device_id: i32,
@@ -77,7 +75,9 @@ pub struct CudaBackend {
     total_memory_mb: u64,
 }
 
+// Implementation for CudaBackend
 impl CudaBackend {
+    /// new function
     pub fn new() -> Self {
         Self {
             device_id: 0,
@@ -88,7 +88,7 @@ impl CudaBackend {
     }
 
     fn check_cuda_available() -> bool {
-        // 检查nvidia-smi
+        
         std::process::Command::new("nvidia-smi")
             .arg("--query-gpu=name,memory.total")
             .arg("--format=csv,noheader")
@@ -105,6 +105,7 @@ impl CudaBackend {
     }
 }
 
+// Implementation for ComputeBackend
 impl ComputeBackend for CudaBackend {
     fn name(&self) -> &str {
         "CUDA"
@@ -119,7 +120,7 @@ impl ComputeBackend for CudaBackend {
             anyhow::bail!("CUDA not available");
         }
 
-        // 查询设备信息
+        
         let output = std::process::Command::new("nvidia-smi")
             .arg("--query-gpu=name,memory.total")
             .arg("--format=csv,noheader,nounits")
@@ -142,7 +143,7 @@ impl ComputeBackend for CudaBackend {
     }
 
     fn device_info(&self) -> DeviceInfo {
-        // 查询可用显存
+        
         let available_mb = std::process::Command::new("nvidia-smi")
             .arg("--query-gpu=memory.free")
             .arg("--format=csv,noheader,nounits")
@@ -158,7 +159,7 @@ impl ComputeBackend for CudaBackend {
                     None
                 }
             })
-            .unwrap_or(self.total_memory_mb);  // 回退到总内存
+            .unwrap_or(self.total_memory_mb);  
 
         DeviceInfo {
             name: self.device_name.clone(),
@@ -170,10 +171,10 @@ impl ComputeBackend for CudaBackend {
     }
 
     fn recommended_gpu_layers(&self) -> u32 {
-        // 根据显存推荐GPU层数
-        // 7B模型约6GB，每层约200MB
+        
+        
         if self.total_memory_mb > 16000 {
-            35  // 大部分层在GPU
+            35  
         } else if self.total_memory_mb > 8000 {
             24
         } else if self.total_memory_mb > 4000 {
@@ -184,19 +185,22 @@ impl ComputeBackend for CudaBackend {
     }
 
     fn allocate_scratch_buffer(&mut self, size_mb: usize) -> Result<()> {
-        // TODO: 调用CUDA API预分配显存
+        
         eprintln!("📦 Allocating CUDA scratch buffer: {} MB", size_mb);
         Ok(())
     }
 }
 
-// ==================== Metal Backend ====================
 
+
+    /// MetalBackend structure
 pub struct MetalBackend {
     initialized: bool,
 }
 
+// Implementation for MetalBackend
 impl MetalBackend {
+    /// new function
     pub fn new() -> Self {
         Self {
             initialized: false,
@@ -204,6 +208,7 @@ impl MetalBackend {
     }
 }
 
+// Implementation for ComputeBackend
 impl ComputeBackend for MetalBackend {
     fn name(&self) -> &str {
         "Metal"
@@ -226,7 +231,7 @@ impl ComputeBackend for MetalBackend {
     fn device_info(&self) -> DeviceInfo {
         DeviceInfo {
             name: "Apple Silicon GPU".to_string(),
-            memory_total_mb: 0,  // Metal共享系统内存
+            memory_total_mb: 0,  
             memory_available_mb: 0,
             compute_capability: "Metal 3.0".to_string(),
             backend_type: BackendType::Metal,
@@ -234,25 +239,28 @@ impl ComputeBackend for MetalBackend {
     }
 
     fn recommended_gpu_layers(&self) -> u32 {
-        // Metal自动管理，设置为1即可
+        
         1
     }
 
     fn allocate_scratch_buffer(&mut self, _size_mb: usize) -> Result<()> {
-        // Metal自动管理内存
+        
         Ok(())
     }
 }
 
-// ==================== CPU Backend ====================
 
+
+    /// CpuBackend structure
 pub struct CpuBackend {
     avx512_available: bool,
     avx2_available: bool,
     cpu_cores: usize,
 }
 
+// Implementation for CpuBackend
 impl CpuBackend {
+    /// new function
     pub fn new() -> Self {
         Self {
             avx512_available: false,
@@ -262,6 +270,7 @@ impl CpuBackend {
     }
 }
 
+// Implementation for ComputeBackend
 impl ComputeBackend for CpuBackend {
     fn name(&self) -> &str {
         if self.avx512_available {
@@ -274,11 +283,11 @@ impl ComputeBackend for CpuBackend {
     }
 
     fn is_available(&self) -> bool {
-        true  // CPU总是可用
+        true  
     }
 
     fn initialize(&mut self) -> Result<()> {
-        // 检测CPU特性
+        
         #[cfg(target_arch = "x86_64")]
         {
             self.avx512_available = is_x86_feature_detected!("avx512f");
@@ -301,22 +310,23 @@ impl ComputeBackend for CpuBackend {
     }
 
     fn recommended_gpu_layers(&self) -> u32 {
-        0  // CPU模式
+        0  
     }
 
     fn allocate_scratch_buffer(&mut self, _size_mb: usize) -> Result<()> {
-        // CPU使用系统内存，无需预分配
+        
         Ok(())
     }
 }
 
-// ==================== Backend自动探测 ====================
 
-/// Phase 1核心功能：自动探测并返回最优Backend
+
+
+    /// detect_backend function
 pub fn detect_backend() -> Arc<dyn ComputeBackend> {
     eprintln!("🔍 Detecting optimal compute backend...");
 
-    // 优先级：CUDA > Metal > CPU
+    
     let mut cuda = CudaBackend::new();
     if cuda.is_available() {
         if cuda.initialize().is_ok() {
@@ -333,7 +343,7 @@ pub fn detect_backend() -> Arc<dyn ComputeBackend> {
         }
     }
 
-    // 回退到CPU
+    
     let mut cpu = CpuBackend::new();
     cpu.initialize().expect("CPU backend should always work");
     eprintln!("🚀 Selected Backend: CPU (Fallback)");

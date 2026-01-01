@@ -1,28 +1,26 @@
-/**
- * Loci API - 统一对外接口
- * 
- * 这个文件作为 loci 库的统一入口，提供：
- * 1. Flutter Rust Bridge 的 FFI 接口
- * 2. C 风格的 FFI 接口（用于其他语言）
- * 3. 高级 Rust API 封装
- */
+//! Api Module
+//!
+//! This module provides core functionality for the Loci project.
+//!
 
-// 导出核心模块
+
+
 pub use crate::engine::{AIService, AIConfig, GenerateRequest, GenerateResponse};
 pub use crate::agent::{AgentSystem, ModelConfig, AgentConfig, AgentGenerateRequest, AgentGenerateResponse};
 pub use crate::sysinfo::{SystemInfo, get_system_info};
 pub use crate::errors::LociError;
 
-// Flutter Rust Bridge 相关
+
 use flutter_rust_bridge::frb;
 
-// ===== FRB API (Flutter Rust Bridge) =====
 
-/// Flutter Rust Bridge 主入口
-/// 
-/// 这个函数会被 Flutter Rust Bridge 代码生成器处理，
-/// 生成对应的 Dart 绑定代码。
+
+
+
+
+
 #[frb(dart_metadata=("dart:ffi"))]
+    /// LociAPI structure
 pub struct LociAPI {
     engine: AIService,
     agent_system: AgentSystem,
@@ -30,9 +28,11 @@ pub struct LociAPI {
 
 #[frb(sync)]
 #[frb(dart_metadata=("freezed"))]
+// Implementation for LociAPI
 impl LociAPI {
-    /// 创建新的 Loci API 实例
+    
     #[frb(init)]
+    /// new function
     pub fn new() -> Self {
         Self {
             engine: AIService::new(),
@@ -40,83 +40,96 @@ impl LociAPI {
         }
     }
     
-    /// 更新 AI 配置
+    
+    /// update_config function
     pub fn update_config(&mut self, config: AIConfig) -> Result<(), LociError> {
         self.engine.update_config(config);
         Ok(())
     }
     
-    /// 获取当前 AI 配置
+    
+    /// get_config function
     pub fn get_config(&self) -> AIConfig {
         self.engine.get_config()
     }
     
-    /// 加载 AI 模型
+    
+    /// load_model function
     pub fn load_model(&mut self) -> Result<(), LociError> {
         self.engine.load_model()
     }
     
-    /// 卸载 AI 模型
+    
+    /// unload_model function
     pub fn unload_model(&mut self) {
         self.engine.unload_model();
     }
     
-    /// 检查模型是否已加载
+    
+    /// is_model_loaded function
     pub fn is_model_loaded(&self) -> bool {
         self.engine.is_model_loaded()
     }
     
-    /// 生成文本（同步，适用于 Flutter Isolate）
+    
+    /// generate function
     pub fn generate(&self, request: GenerateRequest) -> Result<GenerateResponse, LociError> {
         self.engine.generate(request)
     }
     
-    /// 获取系统信息
+    
+    /// get_system_info function
     pub fn get_system_info() -> Result<SystemInfo, LociError> {
         crate::sysinfo::get_system_info()
     }
     
-    /// 获取模型推荐
+    
+    /// recommend_model function
     pub fn recommend_model(system_info: SystemInfo) -> crate::sysinfo::ModelRecommendation {
         crate::sysinfo::recommend_model(&system_info)
     }
     
-    // Agent 系统方法
     
-    /// 加载模型到模型池
+    
+    
+    /// agent_load_model function
     pub fn agent_load_model(&mut self, config: ModelConfig) -> Result<(), LociError> {
         self.agent_system.load_model(config)
     }
     
-    /// 创建新的 Agent
+    
+    /// agent_create function
     pub fn agent_create(&mut self, config: AgentConfig) -> Result<(), LociError> {
         self.agent_system.create_agent(config)
     }
     
-    /// 使用 Agent 生成文本
+    
+    /// agent_generate function
     pub fn agent_generate(&self, request: AgentGenerateRequest) -> Result<AgentGenerateResponse, LociError> {
         self.agent_system.generate(request)
     }
     
-    /// 释放资源
+    
+    /// dispose function
     pub fn dispose(&mut self) {
         self.engine.unload_model();
-        // Agent 系统会在 Drop 时自动清理
+        
     }
 }
 
-// ===== C FFI 接口 =====
 
-/// C 风格的 FFI 接口，用于其他语言集成
-/// 
-/// 这些函数使用 C ABI，可以被 C、C++、Swift、Kotlin 等语言调用
+
+
+
+
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uint};
 
-/// 错误码定义
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
+    /// LociErrorCode enumeration
 pub enum LociErrorCode {
     Success = 0,
     InvalidArgument = 1,
@@ -127,13 +140,37 @@ pub enum LociErrorCode {
     Unknown = 999,
 }
 
-/// C 风格的结果
+
 #[repr(C)]
+/// Result structure returned by Loci C API functions.
+///
+/// This structure contains error information for API calls. When an error occurs,
+/// `error_code` will be non-zero and `error_message` will point to a null-terminated
+/// C string describing the error.
+///
+/// # Memory Management
+/// **IMPORTANT**: If `error_message` is not null, the caller MUST call
+/// `loci_free_result()` to free the allocated memory after processing the result.
+/// Failure to do so will result in a memory leak.
+///
+/// # Example
+/// ```c
+/// LociResult result = loci_load_model("/path/to/model.gguf");
+/// if (result.error_code != LOCI_SUCCESS) {
+///     printf("Error: %s\n", result.error_message);
+///     loci_free_result(&result);  // Must free the error message
+///     return;
+/// }
+/// loci_free_result(&result);  // Still safe to call even on success
+/// ```
 pub struct LociResult {
+    /// Error code indicating success or failure
     pub error_code: LociErrorCode,
+    /// Error message (null-terminated C string), must be freed with loci_free_result()
     pub error_message: *const c_char,
 }
 
+// Implementation for LociResult
 impl LociResult {
     fn success() -> Self {
         Self {
@@ -151,11 +188,11 @@ impl LociResult {
     }
 }
 
-/// 全局 API 实例（注意：线程安全性）
+
 static mut GLOBAL_API: Option<LociAPI> = None;
 static INIT: std::sync::Once = std::sync::Once::new();
 
-/// 初始化 Loci API
+
 #[no_mangle]
 pub extern "C" fn loci_init() -> LociResult {
     INIT.call_once(|| {
@@ -166,7 +203,7 @@ pub extern "C" fn loci_init() -> LociResult {
     LociResult::success()
 }
 
-/// 释放 Loci API
+
 #[no_mangle]
 pub extern "C" fn loci_dispose() -> LociResult {
     unsafe {
@@ -178,7 +215,7 @@ pub extern "C" fn loci_dispose() -> LociResult {
     LociResult::success()
 }
 
-/// 加载模型
+
 #[no_mangle]
 pub extern "C" fn loci_load_model(model_path: *const c_char) -> LociResult {
     if model_path.is_null() {
@@ -205,7 +242,7 @@ pub extern "C" fn loci_load_model(model_path: *const c_char) -> LociResult {
     }
 }
 
-/// 生成文本
+
 #[no_mangle]
 pub extern "C" fn loci_generate(
     prompt: *const c_char,
@@ -244,7 +281,7 @@ pub extern "C" fn loci_generate(
     }
 }
 
-/// 释放字符串内存
+
 #[no_mangle]
 pub extern "C" fn loci_free_string(s: *mut c_char) {
     if !s.is_null() {
@@ -254,40 +291,78 @@ pub extern "C" fn loci_free_string(s: *mut c_char) {
     }
 }
 
-// ===== Rust 高级 API =====
+/// Frees resources associated with a LociResult structure.
+///
+/// This function should be called after processing a LociResult to free
+/// any dynamically allocated memory, including the error message string.
+///
+/// # Parameters
+/// - `result`: Pointer to the LociResult structure to free
+///
+/// # Safety
+/// This function is unsafe as it involves raw pointer manipulation.
+/// The caller must ensure the pointer is valid and points to a LociResult
+/// that was previously allocated by Loci API functions.
+#[no_mangle]
+pub unsafe extern "C" fn loci_free_result(result: *mut LociResult) {
+    if result.is_null() {
+        return;
+    }
 
-/// 便捷的 Builder 模式 API
+    let result_ref = &mut *result;
+
+    // Free the error message if it's not null
+    if !result_ref.error_message.is_null() {
+        let _ = CString::from_raw(result_ref.error_message);
+        result_ref.error_message = std::ptr::null();
+    }
+
+    // Reset error code
+    result_ref.error_code = LociErrorCode::Success;
+}
+
+
+
+
+    /// LociBuilder structure
 pub struct LociBuilder {
     config: AIConfig,
 }
 
+// Implementation for LociBuilder
 impl LociBuilder {
+    /// new function
     pub fn new() -> Self {
         Self {
             config: AIConfig::default(),
         }
     }
     
+    /// model_path function
     pub fn model_path(mut self, path: impl Into<String>) -> Self {
         self.config.model_path = path.into();
         self
     }
     
+    /// context_size function
     pub fn context_size(mut self, size: usize) -> Self {
         self.config.context_size = size;
         self
     }
     
+    /// gpu_layers function
     pub fn gpu_layers(mut self, layers: i32) -> Self {
         self.config.gpu_layers = layers;
         self
     }
     
+    /// temperature function
     pub fn temperature(mut self, temp: f32) -> Self {
         self.config.temperature = Some(temp);
         self
     }
     
+    /// build function
     pub fn build(self) -> LociAPI {
         let mut api = LociAPI::new();
         api.update_config(self.config);
@@ -295,13 +370,15 @@ impl LociBuilder {
     }
 }
 
+// Implementation for Default
 impl Default for LociBuilder {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// 便捷函数
+
+    /// create_loci function
 pub fn create_loci() -> LociBuilder {
     LociBuilder::new()
 }

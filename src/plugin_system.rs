@@ -1,25 +1,29 @@
-//! # 双轨制插件系统（Native + WASM）
+//! Plugin System Module
 //!
-//! Phase 2 Week 5 实现，提供双轨道插件支持：
-//! - **Native 轨道**: 高性能商业插件（<2ms logit 干预）
-//! - **WASM 轨道**: 安全沙箱社区插件（完全隔离）
+//! This module provides core functionality for the Loci project.
 //!
-//! ## 核心组件
-//!
-//! - `Plugin`: 统一插件抽象接口
-//! - `NativePlugin`: Native 动态库插件
-//! - `WasmPlugin`: WASM 沙箱插件
-//! - `PluginLoader`: 双轨插件加载器
-//! - `PluginRegistry`: 双轨插件注册表
-//! - `SignatureVerifier`: Ed25519 签名验证
-//! - `Watchdog`: 超时监控与 Panic 隔离
-//!
-//! ## 设计原则
-//!
-//! 1. **性能优先**: Native 插件零抽象成本
-//! 2. **安全第一**: WASM 插件完全沙箱隔离
-//! 3. **统一接口**: 两种轨道共享相同 Trait
-//! 4. **易于扩展**: 支持自定义钩子和执行顺序
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::{VerifyingKey, Signature, Verifier as Ed25519Verifier};
@@ -31,75 +35,82 @@ use std::sync::Arc;
 use std::time::Instant;
 use wasmtime::*;
 
-// ==================== 类型定义 ====================
 
-/// 插件 ID
+
+
 pub type PluginId = String;
 
-/// 插件优先级（数字越小优先级越高）
+
 pub type PluginPriority = u32;
 
-// ==================== 插件控制流 ====================
 
-/// 插件控制流信号
+
+
 #[derive(Debug, Clone)]
+    /// PluginControlFlow enumeration
 pub enum PluginControlFlow {
-    /// 继续执行
+    
     Continue,
 
-    /// 挂起（等待外部输入）
+    
     Suspend {
         reason: String,
         user_data: Option<String>,
     },
 
-    /// 停止执行
+    
     Break,
 }
 
-// ==================== Logits 视图 ====================
 
-/// Logits 视图（零拷贝）
+
+
+    /// LogitsView structure
 pub struct LogitsView<'a> {
     pub data: &'a mut [f32],
 }
 
-// 实现 UnwindSafe 以支持 panic 捕获
+
 impl<'a> std::panic::UnwindSafe for LogitsView<'a> {}
 impl<'a> std::panic::RefUnwindSafe for LogitsView<'a> {}
 
 impl<'a> LogitsView<'a> {
+    /// new function
     pub fn new(data: &'a mut [f32]) -> Self {
         Self { data }
     }
 
+    /// len function
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
+    /// is_empty function
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
 }
 
-// ==================== 插件上下文 ====================
 
-/// 插件执行上下文
+
+
 #[derive(Clone)]
+    /// PluginContext structure
 pub struct PluginContext {
-    /// Session ID
+    
     pub session_id: String,
 
-    /// 当前生成的 token 数量
+    
     pub generated_tokens: usize,
 
-    /// 温度参数
+    
     pub temperature: f32,
 
-    /// Top-p 参数
+    
     pub top_p: f32,
 }
 
+// Implementation for Default
 impl Default for PluginContext {
     fn default() -> Self {
         Self {
@@ -111,118 +122,121 @@ impl Default for PluginContext {
     }
 }
 
-// ==================== 插件元数据 ====================
 
-/// 插件元数据
+
+
 #[derive(Debug, Clone)]
+    /// PluginMetadata structure
 pub struct PluginMetadata {
-    /// 插件 ID
+    
     pub id: PluginId,
 
-    /// 插件名称
+    
     pub name: String,
 
-    /// 插件版本
+    
     pub version: String,
 
-    /// 插件描述
+    
     pub description: String,
 
-    /// 插件作者
+    
     pub author: String,
 
-    /// 插件类型
+    
     pub plugin_type: PluginType,
 
-    /// 插件路径
+    
     pub path: PathBuf,
 
-    /// 优先级
+    
     pub priority: PluginPriority,
 
-    /// 是否启用
+    
     pub enabled: bool,
 
-    /// 签名验证状态
+    
     pub signature_verified: bool,
 
-    /// 插件哈希
+    
     pub hash: String,
 }
 
-/// 插件类型
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    /// PluginType enumeration
 pub enum PluginType {
-    /// Native 动态库插件（高性能，商业闭源）
+    
     Native,
 
-    /// WASM 沙箱插件（安全隔离，社区第三方）
+    
     Wasm,
 }
 
-// ==================== 统一插件接口 ====================
 
-/// 统一插件 Trait（Native + WASM 共享）
+
+
 pub trait Plugin: Send + Sync + std::panic::RefUnwindSafe {
-    /// 获取插件元数据
+    
     fn metadata(&self) -> &PluginMetadata;
 
-    /// 初始化插件
+    
     fn initialize(&mut self) -> Result<()> {
         Ok(())
     }
 
-    /// 清理插件资源
+    
     fn cleanup(&mut self) -> Result<()> {
         Ok(())
     }
 
-    /// 预处理提示词
+    
     fn pre_process(&self, prompt: &mut String, _ctx: &PluginContext) -> Result<PluginControlFlow> {
         let _ = prompt;
         Ok(PluginControlFlow::Continue)
     }
 
-    /// 转换 logits（采样前钩子）
+    
     fn transform_logits(&self, logits: &mut LogitsView, _ctx: &PluginContext) -> Result<PluginControlFlow> {
         let _ = logits;
         Ok(PluginControlFlow::Continue)
     }
 
-    /// 后处理生成的 token
+    
     fn post_process(&self, token: &mut String, _ctx: &PluginContext) -> Result<PluginControlFlow> {
         let _ = token;
         Ok(PluginControlFlow::Continue)
     }
 
-    /// 生成 token 回调
+    
     fn on_token_generated(&self, token_id: i32, token_text: &str, _ctx: &PluginContext) -> Result<PluginControlFlow> {
         let _ = (token_id, token_text);
         Ok(PluginControlFlow::Continue)
     }
 
-    /// 会话开始回调
+    
     fn on_session_start(&self, session_id: &str) -> Result<()> {
         let _ = session_id;
         Ok(())
     }
 
-    /// 会话结束回调
+    
     fn on_session_end(&self, session_id: &str) -> Result<()> {
         let _ = session_id;
         Ok(())
     }
 }
 
-// ==================== Native 插件 FFI ====================
 
-/// Native 插件 FFI 函数指针
+
+
 type NativeTransformLogitsFn = unsafe extern "C" fn(*mut f32, usize) -> i32;
 type NativeOnTokenGeneratedFn = unsafe extern "C" fn(i32, *const u8, usize) -> i32;
 type NativeInitializeFn = unsafe extern "C" fn() -> i32;
 type NativeCleanupFn = unsafe extern "C" fn() -> i32;
 
-/// Native 插件实现
+
+    /// NativePlugin structure
 pub struct NativePlugin {
     metadata: PluginMetadata,
     #[allow(dead_code)]
@@ -233,14 +247,16 @@ pub struct NativePlugin {
     cleanup_fn: Option<NativeCleanupFn>,
 }
 
+// Implementation for NativePlugin
 impl NativePlugin {
-    /// 加载 Native 插件
+    
+    /// load function
     pub fn load(path: &Path, metadata: PluginMetadata) -> Result<Self> {
         unsafe {
             let library = Library::new(path)
                 .with_context(|| format!("Failed to load Native plugin: {:?}", path))?;
 
-            // 加载函数指针（可选）
+            
             let transform_logits_fn: Option<NativeTransformLogitsFn> =
                 library.get(b"loci_transform_logits").ok().map(|sym| *sym);
 
@@ -265,9 +281,11 @@ impl NativePlugin {
     }
 }
 
-// 实现 RefUnwindSafe 以支持 panic 捕获
+
+// Implementation for std
 impl std::panic::RefUnwindSafe for NativePlugin {}
 
+// Implementation for Plugin
 impl Plugin for NativePlugin {
     fn metadata(&self) -> &PluginMetadata {
         &self.metadata
@@ -343,9 +361,10 @@ impl Plugin for NativePlugin {
     }
 }
 
-// ==================== WASM 插件 ====================
 
-/// WASM 插件实现
+
+
+    /// WasmPlugin structure
 pub struct WasmPlugin {
     metadata: PluginMetadata,
     #[allow(dead_code)]
@@ -354,20 +373,22 @@ pub struct WasmPlugin {
     store: Mutex<Store<()>>,
 }
 
+// Implementation for WasmPlugin
 impl WasmPlugin {
-    /// 加载 WASM 插件
+    
+    /// load function
     pub fn load(path: &Path, metadata: PluginMetadata) -> Result<Self> {
-        // 创建 WASM 引擎配置
+        
         let mut config = Config::new();
 
-        // 禁用危险能力（安全沙箱）
-        config.wasm_threads(false);  // 禁用线程
-        config.wasm_bulk_memory(true); // 允许批量内存操作（性能优化）
-        config.wasm_simd(true);  // 允许 SIMD（性能优化）
+        
+        config.wasm_threads(false);  
+        config.wasm_bulk_memory(true); 
+        config.wasm_simd(true);  
 
         let engine = Engine::new(&config)?;
 
-        // 加载 WASM 模块
+        
         let wasm_bytes = std::fs::read(path)
             .with_context(|| format!("Failed to read WASM plugin: {:?}", path))?;
 
@@ -384,20 +405,20 @@ impl WasmPlugin {
         })
     }
 
-    /// 调用 WASM 导出函数
+    
     fn call_wasm_fn(&self, fn_name: &str, params: &[Val]) -> Result<Vec<Val>> {
         let mut store = self.store.lock();
 
-        // 创建实例
+        
         let instance = Instance::new(&mut *store, &self.module, &[])
             .context("Failed to instantiate WASM module")?;
 
-        // 获取函数
+        
         let func = instance
             .get_func(&mut *store, fn_name)
             .ok_or_else(|| anyhow::anyhow!("WASM function '{}' not found", fn_name))?;
 
-        // 调用函数
+        
         let mut results = vec![Val::I32(0)];
         func.call(&mut *store, params, &mut results)
             .with_context(|| format!("Failed to call WASM function '{}'", fn_name))?;
@@ -406,16 +427,18 @@ impl WasmPlugin {
     }
 }
 
-// 实现 RefUnwindSafe 以支持 panic 捕获
+
+// Implementation for std
 impl std::panic::RefUnwindSafe for WasmPlugin {}
 
+// Implementation for Plugin
 impl Plugin for WasmPlugin {
     fn metadata(&self) -> &PluginMetadata {
         &self.metadata
     }
 
     fn initialize(&mut self) -> Result<()> {
-        // 调用 WASM 初始化函数（如果存在）
+        
         match self.call_wasm_fn("loci_initialize", &[]) {
             Ok(results) => {
                 if let Some(Val::I32(0)) = results.first() {
@@ -424,35 +447,35 @@ impl Plugin for WasmPlugin {
                     bail!("WASM plugin initialization failed")
                 }
             }
-            Err(_) => Ok(()), // 初始化函数可选
+            Err(_) => Ok(()), 
         }
     }
 
     fn cleanup(&mut self) -> Result<()> {
-        // 调用 WASM 清理函数（如果存在）
+        
         match self.call_wasm_fn("loci_cleanup", &[]) {
             Ok(_) => Ok(()),
-            Err(_) => Ok(()), // 清理函数可选
+            Err(_) => Ok(()), 
         }
     }
 
     fn transform_logits(&self, logits: &mut LogitsView, _ctx: &PluginContext) -> Result<PluginControlFlow> {
         let mut store = self.store.lock();
 
-        // 创建实例
+        
         let instance = Instance::new(&mut *store, &self.module, &[])
             .context("Failed to instantiate WASM module")?;
 
-        // 获取内存
+        
         let memory = instance
             .get_memory(&mut *store, "memory")
             .ok_or_else(|| anyhow::anyhow!("WASM memory not found"))?;
 
-        // 分配内存并复制 logits
+        
         let logits_len = logits.len();
         let logits_size_bytes = logits_len * std::mem::size_of::<f32>();
 
-        // 写入 logits 到 WASM 内存（从偏移 0 开始）
+        
         let logits_ptr = 0;
         unsafe {
             let data_slice = memory.data_mut(&mut *store);
@@ -467,7 +490,7 @@ impl Plugin for WasmPlugin {
             );
         }
 
-        // 调用 WASM 函数
+        
         let func = instance
             .get_func(&mut *store, "loci_transform_logits")
             .ok_or_else(|| anyhow::anyhow!("WASM function 'loci_transform_logits' not found"))?;
@@ -479,7 +502,7 @@ impl Plugin for WasmPlugin {
             &mut results,
         )?;
 
-        // 读回修改后的 logits
+        
         let data_slice = memory.data(&mut *store);
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -489,7 +512,7 @@ impl Plugin for WasmPlugin {
             );
         }
 
-        // 处理返回值
+        
         if let Some(Val::I32(ret)) = results.first() {
             match ret {
                 0 => Ok(PluginControlFlow::Continue),
@@ -510,7 +533,7 @@ impl Plugin for WasmPlugin {
         let instance = Instance::new(&mut *store, &self.module, &[])?;
         let memory = instance.get_memory(&mut *store, "memory").ok_or_else(|| anyhow::anyhow!("WASM memory not found"))?;
 
-        // 写入 token_text 到 WASM 内存
+        
         let text_bytes = token_text.as_bytes();
         let text_ptr = 0;
         let data_slice = memory.data_mut(&mut *store);
@@ -519,7 +542,7 @@ impl Plugin for WasmPlugin {
         }
         data_slice[..text_bytes.len()].copy_from_slice(text_bytes);
 
-        // 调用 WASM 函数
+        
         let func = instance
             .get_func(&mut *store, "loci_on_token_generated")
             .ok_or_else(|| anyhow::anyhow!("WASM function 'loci_on_token_generated' not found"))?;
@@ -546,15 +569,18 @@ impl Plugin for WasmPlugin {
     }
 }
 
-// ==================== 签名验证器 ====================
 
-/// Ed25519 签名验证器
+
+
+    /// SignatureVerifier structure
 pub struct SignatureVerifier {
     official_public_key: VerifyingKey,
 }
 
+// Implementation for SignatureVerifier
 impl SignatureVerifier {
-    /// 创建签名验证器
+    
+    /// new function
     pub fn new(public_key_bytes: &[u8; 32]) -> Result<Self> {
         let official_public_key = VerifyingKey::from_bytes(public_key_bytes)
             .map_err(|e| anyhow::anyhow!("Invalid Ed25519 public key: {}", e))?;
@@ -564,13 +590,14 @@ impl SignatureVerifier {
         })
     }
 
-    /// 验证插件签名
+    
+    /// verify_plugin function
     pub fn verify_plugin(&self, plugin_path: &Path) -> Result<()> {
         let plugin_data = std::fs::read(plugin_path)?;
         let sig_path = plugin_path.with_extension("sig");
         let sig_data = std::fs::read(&sig_path)?;
 
-        // 确保签名长度正确
+        
         if sig_data.len() != 64 {
             bail!("Invalid signature length: expected 64 bytes, got {}", sig_data.len());
         }
@@ -586,7 +613,8 @@ impl SignatureVerifier {
         Ok(())
     }
 
-    /// 计算插件哈希
+    
+    /// compute_hash function
     pub fn compute_hash(&self, plugin_path: &Path) -> Result<String> {
         use sha2::{Digest, Sha256};
 
@@ -599,9 +627,10 @@ impl SignatureVerifier {
     }
 }
 
-// ==================== 资源配额与 Watchdog ====================
+
 
 #[derive(Debug, Clone)]
+    /// ResourceQuota structure
 pub struct ResourceQuota {
     pub max_execution_time_ms: u64,
     #[allow(dead_code)]
@@ -609,8 +638,10 @@ pub struct ResourceQuota {
     pub enabled: bool,
 }
 
+// Implementation for ResourceQuota
 impl ResourceQuota {
-    /// 创建新的资源配额
+    
+    /// new function
     pub fn new(max_execution_time_ms: u64, max_memory_bytes: usize) -> Self {
         Self {
             max_execution_time_ms,
@@ -620,6 +651,7 @@ impl ResourceQuota {
     }
 }
 
+// Implementation for Default
 impl Default for ResourceQuota {
     fn default() -> Self {
         Self {
@@ -630,12 +662,15 @@ impl Default for ResourceQuota {
     }
 }
 
+    /// Watchdog structure
 pub struct Watchdog {
     quota: ResourceQuota,
     timeout_count: Arc<Mutex<HashMap<PluginId, usize>>>,
 }
 
+// Implementation for Watchdog
 impl Watchdog {
+    /// new function
     pub fn new(quota: ResourceQuota) -> Self {
         Self {
             quota,
@@ -643,6 +678,7 @@ impl Watchdog {
         }
     }
 
+    /// execute function
     pub fn execute<F, T>(&self, plugin_id: &str, operation: F) -> Result<T>
     where
         F: FnOnce() -> Result<T>,
@@ -672,9 +708,10 @@ impl Watchdog {
     }
 }
 
-// ==================== 双轨插件注册表 ====================
 
-/// 双轨插件注册表
+
+
+    /// PluginRegistry structure
 pub struct PluginRegistry {
     native_plugins: Arc<RwLock<HashMap<PluginId, Arc<dyn Plugin>>>>,
     wasm_plugins: Arc<RwLock<HashMap<PluginId, Arc<dyn Plugin>>>>,
@@ -684,7 +721,9 @@ pub struct PluginRegistry {
     watchdog: Arc<Watchdog>,
 }
 
+// Implementation for PluginRegistry
 impl PluginRegistry {
+    /// new function
     pub fn new(quota: ResourceQuota) -> Self {
         Self {
             native_plugins: Arc::new(RwLock::new(HashMap::new())),
@@ -696,21 +735,23 @@ impl PluginRegistry {
         }
     }
 
+    /// set_verifier function
     pub fn set_verifier(&mut self, verifier: SignatureVerifier) {
         self.verifier = Some(Arc::new(verifier));
     }
 
+    /// register function
     pub fn register(&self, plugin: Arc<dyn Plugin>, metadata: PluginMetadata) -> Result<()> {
         let plugin_id = metadata.id.clone();
 
-        // 验证签名
+        
         if let Some(verifier) = &self.verifier {
             if !metadata.signature_verified {
                 verifier.verify_plugin(&metadata.path)?;
             }
         }
 
-        // 根据类型注册到不同轨道
+        
         match metadata.plugin_type {
             PluginType::Native => {
                 self.native_plugins.write().insert(plugin_id.clone(), plugin);
@@ -722,7 +763,7 @@ impl PluginRegistry {
 
         self.metadata.write().insert(plugin_id.clone(), metadata.clone());
 
-        // 更新优先级排序
+        
         let mut priority_order = self.priority_order.write();
         priority_order.push(plugin_id.clone());
         priority_order.sort_by_key(|id| {
@@ -737,6 +778,7 @@ impl PluginRegistry {
         Ok(())
     }
 
+    /// get_all_plugins function
     pub fn get_all_plugins(&self) -> Vec<Arc<dyn Plugin>> {
         let native = self.native_plugins.read();
         let wasm = self.wasm_plugins.read();
@@ -750,6 +792,7 @@ impl PluginRegistry {
             .collect()
     }
 
+    /// transform_logits function
     pub fn transform_logits(&self, logits: &mut LogitsView, ctx: &PluginContext) -> Result<PluginControlFlow> {
         let plugins = self.get_all_plugins();
         let metadata = self.metadata.read();
@@ -776,6 +819,7 @@ impl PluginRegistry {
         Ok(PluginControlFlow::Continue)
     }
 
+    /// stats function
     pub fn stats(&self) -> PluginRegistryStats {
         let native_count = self.native_plugins.read().len();
         let wasm_count = self.wasm_plugins.read().len();
@@ -791,6 +835,7 @@ impl PluginRegistry {
 }
 
 #[derive(Debug, Clone)]
+    /// PluginRegistryStats structure
 pub struct PluginRegistryStats {
     pub total_plugins: usize,
     pub native_plugins: usize,

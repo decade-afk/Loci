@@ -1,15 +1,8 @@
-/**
- * Phase 1: 推理引擎核心
- *
- * 直接FFI调用llama.cpp，实现：
- * 1. Model加载 (使用GGUF零拷贝)
- * 2. Context管理 (KV Cache)
- * 3. 推理循环: Tokenize -> Forward -> Sample -> Detokenize
- * 4. 流式生成支持
- * 5. 性能监控
- *
- * 目标：Eval Speed > 10 tokens/s (CPU), > 20 tokens/s (GPU)
- */
+//! Engine Module
+//!
+//! This module provides core functionality for the Loci project.
+//!
+
 
 use std::sync::{Arc, RwLock};
 use anyhow::{Result, Context, bail};
@@ -17,8 +10,8 @@ use anyhow::{Result, Context, bail};
 use crate::backend::{ComputeBackend, detect_backend};
 use crate::gguf::GGUFModel;
 
-// ==================== FFI声明（待bindgen生成） ====================
-// 这些将由build.rs生成，这里先手动声明核心接口
+
+
 
 #[repr(C)]
 struct LlamaModel {
@@ -37,17 +30,19 @@ struct LlamaSampler {
 
 #[repr(C)]
 #[derive(Debug, Clone)]
+    /// LlamaModelParams structure
 pub struct LlamaModelParams {
     pub n_gpu_layers: i32,
     pub split_mode: i32,
     pub main_gpu: i32,
-    pub vocab_only: u8,    // C的bool是uint8_t
+    pub vocab_only: u8,    
     pub use_mmap: u8,
     pub use_mlock: u8,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone)]
+    /// LlamaContextParams structure
 pub struct LlamaContextParams {
     pub n_ctx: u32,
     pub n_batch: u32,
@@ -58,7 +53,7 @@ pub struct LlamaContextParams {
     pub rope_freq_scale: f32,
 }
 
-// FFI函数声明（将由bindgen自动生成）
+
 #[link(name = "llama", kind = "static")]
 extern "C" {
     fn llama_backend_init();
@@ -103,7 +98,7 @@ extern "C" {
     fn llama_sampler_free(sampler: *mut LlamaSampler);
     fn llama_sampler_sample(sampler: *mut LlamaSampler, ctx: *mut LlamaContext, idx: i32) -> i32;
 
-    // 修复P1-3：添加EOS token查询
+    
     fn llama_token_eos(model: *const LlamaModel) -> i32;
     #[allow(dead_code)]
     fn llama_token_bos(model: *const LlamaModel) -> i32;
@@ -131,40 +126,42 @@ struct LlamaSamplerParams {
     penalty_present: f32,
 }
 
-// ==================== Rust安全封装 ====================
 
-/// Phase 1推理引擎
+
+
+    /// LociEngine structure
 pub struct LociEngine {
-    /// 内部状态（线程安全）
+    
     inner: Arc<RwLock<EngineInner>>,
 
-    /// 计算后端
+    
     backend: Arc<dyn ComputeBackend>,
 }
 
 struct EngineInner {
-    /// llama.cpp模型指针
+    
     model: Option<*mut LlamaModel>,
 
-    /// llama.cpp上下文指针
+    
     context: Option<*mut LlamaContext>,
 
-    /// 采样器
+    
     sampler: Option<*mut LlamaSampler>,
 
-    /// GGUF模型（用于元数据访问）
+    
     #[allow(dead_code)]
     gguf: Option<Arc<GGUFModel>>,
 
-    /// 配置参数
+    
     #[allow(dead_code)]
     config: EngineConfig,
 
-    /// 性能统计
+    
     stats: PerformanceStats,
 }
 
 #[derive(Debug, Clone)]
+    /// EngineConfig structure
 pub struct EngineConfig {
     pub model_path: String,
     pub n_ctx: u32,
@@ -177,6 +174,7 @@ pub struct EngineConfig {
     pub repeat_penalty: f32,
 }
 
+// Implementation for Default
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
@@ -194,6 +192,7 @@ impl Default for EngineConfig {
 }
 
 #[derive(Debug, Clone, Default)]
+    /// PerformanceStats structure
 pub struct PerformanceStats {
     pub load_time_ms: u64,
     pub prompt_eval_count: u64,
@@ -202,7 +201,9 @@ pub struct PerformanceStats {
     pub eval_time_ms: u64,
 }
 
+// Implementation for PerformanceStats
 impl PerformanceStats {
+    /// prompt_tokens_per_second function
     pub fn prompt_tokens_per_second(&self) -> f64 {
         if self.prompt_eval_time_ms == 0 {
             return 0.0;
@@ -210,6 +211,7 @@ impl PerformanceStats {
         (self.prompt_eval_count as f64 / self.prompt_eval_time_ms as f64) * 1000.0
     }
 
+    /// eval_tokens_per_second function
     pub fn eval_tokens_per_second(&self) -> f64 {
         if self.eval_time_ms == 0 {
             return 0.0;
@@ -218,23 +220,25 @@ impl PerformanceStats {
     }
 }
 
-// ==================== Engine实现 ====================
 
+
+// Implementation for LociEngine
 impl LociEngine {
-    /// Phase 1核心方法：加载模型
-    ///
-    /// 目标：Load Time < 500ms
+    
+    
+    
+    /// new function
     pub fn new(config: EngineConfig) -> Result<Self> {
         let load_start = std::time::Instant::now();
 
         eprintln!("🚀 Initializing Loci Engine (Phase 1)");
         eprintln!("   Model: {}", config.model_path);
 
-        // 步骤1：自动探测Backend
+        
         let backend = detect_backend();
         eprintln!("   Backend: {}", backend.name());
 
-        // 步骤2：根据Backend推荐GPU层数
+        
         let recommended_layers = backend.recommended_gpu_layers();
         let n_gpu_layers = if config.n_gpu_layers < 0 {
             recommended_layers as i32
@@ -244,21 +248,21 @@ impl LociEngine {
 
         eprintln!("   GPU Layers: {}", n_gpu_layers);
 
-        // 步骤3：初始化llama.cpp backend
+        
         unsafe {
             llama_backend_init();
         }
 
-        // 步骤4：加载GGUF元数据（零拷贝）
+        
         let gguf = GGUFModel::load(&config.model_path)
             .context("Failed to load GGUF model")?;
         eprintln!("   ✅ GGUF loaded: {:.2} GB", gguf.total_size_gb());
 
-        // 步骤5：加载llama.cpp模型
+        
         let mut model_params = unsafe { llama_model_default_params() };
         model_params.n_gpu_layers = n_gpu_layers;
-        model_params.use_mmap = 1;  // Phase 1要求：零拷贝 (true)
-        model_params.use_mlock = 0;  // false
+        model_params.use_mmap = 1;  
+        model_params.use_mlock = 0;  
 
         let model_path_c = std::ffi::CString::new(config.model_path.as_str())
             .context("Invalid model path")?;
@@ -273,7 +277,7 @@ impl LociEngine {
 
         eprintln!("   ✅ Model loaded");
 
-        // 步骤6：创建Context
+        
         let mut ctx_params = unsafe { llama_context_default_params() };
         ctx_params.n_ctx = config.n_ctx;
         ctx_params.n_batch = config.n_batch;
@@ -291,7 +295,7 @@ impl LociEngine {
 
         eprintln!("   ✅ Context created (n_ctx={})", config.n_ctx);
 
-        // 步骤7：初始化采样器
+        
         let mut sampler_params = unsafe { llama_sampler_chain_default_params() };
         sampler_params.temp = config.temperature;
         sampler_params.top_k = config.top_k;
@@ -333,11 +337,12 @@ impl LociEngine {
         })
     }
 
-    /// Phase 1核心方法：文本生成（阻塞式，返回完整结果）
-    ///
-    /// 实现完整的推理循环：Tokenize -> Forward -> Sample -> Detokenize
-    ///
-    /// **注意**: 此方法会阻塞直到生成完成。如需流式输出，请使用 `generate_stream`。
+    
+    
+    
+    
+    
+    /// generate function
     pub fn generate(&self, prompt: &str, max_tokens: usize) -> Result<String> {
         let mut inner = self.inner.write().unwrap();
 
@@ -347,11 +352,11 @@ impl LociEngine {
 
         eprintln!("🔮 Generating (max_tokens={})...", max_tokens);
 
-        // 修复P1-3：动态查询EOS token
+        
         let eos_token = unsafe { llama_token_eos(model) };
         eprintln!("   EOS token: {}", eos_token);
 
-        // ========== 步骤1：Tokenize ==========
+        
         let prompt_c = std::ffi::CString::new(prompt)?;
         let mut tokens = vec![0i32; 4096];
 
@@ -362,8 +367,8 @@ impl LociEngine {
                 prompt.len() as i32,
                 tokens.as_mut_ptr(),
                 tokens.len() as i32,
-                true,  // add_special (BOS)
-                true,  // parse_special
+                true,  
+                true,  
             )
         };
 
@@ -374,14 +379,14 @@ impl LociEngine {
         tokens.truncate(n_tokens as usize);
         eprintln!("   Prompt tokens: {}", n_tokens);
 
-        // ========== 步骤2：Prompt Evaluation ==========
+        
         let prompt_eval_start = std::time::Instant::now();
 
-        // 构建batch并执行prompt evaluation
+        
         let mut pos_data: Vec<i32> = (0..tokens.len() as i32).collect();
         let mut seq_id_data = vec![1i32; tokens.len()];
         let mut logits_data = vec![0i8; tokens.len()];
-        logits_data[tokens.len() - 1] = 1;  // 只需要最后一个token的logits
+        logits_data[tokens.len() - 1] = 1;  
 
         let batch = LlamaBatch {
             n_tokens: tokens.len() as i32,
@@ -405,30 +410,30 @@ impl LociEngine {
         eprintln!("   ✅ Prompt evaluated: {:.2} tokens/s",
                  inner.stats.prompt_tokens_per_second());
 
-        // ========== 步骤3：生成循环 ==========
+        
         let mut generated_text = String::new();
         let eval_start = std::time::Instant::now();
         let mut current_pos = tokens.len() as i32;
 
-        // 预分配buffer，避免每次循环创建新Vec（修复P0-2内存安全问题）
+        
         let mut next_tokens_buf = vec![0i32];
         let mut next_pos_buf = vec![0i32];
         let mut next_seq_id_buf = vec![1i32];
         let mut next_logits_buf = vec![1i8];
 
         for i in 0..max_tokens {
-            // 3.1 采样下一个token
+            
             let next_token = unsafe {
                 llama_sampler_sample(sampler, context, -1)
             };
 
-            // 修复P1-3：使用动态查询的EOS token
+            
             if next_token == eos_token {
                 eprintln!("   Reached EOS (token={})", eos_token);
                 break;
             }
 
-            // 3.2 Detokenize
+            
             let mut piece_buf = vec![0i8; 256];
             let piece_len = unsafe {
                 llama_token_to_piece(
@@ -444,7 +449,7 @@ impl LociEngine {
                 let piece_bytes = unsafe {
                     std::slice::from_raw_parts(piece_buf.as_ptr() as *const u8, piece_len as usize)
                 };
-                // 修复P1-5：添加UTF-8验证
+                
                 match std::str::from_utf8(piece_bytes) {
                     Ok(piece) => {
                         generated_text.push_str(piece);
@@ -457,8 +462,8 @@ impl LociEngine {
                 }
             }
 
-            // 3.3 Forward pass (下一轮)
-            // 复用预分配的buffer（修复P0-2）
+            
+            
             next_tokens_buf[0] = next_token;
             next_pos_buf[0] = current_pos;
 
@@ -495,32 +500,33 @@ impl LociEngine {
         Ok(generated_text)
     }
 
-    /// Generate text with streaming token-level callbacks.
-    ///
-    /// Implements the complete inference loop, invoking the callback
-    /// immediately for each generated token.
-    ///
-    /// # Parameters
-    /// - `prompt`: Input prompt text
-    /// - `max_tokens`: Maximum number of tokens to generate
-    /// - `callback`: Streaming callback (implements `StreamCallback` trait)
-    ///
-    /// # Returns
-    /// - `StreamStats`: Generation statistics
-    ///
-    /// # Example
-    /// ```no_run
-    /// use loci::{LociEngine, EngineConfig, ConsoleCallback};
-    ///
-    /// let engine = LociEngine::new(EngineConfig::default())?;
-    /// let stats = engine.generate_stream(
-    ///     "Hello",
-    ///     50,
-    ///     &mut ConsoleCallback::new(true)
-    /// )?;
-    /// println!("Generated {} tokens", stats.generated_tokens);
-    /// # Ok::<(), anyhow::Error>(())
-    /// ```
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    /// generate_stream function
     pub fn generate_stream<C>(
         &self,
         prompt: &str,
@@ -545,7 +551,7 @@ impl LociEngine {
         let mut stats = StreamStats::new();
         let total_start = std::time::Instant::now();
 
-        // Step 1: Tokenize prompt
+        
         let prompt_c = std::ffi::CString::new(prompt)?;
         let mut tokens = vec![0i32; 4096];
 
@@ -569,7 +575,7 @@ impl LociEngine {
         stats.prompt_tokens = n_tokens as usize;
         eprintln!("   Prompt tokens: {}", n_tokens);
 
-        // Step 2: Evaluate prompt
+        
         let prompt_eval_start = std::time::Instant::now();
 
         let mut pos_data: Vec<i32> = (0..tokens.len() as i32).collect();
@@ -600,11 +606,11 @@ impl LociEngine {
         eprintln!("   ✅ Prompt evaluated: {:.2} tokens/s",
                  (stats.prompt_tokens as f64 / stats.prompt_time_ms as f64) * 1000.0);
 
-        // Step 3: Streaming generation loop
+        
         let eval_start = std::time::Instant::now();
         let mut current_pos = tokens.len() as i32;
 
-        // Pre-allocate buffers to avoid allocations in the hot loop
+        
         let mut next_tokens_buf = vec![0i32];
         let mut next_pos_buf = vec![0i32];
         let mut next_seq_id_buf = vec![1i32];
@@ -620,7 +626,7 @@ impl LociEngine {
                 break;
             }
 
-            // Detokenize the sampled token
+            
             let mut piece_buf = vec![0i8; 256];
             let piece_len = unsafe {
                 llama_token_to_piece(
@@ -658,7 +664,7 @@ impl LociEngine {
                 }
             }
 
-            // Forward pass for next iteration
+            
             next_tokens_buf[0] = next_token;
             next_pos_buf[0] = current_pos;
 
@@ -701,24 +707,27 @@ impl LociEngine {
         Ok(stats)
     }
 
-    /// 获取性能统计
+    
+    /// stats function
     pub fn stats(&self) -> PerformanceStats {
         self.inner.read().unwrap().stats.clone()
     }
 
-    /// 获取Backend信息
+    
+    /// backend_name function
     pub fn backend_name(&self) -> String {
         self.backend.name().to_string()
     }
 }
 
-// ==================== 资源清理 ====================
 
+
+// Implementation for Drop
 impl Drop for EngineInner {
     fn drop(&mut self) {
         eprintln!("🧹 Cleaning up Loci Engine...");
 
-        // 使用panic::catch_unwind确保即使FFI调用panic也不会泄漏资源
+        
         unsafe {
             if let Some(sampler) = self.sampler.take() {
                 let _ = std::panic::catch_unwind(|| {
@@ -747,7 +756,7 @@ impl Drop for EngineInner {
     }
 }
 
-// ==================== 线程安全性 ====================
+
 
 unsafe impl Send for LociEngine {}
 unsafe impl Sync for LociEngine {}

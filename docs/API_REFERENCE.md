@@ -1410,5 +1410,5 @@ This API reference is for Loci version 0.1.0.
 
 ---
 
-**Last Updated**: 2025-12-28
+**Last Updated**: 2026-01-01
 **License**: MIT

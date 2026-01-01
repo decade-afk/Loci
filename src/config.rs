@@ -1,48 +1,46 @@
-/**
- * Loci 配置管理系统
- *
- * 核心特性：
- * 1. 多格式支持（TOML/JSON/环境变量）
- * 2. 配置验证
- * 3. 环境变量覆盖
- * 4. 热重载支持
- */
+//! Config Module
+//!
+//! This module provides core functionality for the Loci project.
+//!
+
 
 use anyhow::{Result, Context, bail};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::collections::HashMap;
 
-// ==================== 配置结构 ====================
 
-/// Loci 全局配置
+
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+    /// LociConfig structure
 pub struct LociConfig {
-    /// 引擎配置
+    
     #[serde(default)]
     pub engine: EngineSettings,
 
-    /// 后端配置
+    
     #[serde(default)]
     pub backend: BackendSettings,
 
-    /// 内存配置
+    
     #[serde(default)]
     pub memory: MemorySettings,
 
-    /// 插件配置
+    
     #[serde(default)]
     pub plugins: PluginSettings,
 
-    /// 日志配置
+    
     #[serde(default)]
     pub logging: LoggingSettings,
 
-    /// HTTP 服务器配置
+    
     #[serde(default)]
     pub server: ServerSettings,
 }
 
+// Implementation for Default
 impl Default for LociConfig {
     fn default() -> Self {
         Self {
@@ -56,37 +54,39 @@ impl Default for LociConfig {
     }
 }
 
-/// 引擎设置
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+    /// EngineSettings structure
 pub struct EngineSettings {
-    /// 模型路径
+    
     pub model_path: Option<String>,
 
-    /// 批次大小
+    
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
 
-    /// 线程数（0 = 自动检测）
+    
     #[serde(default)]
     pub n_threads: usize,
 
-    /// 上下文长度
+    
     #[serde(default = "default_context_length")]
     pub context_length: usize,
 
-    /// GPU 层数（-1 = 全部）
+    
     #[serde(default = "default_gpu_layers")]
     pub n_gpu_layers: i32,
 
-    /// 是否使用 mmap
+    
     #[serde(default = "default_true")]
     pub use_mmap: bool,
 
-    /// 是否使用 mlock
+    
     #[serde(default)]
     pub use_mlock: bool,
 }
 
+// Implementation for Default
 impl Default for EngineSettings {
     fn default() -> Self {
         Self {
@@ -101,22 +101,24 @@ impl Default for EngineSettings {
     }
 }
 
-/// 后端设置
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+    /// BackendSettings structure
 pub struct BackendSettings {
-    /// 后端类型（cpu/cuda/metal/rocm）
+    
     #[serde(default = "default_backend")]
     pub backend_type: String,
 
-    /// 设备 ID
+    
     #[serde(default)]
     pub device_id: usize,
 
-    /// 是否启用 Kernel 融合
+    
     #[serde(default = "default_true")]
     pub enable_fusion: bool,
 }
 
+// Implementation for Default
 impl Default for BackendSettings {
     fn default() -> Self {
         Self {
@@ -127,26 +129,28 @@ impl Default for BackendSettings {
     }
 }
 
-/// 内存设置
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+    /// MemorySettings structure
 pub struct MemorySettings {
-    /// VRAM 大小（MB）
+    
     #[serde(default = "default_vram")]
     pub vram_mb: u64,
 
-    /// RAM 大小（MB）
+    
     #[serde(default = "default_ram")]
     pub ram_mb: u64,
 
-    /// Block 大小（KB）
+    
     #[serde(default = "default_block_size")]
     pub block_size_kb: usize,
 
-    /// 是否启用 Swap
+    
     #[serde(default = "default_true")]
     pub enable_swap: bool,
 }
 
+// Implementation for Default
 impl Default for MemorySettings {
     fn default() -> Self {
         Self {
@@ -158,22 +162,24 @@ impl Default for MemorySettings {
     }
 }
 
-/// 插件设置
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+    /// PluginSettings structure
 pub struct PluginSettings {
-    /// 插件目录
+    
     #[serde(default = "default_plugin_dir")]
     pub plugin_dir: String,
 
-    /// 是否启用插件
+    
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// 自动加载插件列表
+    
     #[serde(default)]
     pub auto_load: Vec<String>,
 }
 
+// Implementation for Default
 impl Default for PluginSettings {
     fn default() -> Self {
         Self {
@@ -184,25 +190,27 @@ impl Default for PluginSettings {
     }
 }
 
-/// 日志设置
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+    /// LoggingSettings structure
 pub struct LoggingSettings {
-    /// 日志级别（trace/debug/info/warn/error）
+    
     #[serde(default = "default_log_level")]
     pub level: String,
 
-    /// 日志输出格式（text/json）
+    
     #[serde(default = "default_log_format")]
     pub format: String,
 
-    /// 日志文件路径
+    
     pub file: Option<String>,
 
-    /// 是否输出到控制台
+    
     #[serde(default = "default_true")]
     pub console: bool,
 }
 
+// Implementation for Default
 impl Default for LoggingSettings {
     fn default() -> Self {
         Self {
@@ -214,29 +222,31 @@ impl Default for LoggingSettings {
     }
 }
 
-/// HTTP 服务器设置
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+    /// ServerSettings structure
 pub struct ServerSettings {
-    /// 监听地址
+    
     #[serde(default = "default_host")]
     pub host: String,
 
-    /// 监听端口
+    
     #[serde(default = "default_port")]
     pub port: u16,
 
-    /// 是否启用 CORS
+    
     #[serde(default = "default_true")]
     pub enable_cors: bool,
 
-    /// API 密钥
+    
     pub api_key: Option<String>,
 
-    /// 最大请求大小（MB）
+    
     #[serde(default = "default_max_request_size")]
     pub max_request_size_mb: usize,
 }
 
+// Implementation for Default
 impl Default for ServerSettings {
     fn default() -> Self {
         Self {
@@ -249,7 +259,7 @@ impl Default for ServerSettings {
     }
 }
 
-// ==================== 默认值函数 ====================
+
 
 fn default_batch_size() -> usize { 512 }
 fn default_context_length() -> usize { 2048 }
@@ -266,17 +276,20 @@ fn default_host() -> String { "127.0.0.1".to_string() }
 fn default_port() -> u16 { 8080 }
 fn default_max_request_size() -> usize { 100 }
 
-// ==================== 配置加载器 ====================
 
-/// 配置加载器
+
+
+    /// ConfigLoader structure
 pub struct ConfigLoader {
     config: LociConfig,
     #[allow(dead_code)]
     env_overrides: HashMap<String, String>,
 }
 
+// Implementation for ConfigLoader
 impl ConfigLoader {
-    /// 创建默认配置加载器
+    
+    /// new function
     pub fn new() -> Self {
         Self {
             config: LociConfig::default(),
@@ -284,7 +297,8 @@ impl ConfigLoader {
         }
     }
 
-    /// 从文件加载配置
+    
+    /// from_file function
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let content = std::fs::read_to_string(path)
@@ -304,9 +318,10 @@ impl ConfigLoader {
         })
     }
 
-    /// 从环境变量加载配置
+    
+    /// with_env_overrides function
     pub fn with_env_overrides(mut self) -> Self {
-        // 引擎配置
+        
         if let Ok(val) = std::env::var("LOCI_MODEL_PATH") {
             self.config.engine.model_path = Some(val);
         }
@@ -326,12 +341,12 @@ impl ConfigLoader {
             }
         }
 
-        // 后端配置
+        
         if let Ok(val) = std::env::var("LOCI_BACKEND") {
             self.config.backend.backend_type = val;
         }
 
-        // 服务器配置
+        
         if let Ok(val) = std::env::var("LOCI_HOST") {
             self.config.server.host = val;
         }
@@ -344,7 +359,7 @@ impl ConfigLoader {
             self.config.server.api_key = Some(val);
         }
 
-        // 日志配置
+        
         if let Ok(val) = std::env::var("LOCI_LOG_LEVEL") {
             self.config.logging.level = val;
         }
@@ -352,33 +367,34 @@ impl ConfigLoader {
         self
     }
 
-    /// 验证配置
+    
+    /// validate function
     pub fn validate(&self) -> Result<()> {
-        // 验证模型路径
+        
         if let Some(ref path) = self.config.engine.model_path {
             if !Path::new(path).exists() {
                 bail!("Model file not found: {}", path);
             }
         }
 
-        // 验证批次大小
+        
         if self.config.engine.batch_size == 0 {
             bail!("Batch size must be greater than 0");
         }
 
-        // 验证上下文长度
+        
         if self.config.engine.context_length == 0 {
             bail!("Context length must be greater than 0");
         }
 
-        // 验证日志级别
+        
         let valid_levels = ["trace", "debug", "info", "warn", "error"];
         if !valid_levels.contains(&self.config.logging.level.as_str()) {
             bail!("Invalid log level: {}. Must be one of: {:?}",
                 self.config.logging.level, valid_levels);
         }
 
-        // 验证后端类型
+        
         let valid_backends = ["cpu", "cuda", "metal", "rocm", "vulkan"];
         if !valid_backends.contains(&self.config.backend.backend_type.as_str()) {
             bail!("Invalid backend: {}. Must be one of: {:?}",
@@ -388,13 +404,15 @@ impl ConfigLoader {
         Ok(())
     }
 
-    /// 构建最终配置
+    
+    /// build function
     pub fn build(self) -> Result<LociConfig> {
         self.validate()?;
         Ok(self.config)
     }
 
-    /// 保存配置到文件
+    
+    /// save function
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         let content = match path.extension().and_then(|s| s.to_str()) {
@@ -412,16 +430,19 @@ impl ConfigLoader {
     }
 }
 
+// Implementation for Default
 impl Default for ConfigLoader {
     fn default() -> Self {
         Self::new()
     }
 }
 
-// ==================== 配置示例生成 ====================
 
+
+// Implementation for LociConfig
 impl LociConfig {
-    /// 生成示例配置
+    
+    /// example_toml function
     pub fn example_toml() -> String {
         r#"# Loci 配置文件示例
 
@@ -466,7 +487,7 @@ max_request_size_mb = 100
     }
 }
 
-// ==================== 单元测试 ====================
+
 
 #[cfg(test)]
 mod tests {

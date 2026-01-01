@@ -1,28 +1,17 @@
-/**
- * Agent 系统模块 - 支持多模型池和智能 Agent
- *
- * 本模块提供：
- * - 模型池管理：同时加载和管理多个 AI 模型
- * - Agent 系统：为不同任务配置专用 Agent（模型 + 提示词）
- * - 会话管理：支持多轮对话的上下文保持
- * - 智能路由：根据任务类型自动选择最合适的 Agent
- *
- * 架构设计：
- * ```
- * AgentSystem
- * ├── ModelPool (模型池)
- * │   ├── Model A (通用对话)
- * │   ├── Model B (代码生成)
- * │   └── Model C (创意写作)
- * ├── Agents (Agent 集合)
- * │   ├── Agent "assistant" -> Model A + 通用提示词
- * │   ├── Agent "coder" -> Model B + 代码提示词
- * │   └── Agent "writer" -> Model C + 创意提示词
- * └── Sessions (会话管理)
- *     ├── Session 1 -> Agent "assistant"
- *     └── Session 2 -> Agent "writer"
- * ```
- */
+
+
+//! Agent System Module
+//!
+//! This module provides a comprehensive agent system for managing multiple AI models and agents.
+//! It supports:
+//! - Loading and unloading language models
+//! - Creating and managing multiple agents with different configurations
+//! - Session management for maintaining conversation context
+//! - Text generation with streaming support
+//! - Pre-configured agent templates for common use cases
+//!
+//! The system uses llama.cpp for model inference and provides a high-level API for
+//! agent-based interactions with language models.
 
 use llama_cpp_2::{
     llama_backend::LlamaBackend,
@@ -40,163 +29,179 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::num::NonZeroU32;
 
-// ==================== 配置结构 ====================
 
-/**
- * 模型配置
- */
+
+
+/// Configuration for loading a language model
+///
+/// This struct contains all parameters needed to load and configure a language model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
-    /// 模型唯一标识符
+    /// Unique identifier for this model
     pub model_id: String,
 
-    /// 模型文件路径
+    /// File system path to the model file (GGUF format)
     pub model_path: String,
 
-    /// 上下文大小
+    /// Context window size in tokens (maximum sequence length the model can handle)
     pub context_size: u32,
 
-    /// GPU 层数
+    /// Number of layers to offload to GPU (0 = CPU only)
     pub gpu_layers: u32,
 
-    /// CPU 线程数
+    /// Number of CPU threads to use for inference
     pub threads: u32,
 }
 
-/**
- * Agent 配置
- */
+
+/// Configuration for an AI agent
+///
+/// An agent represents a specific persona or behavior for interacting with a language model.
+/// Each agent is associated with a model and has its own system prompt and generation parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
-    /// Agent 唯一标识符
+    /// Unique identifier for this agent
     pub agent_id: String,
 
-    /// 使用的模型 ID
+    /// ID of the model this agent uses (must be loaded)
     pub model_id: String,
 
-    /// 系统提示词（定义 Agent 的角色和行为）
+    /// System prompt that defines the agent's behavior and personality
     pub system_prompt: String,
 
-    /// 默认采样参数
+    /// Sampling parameters for text generation
+    /// Temperature: Controls randomness (0.0 = deterministic, higher = more creative)
     pub temperature: f32,
+    /// Top-p: Nucleus sampling threshold (0.0-1.0)
     pub top_p: f32,
+    /// Top-k: Only consider k most likely tokens
     pub top_k: u32,
+    /// Repeat penalty: Penalty for repeating tokens (1.0 = no penalty)
     pub repeat_penalty: f32,
 
-    /// Agent 描述（用于 UI 显示）
+    /// Human-readable description of the agent's purpose
     pub description: String,
 }
 
-/**
- * 生成请求
- */
+
+/// Request to generate text from an agent
+///
+/// This struct contains all parameters for a text generation request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentGenerateRequest {
-    /// 使用的 Agent ID
+    /// ID of the agent to use for generation
     pub agent_id: String,
 
-    /// 用户输入
+    /// Input prompt text to generate from
     pub prompt: String,
 
-    /// 会话 ID（可选，用于多轮对话）
+    /// Optional session ID for maintaining conversation context
     pub session_id: Option<String>,
 
-    /// 最大生成 token 数
+    /// Maximum number of tokens to generate (default: 512)
     pub max_tokens: Option<u32>,
 
-    /// 临时覆盖温度
+    /// Override temperature for this request only
     pub temperature: Option<f32>,
 
-    /// 停止词
+    /// Stop generation if any of these words appear in the output
     pub stop_words: Option<Vec<String>>,
 }
 
-/**
- * 生成响应
- */
+
+/// Response from an agent text generation request
+///
+/// Contains the generated text and metadata about the generation process.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentGenerateResponse {
-    /// Agent ID
+    /// ID of the agent that generated the response
     pub agent_id: String,
 
-    /// 生成的内容
+    /// Generated text content
     pub content: String,
 
-    /// Token 数量
+    /// Number of tokens actually generated
     pub tokens_generated: u32,
 
-    /// 是否提前停止
+    /// Whether generation stopped before reaching max_tokens (due to stop word or EOS)
     pub stopped_early: bool,
 
-    /// 会话 ID
+    /// Session ID if this was part of a conversation
     pub session_id: Option<String>,
 }
 
-// ==================== 内部状态 ====================
 
-/**
- * 加载的模型实例
- */
+
+
+/// Internal representation of a loaded model
+///
+/// Wraps the loaded LlamaModel with metadata about when and how it was loaded.
 struct LoadedModel {
-    /// 模型配置
+    /// Configuration used to load this model
     config: ModelConfig,
 
-    /// 模型实例
+    /// The actual llama.cpp model instance (wrapped in Arc for thread-safe sharing)
     model: Arc<LlamaModel>,
 
-    /// 加载时间戳
+    /// Timestamp when the model was loaded
     loaded_at: std::time::SystemTime,
 }
 
-/**
- * 会话状态
- */
+/// Internal representation of a conversation session
+///
+/// Maintains the token history for multi-turn conversations.
 struct Session {
-    /// 会话 ID
+    /// Unique identifier for this session
     session_id: String,
 
-    /// 使用的 Agent ID
+    /// ID of the agent this session belongs to
     agent_id: String,
 
-    /// 历史 token（用于上下文保持）
+    /// Tokenized conversation history (all previous prompts and responses)
     history_tokens: Vec<LlamaToken>,
 
-    /// 最后活跃时间
+    /// Timestamp of last activity (for cleanup purposes)
     last_active: std::time::SystemTime,
 }
 
-// ==================== Agent 系统主结构 ====================
 
-/**
- * Agent 系统
- *
- * 管理多个模型和 Agent，支持：
- * - 模型池：按需加载和卸载模型
- * - Agent 管理：创建、删除、查询 Agent
- * - 会话管理：多轮对话上下文保持
- * - 并发推理：多个 Agent 可以同时工作
- */
+
+
+/// Main agent system that manages models, agents, and sessions
+///
+/// This is the central component of the agent system. It provides thread-safe
+/// access to loaded models, configured agents, and active sessions.
+///
+/// # Thread Safety
+/// This struct is thread-safe and can be shared across multiple threads.
+/// All internal state is protected by RwLock for concurrent read access.
 pub struct AgentSystem {
-    /// Llama 后端（全局唯一）
+    /// llama.cpp backend instance (required for all model operations)
     backend: LlamaBackend,
 
-    /// 模型池：model_id -> LoadedModel
+    /// Map of loaded models (model_id -> LoadedModel)
     models: RwLock<HashMap<String, LoadedModel>>,
 
-    /// Agent 配置：agent_id -> AgentConfig
+    /// Map of configured agents (agent_id -> AgentConfig)
     agents: RwLock<HashMap<String, AgentConfig>>,
 
-    /// 活跃会话：session_id -> Session
+    /// Map of active sessions (session_id -> Session)
     sessions: RwLock<HashMap<String, Session>>,
 }
 
 impl AgentSystem {
-    /**
-     * 创建新的 Agent 系统
-     */
+    /// Creates a new agent system instance
+    ///
+    /// Initializes the llama.cpp backend and sets up empty containers for models,
+    /// agents, and sessions.
+    ///
+    /// # Returns
+    /// - `Ok(AgentSystem)` - Successfully initialized system
+    /// - `Err(String)` - Failed to initialize llama.cpp backend
     pub fn new() -> Result<Self, String> {
+        // Initialize the llama.cpp backend
         let backend = LlamaBackend::init()
-            .map_err(|e| format!("初始化后端失败: {}", e))?;
+            .map_err(|e| format!("Failed to initialize backend: {}", e))?;
 
         Ok(Self {
             backend,
@@ -206,30 +211,37 @@ impl AgentSystem {
         })
     }
 
-    // ==================== 模型池管理 ====================
+    
 
-    /**
-     * 加载模型到模型池
-     *
-     * 如果模型已存在，会先卸载旧模型再加载新的。
-     */
+    
+    /// Loads a language model into memory
+    ///
+    /// Loads a GGUF model from the specified path with the given configuration.
+    /// The model is stored in memory and can be used by multiple agents.
+    ///
+    /// # Arguments
+    /// * `config` - Model configuration including path, context size, and GPU settings
+    ///
+    /// # Returns
+    /// - `Ok(())` - Model loaded successfully
+    /// - `Err(String)` - Model file not found or loading failed
     pub fn load_model(&self, config: ModelConfig) -> Result<(), String> {
         let model_path = PathBuf::from(&config.model_path);
         if !model_path.exists() {
-            return Err(format!("模型文件不存在: {}", config.model_path));
+            return Err(format!("Model file not found: {}", config.model_path));
         }
 
-        // 配置模型参数
+        // Configure model parameters
         let mut model_params = LlamaModelParams::default();
         if config.gpu_layers > 0 {
             model_params = model_params.with_n_gpu_layers(config.gpu_layers);
         }
 
-        // 加载模型
+        // Load the model from file
         let model = LlamaModel::load_from_file(&self.backend, model_path, &model_params)
-            .map_err(|e| format!("加载模型失败: {}", e))?;
+            .map_err(|e| format!("Failed to load model: {}", e))?;
 
-        // 添加到模型池
+        // Store the loaded model
         let mut models = self.models.write();
         models.insert(config.model_id.clone(), LoadedModel {
             config,
@@ -240,11 +252,20 @@ impl AgentSystem {
         Ok(())
     }
 
-    /**
-     * 从模型池卸载模型
-     */
+    
+    /// Unloads a model from memory
+    ///
+    /// Removes a loaded model and frees its memory. The model cannot be unloaded
+    /// if it is currently in use by any agents.
+    ///
+    /// # Arguments
+    /// * `model_id` - ID of the model to unload
+    ///
+    /// # Returns
+    /// - `Ok(())` - Model unloaded successfully
+    /// - `Err(String)` - Model not found or in use by agents
     pub fn unload_model(&self, model_id: &str) -> Result<(), String> {
-        // 检查是否有 Agent 正在使用这个模型
+        // Check if any agents are using this model
         let agents = self.agents.read();
         let using_agents: Vec<_> = agents.values()
             .filter(|a| a.model_id == model_id)
@@ -253,23 +274,25 @@ impl AgentSystem {
 
         if !using_agents.is_empty() {
             return Err(format!(
-                "模型 {} 正在被以下 Agent 使用，无法卸载: {:?}",
+                "Model {} is in use by agents: {:?}",
                 model_id, using_agents
             ));
         }
 
-        // 卸载模型
+        // Remove the model from memory
         let mut models = self.models.write();
         if models.remove(model_id).is_none() {
-            return Err(format!("模型 {} 不存在", model_id));
+            return Err(format!("Model {} not found", model_id));
         }
 
         Ok(())
     }
 
-    /**
-     * 列出所有已加载的模型
-     */
+    
+    /// Returns a list of all loaded models
+    ///
+    /// # Returns
+    /// Vector of ModelConfig for each loaded model
     pub fn list_models(&self) -> Vec<ModelConfig> {
         self.models.read()
             .values()
@@ -277,116 +300,143 @@ impl AgentSystem {
             .collect()
     }
 
-    /**
-     * 检查模型是否已加载
-     */
+    /// Checks if a model is currently loaded
+    ///
+    /// # Arguments
+    /// * `model_id` - ID of the model to check
+    ///
+    /// # Returns
+    /// `true` if the model is loaded, `false` otherwise
     pub fn is_model_loaded(&self, model_id: &str) -> bool {
         self.models.read().contains_key(model_id)
     }
 
-    // ==================== Agent 管理 ====================
+    
 
-    /**
-     * 创建新的 Agent
-     */
+    
+    /// Creates a new agent with the specified configuration
+    ///
+    /// The agent must reference a loaded model. The agent's system prompt and
+    /// sampling parameters will be used for all generations.
+    ///
+    /// # Arguments
+    /// * `config` - Agent configuration including model ID and system prompt
+    ///
+    /// # Returns
+    /// - `Ok(())` - Agent created successfully
+    /// - `Err(String)` - Model not loaded or agent ID already exists
     pub fn create_agent(&self, config: AgentConfig) -> Result<(), String> {
-        // 验证模型是否已加载
+        // Verify the model is loaded
         if !self.is_model_loaded(&config.model_id) {
-            return Err(format!("模型 {} 未加载", config.model_id));
+            return Err(format!("Model {} not loaded", config.model_id));
         }
 
-        // 添加 Agent
+        // Check for duplicate agent ID
         let mut agents = self.agents.write();
         if agents.contains_key(&config.agent_id) {
-            return Err(format!("Agent {} 已存在", config.agent_id));
+            return Err(format!("Agent {} already exists", config.agent_id));
         }
 
         agents.insert(config.agent_id.clone(), config);
         Ok(())
     }
 
-    /**
-     * 删除 Agent
-     */
+    
+    /// Deletes an agent
+    ///
+    /// Removes the agent and all associated sessions.
+    ///
+    /// # Arguments
+    /// * `agent_id` - ID of the agent to delete
+    ///
+    /// # Returns
+    /// - `Ok(())` - Agent deleted successfully
+    /// - `Err(String)` - Agent not found
     pub fn delete_agent(&self, agent_id: &str) -> Result<(), String> {
         let mut agents = self.agents.write();
         if agents.remove(agent_id).is_none() {
-            return Err(format!("Agent {} 不存在", agent_id));
+            return Err(format!("Agent {} not found", agent_id));
         }
 
-        // 清理相关会话
+        // Remove all sessions belonging to this agent
         let mut sessions = self.sessions.write();
         sessions.retain(|_, s| s.agent_id != agent_id);
 
         Ok(())
     }
 
-    /**
-     * 列出所有 Agent
-     */
+    
+    /// Returns a list of all configured agents
+    ///
+    /// # Returns
+    /// Vector of AgentConfig for each agent
     pub fn list_agents(&self) -> Vec<AgentConfig> {
         self.agents.read().values().cloned().collect()
     }
 
-    /**
-     * 获取 Agent 配置
-     */
+    /// Gets the configuration for a specific agent
+    ///
+    /// # Arguments
+    /// * `agent_id` - ID of the agent to retrieve
+    ///
+    /// # Returns
+    /// `Some(AgentConfig)` if agent exists, `None` otherwise
     pub fn get_agent(&self, agent_id: &str) -> Option<AgentConfig> {
         self.agents.read().get(agent_id).cloned()
     }
 
-    // ==================== 文本生成 ====================
+    
 
-    /**
-     * 使用 Agent 生成文本（阻塞式，返回完整结果）
-     *
-     * 支持多轮对话（通过 session_id）：
-     * - 如果提供 session_id，会加载历史上下文
-     * - 生成后会自动更新会话的历史记录
-     * - 自动管理上下文窗口，避免超出限制
-     *
-     * **注意**: 此方法会阻塞直到生成完成。如需流式输出，请使用 `generate_stream`。
-     */
+    
+    /// Generates text from an agent (non-streaming)
+    ///
+    /// Processes the prompt through the agent and returns the complete generated text.
+    /// If a session is provided, maintains conversation context across multiple calls.
+    ///
+    /// # Arguments
+    /// * `request` - Generation request with agent ID, prompt, and optional parameters
+    ///
+    /// # Returns
+    /// - `Ok(AgentGenerateResponse)` - Generated text and metadata
+    /// - `Err(String)` - Agent not found, model not loaded, or generation error
     pub fn generate(&self, request: AgentGenerateRequest) -> Result<AgentGenerateResponse, String> {
-        // 获取 Agent 配置
+        // Get agent configuration
         let agent_config = self.agents.read()
             .get(&request.agent_id)
             .cloned()
-            .ok_or(format!("Agent {} 不存在", request.agent_id))?;
+            .ok_or(format!("Agent {} not found", request.agent_id))?;
 
-        // 获取模型
+        // Get the loaded model
         let models = self.models.read();
         let loaded_model = models.get(&agent_config.model_id)
-            .ok_or(format!("模型 {} 未加载", agent_config.model_id))?;
+            .ok_or(format!("Model {} not loaded", agent_config.model_id))?;
 
-        // 加载历史上下文（如果提供了 session_id）
+        // Retrieve session history if session ID provided
         let mut history_tokens = Vec::new();
         if let Some(ref session_id) = request.session_id {
             let sessions = self.sessions.read();
             if let Some(session) = sessions.get(session_id) {
-                // 验证会话使用的是正确的 Agent
+                // Verify session belongs to this agent
                 if session.agent_id != request.agent_id {
                     return Err(format!(
-                        "会话 {} 属于 Agent {}，不能用于 Agent {}",
+                        "Session {} belongs to Agent {}, cannot be used with Agent {}",
                         session_id, session.agent_id, request.agent_id
                     ));
                 }
                 history_tokens = session.history_tokens.clone();
             } else {
-                return Err(format!("会话 {} 不存在", session_id));
+                return Err(format!("Session {} not found", session_id));
             }
         }
 
-        // 构建当前轮次的提示词
-        // 首轮对话：包含系统提示词
-        // 后续对话：只包含用户输入（系统提示词在历史中）
+        // Build the prompt: include system prompt only for first message in session
         let current_prompt = if history_tokens.is_empty() {
             format!("{}\n\n{}", agent_config.system_prompt, request.prompt)
         } else {
             request.prompt.clone()
         };
 
-        // 配置上下文
+        // Create inference context
         let ctx_size = NonZeroU32::new(loaded_model.config.context_size)
             .ok_or("Context size must be greater than 0")?;
 
@@ -399,17 +449,17 @@ impl AgentSystem {
                 .with_n_threads_batch(loaded_model.config.threads as i32);
         }
 
-        // 创建上下文
+        // Create context for this generation
         let mut ctx = loaded_model.model
             .new_context(&self.backend, ctx_params)
             .map_err(|e| format!("Failed to create context: {}", e))?;
 
-        // Tokenize current prompt
-        // 修复：只在首次对话时添加 BOS token，避免多轮对话中重复插入
+        // Tokenize the current prompt
+        // Add BOS token only for new conversations
         let add_bos = if history_tokens.is_empty() {
-            AddBos::Always  // 首次对话需要 BOS
+            AddBos::Always
         } else {
-            AddBos::Never   // 后续轮次不需要 BOS（历史中已有）
+            AddBos::Never
         };
         let current_tokens = loaded_model.model
             .str_to_token(&current_prompt, add_bos)
@@ -419,38 +469,38 @@ impl AgentSystem {
             return Err("Tokenization result is empty".to_string());
         }
 
-        // Merge history and current tokens
+        // Combine history and current tokens
         let mut all_tokens = Vec::new();
 
-        // 计算可用的上下文窗口大小（预留生成空间）
+        // Calculate context budget
         let max_tokens = request.max_tokens.unwrap_or(512);
         let available_context = (loaded_model.config.context_size as usize)
             .saturating_sub(max_tokens as usize);
 
-        // Intelligently truncate history：如果历史 + 当前超出窗口，从历史开头截断
+        // Manage context window: truncate history if needed
         let total_needed = history_tokens.len() + current_tokens.len();
         if total_needed > available_context {
             let history_budget = available_context.saturating_sub(current_tokens.len());
             if history_budget > 0 && history_tokens.len() > history_budget {
-                // 保留最近的历史（从末尾取）
+                // Keep only the most recent history tokens
                 let skip = history_tokens.len() - history_budget;
                 all_tokens.extend_from_slice(&history_tokens[skip..]);
             } else if history_budget > 0 {
                 all_tokens.extend_from_slice(&history_tokens);
             }
-            // 如果 history_budget 为 0，就完全不使用历史
+            // If budget is too small, we skip history entirely
         } else {
-            // 空间足够，使用全部历史
+            // All tokens fit in context
             all_tokens.extend_from_slice(&history_tokens);
         }
 
         all_tokens.extend_from_slice(&current_tokens);
 
-        // 创建批处理
+        // Create batch for processing
         let n_ctx = loaded_model.config.context_size as usize;
         let mut batch = LlamaBatch::new(n_ctx, 1);
 
-        // 添加所有 tokens 到批处理
+        // Add all tokens to batch for processing
         let last_index = all_tokens.len() - 1;
         for (i, token) in all_tokens.iter().enumerate() {
             let is_last = i == last_index;
@@ -458,12 +508,12 @@ impl AgentSystem {
                 .map_err(|e| format!("Failed to add token: {}", e))?;
         }
 
-        // 解码提示词
+        // Process the prompt through the model
         ctx.clear_kv_cache();
         ctx.decode(&mut batch)
             .map_err(|e| format!("Failed to decode prompt: {}", e))?;
 
-        // 创建采样器
+        // Configure sampler based on temperature
         let temperature = request.temperature.unwrap_or(agent_config.temperature);
         let mut sampler = if temperature <= 0.0 {
             LlamaSampler::greedy()
@@ -476,7 +526,7 @@ impl AgentSystem {
             ])
         };
 
-        // 生成文本
+        // Generate tokens
         let mut result = String::new();
         let mut generated_tokens: Vec<LlamaToken> = Vec::new();
         let mut token_count = 0u32;
@@ -486,13 +536,15 @@ impl AgentSystem {
             let new_token_id = sampler.sample(&ctx, -1);
             sampler.accept(new_token_id);
 
+            // Stop at end-of-generation token
             if ctx.model.is_eog_token(new_token_id) {
                 break;
             }
 
-            // Save generated token
+            // Track generated token
             generated_tokens.push(new_token_id);
 
+            // Convert token to text
             let output_bytes = ctx.model
                 .token_to_bytes(new_token_id, Special::Tokenize)
                 .map_err(|e| format!("Token conversion failed: {}", e))?;
@@ -501,12 +553,14 @@ impl AgentSystem {
             result.push_str(&token_str);
             token_count += 1;
 
+            // Check for stop words
             if let Some(stop_words) = &request.stop_words {
                 if stop_words.iter().any(|sw| result.contains(sw)) {
                     break;
                 }
             }
 
+            // Process the generated token
             batch.clear();
             batch.add(new_token_id, (n_prompt + i as usize) as i32, &[0], true)
                 .map_err(|e| format!("Failed to add generated token: {}", e))?;
@@ -515,20 +569,18 @@ impl AgentSystem {
                 .map_err(|e| format!("Failed to decode generated token: {}", e))?;
         }
 
-        // Update session history if session_id provided
+        // Update session history if session provided
         if let Some(ref session_id) = request.session_id {
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(session_id) {
-                // 将当前对话的 tokens 添加到历史
-                // 历史格式：[...旧历史] + [当前用户输入] + [AI回复]
+                // Append current prompt and generated response to history
                 session.history_tokens.extend_from_slice(&current_tokens);
                 session.history_tokens.extend_from_slice(&generated_tokens);
 
-                // 更新活跃时间
+                // Update last active timestamp
                 session.last_active = std::time::SystemTime::now();
 
-                // 可选：限制历史长度，防止无限增长
-                // 保留最近的 N 个 tokens（这里设为上下文窗口的 80%）
+                // Trim history if it exceeds 80% of context size
                 let max_history = (loaded_model.config.context_size as usize * 80) / 100;
                 if session.history_tokens.len() > max_history {
                     let remove_count = session.history_tokens.len() - max_history;
@@ -546,40 +598,55 @@ impl AgentSystem {
         })
     }
 
-    /// Generate text using an Agent with streaming callbacks.
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    /// Generates text from an agent with streaming support
     ///
-    /// Similar to `generate`, but with streaming support:
-    /// - Invokes callback immediately for each generated token
-    /// - Supports user interruption (callback returns Stop)
-    /// - Automatically handles multi-turn dialogue and history
+    /// Similar to `generate()` but calls the callback for each token as it's generated.
+    /// This enables real-time streaming of the output.
     ///
-    /// # Parameters
-    /// - `request`: Generation request
-    /// - `callback`: Streaming callback (implements `StreamCallback` trait)
+    /// # Arguments
+    /// * `request` - Generation request with agent ID, prompt, and optional parameters
+    /// * `callback` - Callback that receives each token as it's generated
     ///
     /// # Returns
-    /// - `AgentGenerateResponse`: Complete result with statistics
+    /// - `Ok(AgentGenerateResponse)` - Complete generated text and metadata
+    /// - `Err(String)` - Agent not found, model not loaded, or generation error
     ///
-    /// # Example
-    /// ```no_run
-    /// use loci::{AgentSystem, AgentGenerateRequest, ConsoleCallback};
-    ///
-    /// let agent_system = AgentSystem::new()?;
-    /// let request = AgentGenerateRequest {
-    ///     agent_id: "assistant".to_string(),
-    ///     prompt: "Hello".to_string(),
-    ///     session_id: None,
-    ///     max_tokens: Some(100),
-    ///     temperature: None,
-    ///     stop_words: None,
-    /// };
-    ///
-    /// let response = agent_system.generate_stream(
-    ///     request,
-    ///     &mut ConsoleCallback::new(true)
-    /// )?;
-    /// # Ok::<(), String>(())
-    /// ```
+    /// # Type Parameters
+    /// * `C` - Type implementing StreamCallback trait for receiving tokens
     pub fn generate_stream<C>(
         &self,
         request: AgentGenerateRequest,
@@ -590,16 +657,18 @@ impl AgentSystem {
     {
         use crate::streaming::StreamControlFlow;
 
+        // Get agent configuration
         let agent_config = self.agents.read()
             .get(&request.agent_id)
             .cloned()
             .ok_or(format!("Agent {} not found", request.agent_id))?;
 
+        // Get the loaded model
         let models = self.models.read();
         let loaded_model = models.get(&agent_config.model_id)
             .ok_or(format!("Model {} not loaded", agent_config.model_id))?;
 
-        // Load historical context if session_id provided
+        // Retrieve session history if session ID provided
         let mut history_tokens = Vec::new();
         if let Some(ref session_id) = request.session_id {
             let sessions = self.sessions.read();
@@ -616,14 +685,14 @@ impl AgentSystem {
             }
         }
 
-        // Build prompt for current turn
+        // Build the prompt: include system prompt only for first message in session
         let current_prompt = if history_tokens.is_empty() {
             format!("{}\n\n{}", agent_config.system_prompt, request.prompt)
         } else {
             request.prompt.clone()
         };
 
-        // 配置上下文
+        // Create inference context
         let ctx_size = NonZeroU32::new(loaded_model.config.context_size)
             .ok_or("Context size must be greater than 0")?;
 
@@ -636,12 +705,12 @@ impl AgentSystem {
                 .with_n_threads_batch(loaded_model.config.threads as i32);
         }
 
-        // 创建上下文
+        // Create context for this generation
         let mut ctx = loaded_model.model
             .new_context(&self.backend, ctx_params)
             .map_err(|e| format!("Failed to create context: {}", e))?;
 
-        // Tokenize current prompt
+        // Tokenize the current prompt
         let add_bos = if history_tokens.is_empty() {
             AddBos::Always
         } else {
@@ -655,13 +724,13 @@ impl AgentSystem {
             return Err("Tokenization result is empty".to_string());
         }
 
-        // Merge history and current tokens
+        // Combine history and current tokens
         let mut all_tokens = Vec::new();
         let max_tokens = request.max_tokens.unwrap_or(512);
         let available_context = (loaded_model.config.context_size as usize)
             .saturating_sub(max_tokens as usize);
 
-        // Intelligently truncate history
+        // Manage context window: truncate history if needed
         let total_needed = history_tokens.len() + current_tokens.len();
         if total_needed > available_context {
             let history_budget = available_context.saturating_sub(current_tokens.len());
@@ -677,11 +746,11 @@ impl AgentSystem {
 
         all_tokens.extend_from_slice(&current_tokens);
 
-        // 创建批处理
+        // Create batch for processing
         let n_ctx = loaded_model.config.context_size as usize;
         let mut batch = LlamaBatch::new(n_ctx, 1);
 
-        // 添加所有 tokens 到批处理
+        // Add all tokens to batch for processing
         let last_index = all_tokens.len() - 1;
         for (i, token) in all_tokens.iter().enumerate() {
             let is_last = i == last_index;
@@ -689,12 +758,12 @@ impl AgentSystem {
                 .map_err(|e| format!("Failed to add token: {}", e))?;
         }
 
-        // 解码提示词
+        // Process the prompt through the model
         ctx.clear_kv_cache();
         ctx.decode(&mut batch)
             .map_err(|e| format!("Failed to decode prompt: {}", e))?;
 
-        // 创建采样器
+        // Configure sampler based on temperature
         let temperature = request.temperature.unwrap_or(agent_config.temperature);
         let mut sampler = if temperature <= 0.0 {
             LlamaSampler::greedy()
@@ -707,7 +776,7 @@ impl AgentSystem {
             ])
         };
 
-        // Stream text generation
+        // Generate tokens with streaming
         let mut result = String::new();
         let mut generated_tokens: Vec<LlamaToken> = Vec::new();
         let mut token_count = 0u32;
@@ -717,13 +786,15 @@ impl AgentSystem {
             let new_token_id = sampler.sample(&ctx, -1);
             sampler.accept(new_token_id);
 
+            // Stop at end-of-generation token
             if ctx.model.is_eog_token(new_token_id) {
                 break;
             }
 
-            // Save generated token
+            // Track generated token
             generated_tokens.push(new_token_id);
 
+            // Convert token to text
             let output_bytes = ctx.model
                 .token_to_bytes(new_token_id, Special::Tokenize)
                 .map_err(|e| format!("Token conversion failed: {}", e))?;
@@ -732,6 +803,7 @@ impl AgentSystem {
             result.push_str(&token_str);
             token_count += 1;
 
+            // Stream token to callback
             match callback.on_token(&token_str, new_token_id.0, i as usize) {
                 StreamControlFlow::Continue => {}
                 StreamControlFlow::Stop => {
@@ -739,13 +811,14 @@ impl AgentSystem {
                 }
             }
 
-            // Check stop words
+            // Check for stop words
             if let Some(stop_words) = &request.stop_words {
                 if stop_words.iter().any(|sw| result.contains(sw)) {
                     break;
                 }
             }
 
+            // Process the generated token
             batch.clear();
             batch.add(new_token_id, (n_prompt + i as usize) as i32, &[0], true)
                 .map_err(|e| format!("Failed to add generated token: {}", e))?;
@@ -754,7 +827,7 @@ impl AgentSystem {
                 .map_err(|e| format!("Failed to decode generated token: {}", e))?;
         }
 
-        // Notify completion with temporary stats
+        // Notify callback of completion
         let stats = crate::streaming::StreamStats {
             generated_tokens: token_count as usize,
             total_tokens: all_tokens.len() + token_count as usize,
@@ -762,7 +835,7 @@ impl AgentSystem {
         };
         callback.on_complete(&stats);
 
-        // Update session history if session_id provided
+        // Update session history if session provided
         if let Some(ref session_id) = request.session_id {
             let mut sessions = self.sessions.write();
             if let Some(session) = sessions.get_mut(session_id) {
@@ -770,7 +843,7 @@ impl AgentSystem {
                 session.history_tokens.extend_from_slice(&generated_tokens);
                 session.last_active = std::time::SystemTime::now();
 
-                // Limit history length
+                // Trim history if it exceeds 80% of context size
                 let max_history = (loaded_model.config.context_size as usize * 80) / 100;
                 if session.history_tokens.len() > max_history {
                     let remove_count = session.history_tokens.len() - max_history;
@@ -788,21 +861,30 @@ impl AgentSystem {
         })
     }
 
-    // ==================== 会话管理 ====================
+    
 
-    /**
-     * 创建新会话
-     */
+    
+    /// Creates a new session for maintaining conversation context
+    ///
+    /// Sessions allow multi-turn conversations by maintaining token history.
+    /// Each session is associated with a specific agent.
+    ///
+    /// # Arguments
+    /// * `agent_id` - ID of the agent this session belongs to
+    ///
+    /// # Returns
+    /// - `Ok(String)` - Unique session ID
+    /// - `Err(String)` - Agent not found
     pub fn create_session(&self, agent_id: String) -> Result<String, String> {
-        // 验证 Agent 存在
+        // Verify agent exists
         if !self.agents.read().contains_key(&agent_id) {
-            return Err(format!("Agent {} 不存在", agent_id));
+            return Err(format!("Agent {} not found", agent_id));
         }
 
-        // 生成会话 ID
+        // Generate unique session ID
         let session_id = uuid::Uuid::new_v4().to_string();
 
-        // 创建会话
+        // Create new session
         let session = Session {
             session_id: session_id.clone(),
             agent_id,
@@ -814,25 +896,36 @@ impl AgentSystem {
         Ok(session_id)
     }
 
-    /**
-     * 删除会话
-     */
+    /// Deletes a session
+    ///
+    /// Removes the session and its conversation history.
+    ///
+    /// # Arguments
+    /// * `session_id` - ID of the session to delete
+    ///
+    /// # Returns
+    /// - `Ok(())` - Session deleted successfully
+    /// - `Err(String)` - Session not found
     pub fn delete_session(&self, session_id: &str) -> Result<(), String> {
         let mut sessions = self.sessions.write();
         if sessions.remove(session_id).is_none() {
-            return Err(format!("会话 {} 不存在", session_id));
+            return Err(format!("Session {} not found", session_id));
         }
         Ok(())
     }
 
-    /**
-     * 清理过期会话（超过 1 小时未活跃）
-     */
+    /// Removes expired sessions (inactive for more than 1 hour)
+    ///
+    /// Automatically cleans up sessions that haven't been used recently.
+    ///
+    /// # Returns
+    /// Number of sessions removed
     pub fn cleanup_expired_sessions(&self) -> usize {
         let now = std::time::SystemTime::now();
         let mut sessions = self.sessions.write();
 
         let before_count = sessions.len();
+        // Keep only sessions active within the last hour
         sessions.retain(|_, s| {
             now.duration_since(s.last_active)
                 .map(|d| d.as_secs() < 3600)
@@ -843,19 +936,30 @@ impl AgentSystem {
     }
 }
 
-// 线程安全标记
+
+// Mark AgentSystem as thread-safe for sharing across threads
 unsafe impl Send for AgentSystem {}
 unsafe impl Sync for AgentSystem {}
 
-// ==================== 预定义 Agent 模板 ====================
 
-/**
- * 预定义的 Agent 配置模板
- */
+
+
+/// Pre-configured agent templates for common use cases
+///
+/// Provides ready-to-use agent configurations for various applications.
 pub struct AgentTemplates;
 
 impl AgentTemplates {
-    /// 通用助手
+    /// Creates a general-purpose assistant agent
+    ///
+    /// Suitable for everyday Q&A and general conversations.
+    /// Balanced temperature for both accuracy and creativity.
+    ///
+    /// # Arguments
+    /// * `model_id` - ID of the model to use
+    ///
+    /// # Returns
+    /// Configured agent for general assistance
     pub fn general_assistant(model_id: String) -> AgentConfig {
         AgentConfig {
             agent_id: "assistant".to_string(),
@@ -869,7 +973,15 @@ impl AgentTemplates {
         }
     }
 
-    /// 代码助手
+    /// Creates a code generation and debugging assistant
+    ///
+    /// Optimized for programming tasks with lower temperature for more deterministic output.
+    ///
+    /// # Arguments
+    /// * `model_id` - ID of the model to use
+    ///
+    /// # Returns
+    /// Configured agent for code-related tasks
     pub fn code_assistant(model_id: String) -> AgentConfig {
         AgentConfig {
             agent_id: "coder".to_string(),
@@ -883,7 +995,15 @@ impl AgentTemplates {
         }
     }
 
-    /// 创意写作助手
+    /// Creates a creative writing assistant
+    ///
+    /// Optimized for creative content with higher temperature for more diverse output.
+    ///
+    /// # Arguments
+    /// * `model_id` - ID of the model to use
+    ///
+    /// # Returns
+    /// Configured agent for creative writing
     pub fn creative_writer(model_id: String) -> AgentConfig {
         AgentConfig {
             agent_id: "writer".to_string(),
@@ -897,7 +1017,15 @@ impl AgentTemplates {
         }
     }
 
-    /// 分镜师
+    /// Creates a storyboard/script generation assistant
+    ///
+    /// Specialized for generating detailed storyboard descriptions from scripts.
+    ///
+    /// # Arguments
+    /// * `model_id` - ID of the model to use
+    ///
+    /// # Returns
+    /// Configured agent for storyboard generation
     pub fn storyboard_artist(model_id: String) -> AgentConfig {
         AgentConfig {
             agent_id: "storyboard".to_string(),

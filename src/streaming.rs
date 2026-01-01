@@ -1,58 +1,67 @@
-/// Unified streaming abstraction layer for token-level generation callbacks.
-///
-/// This module provides:
-/// - Unified streaming callback interface via the `StreamCallback` trait
-/// - Control flow management (continue/stop)
-/// - Token batching support for performance optimization
-/// - Error handling with panic recovery
-/// - Generation statistics tracking
-///
-/// Design principles:
-/// - Zero-copy: Tokens passed by reference
-/// - Type-safe: Uses generics and traits
-/// - Flexible: Supports various callback implementations
+//! Streaming Module
+//!
+//! This module provides core functionality for the Loci project.
+//!
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 use std::time::{Duration, Instant};
 use anyhow::Result;
 use serde::{Serialize, Deserialize};
 
-// ==================== Control Flow ====================
 
-/// Control flow for streaming generation.
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    /// StreamControlFlow enumeration
 pub enum StreamControlFlow {
-    /// Continue generating the next token
+    
     Continue,
 
-    /// Stop generation (user requested)
+    
     Stop,
 }
 
+// Implementation for Default
 impl Default for StreamControlFlow {
     fn default() -> Self {
         Self::Continue
     }
 }
 
-// ==================== Token Data Structure ====================
 
-/// Streaming token data structure.
+
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+    /// StreamToken structure
 pub struct StreamToken {
-    /// Token text content
+    
     pub content: String,
 
-    /// Token ID from the model vocabulary
+    
     pub token_id: i32,
 
-    /// Whether this is the final token
+    
     pub is_final: bool,
 
-    /// Position in the sequence
+    
     pub position: usize,
 }
 
+// Implementation for StreamToken
 impl StreamToken {
+    /// new function
     pub fn new(content: String, token_id: i32, position: usize) -> Self {
         Self {
             content,
@@ -62,6 +71,7 @@ impl StreamToken {
         }
     }
 
+    /// final_token function
     pub fn final_token(content: String, token_id: i32, position: usize) -> Self {
         Self {
             content,
@@ -72,38 +82,42 @@ impl StreamToken {
     }
 }
 
-// ==================== Generation Statistics ====================
 
-/// Statistics for streaming generation.
+
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    /// StreamStats structure
 pub struct StreamStats {
-    /// Number of prompt tokens
+    
     pub prompt_tokens: usize,
 
-    /// Number of generated tokens
+    
     pub generated_tokens: usize,
 
-    /// Total number of tokens
+    
     pub total_tokens: usize,
 
-    /// Prompt processing time in milliseconds
+    
     pub prompt_time_ms: u64,
 
-    /// Generation time in milliseconds
+    
     pub generation_time_ms: u64,
 
-    /// Total time in milliseconds
+    
     pub total_time_ms: u64,
 
-    /// Generation throughput in tokens per second
+    
     pub tokens_per_second: f64,
 }
 
+// Implementation for StreamStats
 impl StreamStats {
+    /// new function
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// calculate_tps function
     pub fn calculate_tps(&mut self) {
         if self.generation_time_ms > 0 {
             self.tokens_per_second =
@@ -112,44 +126,45 @@ impl StreamStats {
     }
 }
 
-// ==================== Streaming Callback Trait ====================
 
-/// Callback interface for receiving streaming tokens.
-///
-/// Implement this trait to handle tokens as they are generated.
+
+
+
+
 pub trait StreamCallback: Send {
-    /// Called when a new token is received.
-    ///
-    /// # Parameters
-    /// - `token`: Token text (zero-copy reference)
-    /// - `token_id`: Token ID from vocabulary
-    /// - `position`: Token position in the sequence
-    ///
-    /// # Returns
-    /// - `StreamControlFlow::Continue`: Continue generation
-    /// - `StreamControlFlow::Stop`: Stop generation
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     fn on_token(&mut self, token: &str, token_id: i32, position: usize) -> StreamControlFlow;
 
-    /// Called when generation completes.
-    ///
-    /// # Parameters
-    /// - `stats`: Generation statistics
+    
+    
+    
+    
     fn on_complete(&mut self, stats: &StreamStats) {
         let _ = stats;
     }
 
-    /// Called when an error occurs.
-    ///
-    /// # Parameters
-    /// - `error`: Error information
+    
+    
+    
+    
     fn on_error(&mut self, error: &anyhow::Error) {
         eprintln!("[StreamCallback] Error: {}", error);
     }
 }
 
-// ==================== Closure-Based Callback ====================
 
-/// Simple closure-based callback wrapper.
+
+
+    /// ClosureCallback structure
 pub struct ClosureCallback<F>
 where
     F: FnMut(&str, i32, usize) -> StreamControlFlow + Send,
@@ -161,6 +176,7 @@ impl<F> ClosureCallback<F>
 where
     F: FnMut(&str, i32, usize) -> StreamControlFlow + Send,
 {
+    /// new function
     pub fn new(callback: F) -> Self {
         Self { callback }
     }
@@ -175,11 +191,12 @@ where
     }
 }
 
-// ==================== Batched Callback ====================
 
-/// Batched token callback for performance optimization.
-///
-/// Reduces function call overhead by batching multiple tokens together.
+
+
+
+
+    /// BatchedCallback structure
 pub struct BatchedCallback<F>
 where
     F: FnMut(&[StreamToken]) -> StreamControlFlow + Send,
@@ -193,6 +210,7 @@ impl<F> BatchedCallback<F>
 where
     F: FnMut(&[StreamToken]) -> StreamControlFlow + Send,
 {
+    /// new function
     pub fn new(callback: F, batch_size: usize) -> Self {
         Self {
             callback,
@@ -236,15 +254,18 @@ where
     }
 }
 
-// ==================== Console Output Callback ====================
 
-/// Console streaming output callback for debugging.
+
+
+    /// ConsoleCallback structure
 pub struct ConsoleCallback {
     buffer: String,
     flush_immediately: bool,
 }
 
+// Implementation for ConsoleCallback
 impl ConsoleCallback {
+    /// new function
     pub fn new(flush_immediately: bool) -> Self {
         Self {
             buffer: String::new(),
@@ -253,6 +274,7 @@ impl ConsoleCallback {
     }
 }
 
+// Implementation for StreamCallback
 impl StreamCallback for ConsoleCallback {
     fn on_token(&mut self, token: &str, _token_id: i32, _position: usize) -> StreamControlFlow {
         if self.flush_immediately {
@@ -279,17 +301,20 @@ impl StreamCallback for ConsoleCallback {
     }
 }
 
-// ==================== Accumulator Callback ====================
 
-/// Accumulator callback that collects all tokens.
-///
-/// Useful when the complete output is needed.
+
+
+
+
+    /// AccumulatorCallback structure
 pub struct AccumulatorCallback {
     tokens: Vec<StreamToken>,
     content: String,
 }
 
+// Implementation for AccumulatorCallback
 impl AccumulatorCallback {
+    /// new function
     pub fn new() -> Self {
         Self {
             tokens: Vec::new(),
@@ -297,28 +322,33 @@ impl AccumulatorCallback {
         }
     }
 
-    /// Get the accumulated complete text.
+    
+    /// get_content function
     pub fn get_content(&self) -> &str {
         &self.content
     }
 
-    /// Get all tokens.
+    
+    /// get_tokens function
     pub fn get_tokens(&self) -> &[StreamToken] {
         &self.tokens
     }
 
-    /// Consume and return the content.
+    
+    /// into_content function
     pub fn into_content(self) -> String {
         self.content
     }
 }
 
+// Implementation for Default
 impl Default for AccumulatorCallback {
     fn default() -> Self {
         Self::new()
     }
 }
 
+// Implementation for StreamCallback
 impl StreamCallback for AccumulatorCallback {
     fn on_token(&mut self, token: &str, token_id: i32, position: usize) -> StreamControlFlow {
         self.content.push_str(token);
@@ -331,9 +361,10 @@ impl StreamCallback for AccumulatorCallback {
     }
 }
 
-// ==================== Helper Functions ====================
 
-/// Safely invoke callback with panic recovery.
+
+
+    /// safe_callback_invoke function
 pub fn safe_callback_invoke<C>(
     callback: &mut C,
     token: &str,
@@ -360,7 +391,7 @@ where
     }
 }
 
-// ==================== Unit Tests ====================
+
 
 #[cfg(test)]
 mod tests {

@@ -1,19 +1,8 @@
-/**
- * Phase 2 Week 3: 推理挂起/恢复机制
- *
- * 特性：
- * 1. ControlFlow：挂起信号与控制流
- * 2. SessionState：状态机（Running → AwaitingExternal → Resuming）
- * 3. ResumeContext：恢复上下文（工具结果注入）
- * 4. SuspendReason：挂起原因（工具调用、人工介入等）
- * 5. 完整的 ReAct 循环支持
- *
- * 设计原则：
- * - 状态机驱动：明确的状态转换
- * - 上下文保留：挂起时保留完整推理状态
- * - 零拷贝注入：恢复时直接追加 token
- * - 插件驱动：通过插件触发挂起
- */
+//! Suspend Module
+//!
+//! This module provides core functionality for the Loci project.
+//!
+
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -21,153 +10,166 @@ use std::time::{Instant, Duration};
 use anyhow::{Result, bail};
 use serde::{Serialize, Deserialize};
 
-// ==================== 控制流定义 ====================
 
-/// 控制流：推理循环的执行控制
+
+
 #[derive(Debug, Clone, PartialEq, Eq)]
+    /// ControlFlow enumeration
 pub enum ControlFlow {
-    /// 继续推理（正常流程）
+    
     Continue,
 
-    /// 挂起推理（等待外部输入）
+    
     Suspend(SuspendReason),
 
-    /// 停止推理（生成结束）
+    
     Stop(StopReason),
 }
 
-/// 挂起原因
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    /// SuspendReason enumeration
 pub enum SuspendReason {
-    /// 工具调用（Function Calling）
+    
     ToolCall {
-        /// 工具名称
+        
         tool_name: String,
 
-        /// 工具参数（JSON）
+        
         arguments: String,
 
-        /// 调用 ID（用于追踪）
+        
         call_id: String,
     },
 
-    /// 人工介入（Human-in-the-Loop）
+    
     HumanInput {
-        /// 提示信息
+        
         prompt: String,
 
-        /// 期待的输入类型
+        
         expected_type: String,
     },
 
-    /// 自定义挂起
+    
     Custom {
-        /// 原因描述
+        
         reason: String,
 
-        /// 附加数据（JSON）
+        
         data: String,
     },
 }
 
-/// 停止原因
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    /// StopReason enumeration
 pub enum StopReason {
-    /// EOS token
+    
     EndOfSequence,
 
-    /// 达到最大长度
+    
     MaxLength,
 
-    /// 停止序列匹配
+    
     StopSequence,
 
-    /// 用户取消
+    
     UserCancelled,
 }
 
-// ==================== Session 状态机 ====================
 
-/// Session 状态
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    /// SessionState enumeration
 pub enum SessionState {
-    /// 空闲（未开始推理）
+    
     Idle,
 
-    /// 运行中（正在推理）
+    
     Running,
 
-    /// 等待外部输入（已挂起）
+    
     AwaitingExternal,
 
-    /// 恢复中（正在注入外部输入）
+    
     Resuming,
 
-    /// 已完成（推理结束）
+    
     Completed,
 
-    /// 已取消
+    
     Cancelled,
 }
 
+// Implementation for SessionState
 impl SessionState {
-    /// 是否可以开始推理
+    
+    /// can_start function
     pub fn can_start(&self) -> bool {
         matches!(self, SessionState::Idle | SessionState::Completed | SessionState::Cancelled)
     }
 
-    /// 是否可以挂起
+    
+    /// can_suspend function
     pub fn can_suspend(&self) -> bool {
         matches!(self, SessionState::Running)
     }
 
-    /// 是否可以恢复
+    
+    /// can_resume function
     pub fn can_resume(&self) -> bool {
         matches!(self, SessionState::AwaitingExternal)
     }
 
-    /// 是否处于活跃状态
+    
+    /// is_active function
     pub fn is_active(&self) -> bool {
         matches!(self, SessionState::Running | SessionState::Resuming)
     }
 }
 
-// ==================== 恢复上下文 ====================
 
-/// 恢复上下文：外部输入注入到推理流中
+
+
 #[derive(Debug, Clone)]
+    /// ResumeContext structure
 pub struct ResumeContext {
-    /// 注入的文本（工具结果、用户输入等）
+    
     pub injection: String,
 
-    /// 注入类型
+    
     pub injection_type: InjectionType,
 
-    /// 元数据（可选）
+    
     pub metadata: HashMap<String, String>,
 
-    /// 创建时间
+    
     pub created_at: Instant,
 }
 
-/// 注入类型
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    /// InjectionType enumeration
 pub enum InjectionType {
-    /// 工具调用结果
+    
     ToolResult,
 
-    /// 用户输入
+    
     UserInput,
 
-    /// 系统消息
+    
     SystemMessage,
 
-    /// 自定义
+    
     Custom,
 }
 
+// Implementation for ResumeContext
 impl ResumeContext {
-    /// 创建工具结果注入
+    
+    /// tool_result function
     pub fn tool_result(result: String, tool_name: String) -> Self {
         let mut metadata = HashMap::new();
         metadata.insert("tool_name".to_string(), tool_name);
@@ -180,7 +182,8 @@ impl ResumeContext {
         }
     }
 
-    /// 创建用户输入注入
+    
+    /// user_input function
     pub fn user_input(input: String) -> Self {
         Self {
             injection: input,
@@ -190,7 +193,8 @@ impl ResumeContext {
         }
     }
 
-    /// 创建系统消息注入
+    
+    /// system_message function
     pub fn system_message(message: String) -> Self {
         Self {
             injection: message,
@@ -201,37 +205,40 @@ impl ResumeContext {
     }
 }
 
-// ==================== Suspendable Session ====================
 
-/// 可挂起的推理会话
+
+
+    /// SuspendableSession structure
 pub struct SuspendableSession {
-    /// Session ID
+    
     pub session_id: String,
 
-    /// 当前状态
+    
     state: SessionState,
 
-    /// 挂起原因（如果已挂起）
+    
     suspend_reason: Option<SuspendReason>,
 
-    /// 当前生成的 token 序列
+    
     generated_tokens: Vec<i32>,
 
-    /// 当前生成的文本
+    
     generated_text: String,
 
-    /// 挂起时间
+    
     suspended_at: Option<Instant>,
 
-    /// 恢复历史（用于调试）
+    
     resume_history: Vec<ResumeContext>,
 
-    /// 状态转换历史
+    
     state_history: Vec<(SessionState, Instant)>,
 }
 
+// Implementation for SuspendableSession
 impl SuspendableSession {
-    /// 创建新的可挂起会话
+    
+    /// new function
     pub fn new(session_id: String) -> Self {
         let mut state_history = Vec::new();
         state_history.push((SessionState::Idle, Instant::now()));
@@ -248,7 +255,8 @@ impl SuspendableSession {
         }
     }
 
-    /// 开始推理
+    
+    /// start function
     pub fn start(&mut self) -> Result<()> {
         if !self.state.can_start() {
             bail!("Cannot start session in state {:?}", self.state);
@@ -262,7 +270,8 @@ impl SuspendableSession {
         Ok(())
     }
 
-    /// 挂起推理
+    
+    /// suspend function
     pub fn suspend(&mut self, reason: SuspendReason) -> Result<()> {
         if !self.state.can_suspend() {
             bail!("Cannot suspend session in state {:?}", self.state);
@@ -277,97 +286,109 @@ impl SuspendableSession {
         Ok(())
     }
 
-    /// 恢复推理
+    
+    /// resume function
     pub fn resume(&mut self, context: ResumeContext) -> Result<()> {
         if !self.state.can_resume() {
             bail!("Cannot resume session in state {:?}", self.state);
         }
 
-        // 记录恢复历史
+        
         self.resume_history.push(context.clone());
 
-        // 注入文本到生成序列
+        
         self.generated_text.push_str(&context.injection);
 
-        // 转换到恢复状态
+        
         self.transition_to(SessionState::Resuming);
 
         eprintln!("🔄 Session {} resumed with {} chars injection",
                  self.session_id, context.injection.len());
 
-        // 立即转回运行状态（实际实现中会在下一个 token 生成时转换）
+        
         self.transition_to(SessionState::Running);
 
-        // 清除挂起信息
+        
         self.suspend_reason = None;
         self.suspended_at = None;
 
         Ok(())
     }
 
-    /// 完成推理
+    
+    /// complete function
     pub fn complete(&mut self, reason: StopReason) {
         self.transition_to(SessionState::Completed);
         eprintln!("✅ Session {} completed: {:?}", self.session_id, reason);
     }
 
-    /// 取消推理
+    
+    /// cancel function
     pub fn cancel(&mut self) {
         self.transition_to(SessionState::Cancelled);
         eprintln!("❌ Session {} cancelled", self.session_id);
     }
 
-    /// 添加生成的 token
+    
+    /// add_token function
     pub fn add_token(&mut self, token_id: i32, token_text: &str) {
         self.generated_tokens.push(token_id);
         self.generated_text.push_str(token_text);
     }
 
-    /// 获取当前状态
+    
+    /// state function
     pub fn state(&self) -> SessionState {
         self.state
     }
 
-    /// 获取挂起原因
+    
+    /// suspend_reason function
     pub fn suspend_reason(&self) -> Option<&SuspendReason> {
         self.suspend_reason.as_ref()
     }
 
-    /// 获取挂起时长
+    
+    /// suspend_duration function
     pub fn suspend_duration(&self) -> Option<Duration> {
         self.suspended_at.map(|t| Instant::now().duration_since(t))
     }
 
-    /// 获取生成的文本
+    
+    /// generated_text function
     pub fn generated_text(&self) -> &str {
         &self.generated_text
     }
 
-    /// 获取恢复历史记录
+    
+    /// resume_count function
     pub fn resume_count(&self) -> usize {
         self.resume_history.len()
     }
 
-    /// 状态转换（内部方法）
+    
     fn transition_to(&mut self, new_state: SessionState) {
         self.state = new_state;
         self.state_history.push((new_state, Instant::now()));
     }
 }
 
-// ==================== Session Manager（扩展） ====================
 
-/// Session 管理器（支持挂起/恢复）
+
+
+    /// SuspendableSessionManager structure
 pub struct SuspendableSessionManager {
-    /// 所有会话
+    
     sessions: Arc<RwLock<HashMap<String, SuspendableSession>>>,
 
-    /// 挂起的会话列表
+    
     suspended_sessions: Arc<RwLock<Vec<String>>>,
 }
 
+// Implementation for SuspendableSessionManager
 impl SuspendableSessionManager {
-    /// 创建新的管理器
+    
+    /// new function
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -375,9 +396,11 @@ impl SuspendableSessionManager {
         }
     }
 
-    /// 创建新会话
+    
+    /// create_session function
     pub fn create_session(&self, session_id: String) -> Result<()> {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.sessions.write()
+            .map_err(|e| anyhow!("Failed to acquire sessions write lock: {}", e))?;
 
         if sessions.contains_key(&session_id) {
             bail!("Session {} already exists", session_id);
@@ -389,25 +412,30 @@ impl SuspendableSessionManager {
         Ok(())
     }
 
-    /// 开始会话
+    
+    /// start_session function
     pub fn start_session(&self, session_id: &str) -> Result<()> {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.sessions.write()
+            .map_err(|e| anyhow!("Failed to acquire sessions write lock: {}", e))?;
         let session = sessions.get_mut(session_id)
             .ok_or_else(|| anyhow::anyhow!("Session {} not found", session_id))?;
 
         session.start()
     }
 
-    /// 挂起会话
+    
+    /// suspend_session function
     pub fn suspend_session(&self, session_id: &str, reason: SuspendReason) -> Result<()> {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.sessions.write()
+            .map_err(|e| anyhow!("Failed to acquire sessions write lock: {}", e))?;
         let session = sessions.get_mut(session_id)
             .ok_or_else(|| anyhow::anyhow!("Session {} not found", session_id))?;
 
         session.suspend(reason)?;
 
-        // 添加到挂起列表
-        let mut suspended = self.suspended_sessions.write().unwrap();
+        // Track suspended session
+        let mut suspended = self.suspended_sessions.write()
+            .map_err(|e| anyhow!("Failed to acquire suspended_sessions write lock: {}", e))?;
         if !suspended.contains(&session_id.to_string()) {
             suspended.push(session_id.to_string());
         }
@@ -415,49 +443,61 @@ impl SuspendableSessionManager {
         Ok(())
     }
 
-    /// 恢复会话
+    
+    /// resume_session function
     pub fn resume_session(&self, session_id: &str, context: ResumeContext) -> Result<()> {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.sessions.write()
+            .map_err(|e| anyhow!("Failed to acquire sessions write lock: {}", e))?;
         let session = sessions.get_mut(session_id)
             .ok_or_else(|| anyhow::anyhow!("Session {} not found", session_id))?;
 
         session.resume(context)?;
 
-        // 从挂起列表移除
-        let mut suspended = self.suspended_sessions.write().unwrap();
+        // Remove from suspended list
+        let mut suspended = self.suspended_sessions.write()
+            .map_err(|e| anyhow!("Failed to acquire suspended_sessions write lock: {}", e))?;
         suspended.retain(|id| id != session_id);
 
         Ok(())
     }
 
-    /// 完成会话
+    
+    /// complete_session function
     pub fn complete_session(&self, session_id: &str, reason: StopReason) -> Result<()> {
-        let mut sessions = self.sessions.write().unwrap();
-        let session = sessions.get_mut(session_id)
-            .ok_or_else(|| anyhow::anyhow!("Session {} not found", session_id))?;
+            let mut sessions = self.sessions.write()
+                .map_err(|e| anyhow!("Failed to acquire sessions write lock: {}", e))?;
+            let session = sessions.get_mut(session_id)
+                .ok_or_else(|| anyhow::anyhow!("Session {} not found", session_id))?;
+    
+            session.complete(reason);
+            Ok(())
+        }
 
-        session.complete(reason);
-
-        Ok(())
-    }
-
-    /// 获取会话状态
+    
+    /// get_session_state function
     pub fn get_session_state(&self, session_id: &str) -> Option<SessionState> {
-        let sessions = self.sessions.read().unwrap();
-        sessions.get(session_id).map(|s| s.state())
+        let sessions = self.sessions.read()
+            .ok()
+            .and_then(|s| s.get(session_id).map(|s| s.state()))
     }
 
-    /// 获取所有挂起的会话
+
+    /// suspended_sessions function
     pub fn suspended_sessions(&self) -> Vec<String> {
-        self.suspended_sessions.read().unwrap().clone()
+        self.suspended_sessions.read()
+            .ok()
+            .map(|s| s.clone())
+            .unwrap_or_default()
     }
 
-    /// 获取会话信息
+
+    /// get_session_info function
     pub fn get_session_info(&self, session_id: &str) -> Option<SessionInfo> {
-        let sessions = self.sessions.read().unwrap();
-        sessions.get(session_id).map(|s| SessionInfo {
-            session_id: s.session_id.clone(),
-            state: s.state,
+        let sessions = self.sessions.read()
+            .ok()
+            .and_then(|s| s.get(session_id).map(|s| SessionInfo {
+                session_id: s.session_id.clone(),
+                state: s.state,
             suspend_reason: s.suspend_reason.clone(),
             generated_length: s.generated_text.len(),
             suspend_duration: s.suspend_duration(),
@@ -466,14 +506,16 @@ impl SuspendableSessionManager {
     }
 }
 
+// Implementation for Default
 impl Default for SuspendableSessionManager {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Session 信息（用于查询）
+
 #[derive(Debug, Clone)]
+    /// SessionInfo structure
 pub struct SessionInfo {
     pub session_id: String,
     pub state: SessionState,
@@ -483,7 +525,7 @@ pub struct SessionInfo {
     pub resume_count: usize,
 }
 
-// ==================== 测试模块 ====================
+
 
 #[cfg(test)]
 mod tests {
@@ -501,11 +543,11 @@ mod tests {
     fn test_suspendable_session_lifecycle() {
         let mut session = SuspendableSession::new("test-1".to_string());
 
-        // 开始
+        
         assert!(session.start().is_ok());
         assert_eq!(session.state(), SessionState::Running);
 
-        // 挂起
+        
         let reason = SuspendReason::ToolCall {
             tool_name: "search".to_string(),
             arguments: r#"{"query": "test"}"#.to_string(),
@@ -514,7 +556,7 @@ mod tests {
         assert!(session.suspend(reason).is_ok());
         assert_eq!(session.state(), SessionState::AwaitingExternal);
 
-        // 恢复
+        
         let context = ResumeContext::tool_result(
             "Search results: ...".to_string(),
             "search".to_string(),
@@ -522,7 +564,7 @@ mod tests {
         assert!(session.resume(context).is_ok());
         assert_eq!(session.state(), SessionState::Running);
 
-        // 完成
+        
         session.complete(StopReason::EndOfSequence);
         assert_eq!(session.state(), SessionState::Completed);
     }
@@ -531,30 +573,34 @@ mod tests {
     fn test_session_manager() {
         let manager = SuspendableSessionManager::new();
 
-        // 创建会话
-        manager.create_session("session-1".to_string()).unwrap();
+        // Create session
+        manager.create_session("session-1".to_string())
+            .expect("Failed to create session");
 
-        // 开始会话
-        manager.start_session("session-1").unwrap();
+        // Start session
+        manager.start_session("session-1")
+            .expect("Failed to start session");
         assert_eq!(
             manager.get_session_state("session-1"),
             Some(SessionState::Running)
         );
 
-        // 挂起会话
+        // Suspend session
         let reason = SuspendReason::HumanInput {
             prompt: "Please confirm".to_string(),
             expected_type: "yes/no".to_string(),
         };
-        manager.suspend_session("session-1", reason).unwrap();
+        manager.suspend_session("session-1", reason)
+            .expect("Failed to suspend session");
 
         let suspended = manager.suspended_sessions();
         assert_eq!(suspended.len(), 1);
         assert_eq!(suspended[0], "session-1");
 
-        // 恢复会话
+        // Resume session
         let context = ResumeContext::user_input("yes".to_string());
-        manager.resume_session("session-1", context).unwrap();
+        manager.resume_session("session-1", context)
+            .expect("Failed to resume session");
 
         let suspended = manager.suspended_sessions();
         assert_eq!(suspended.len(), 0);
@@ -567,7 +613,10 @@ mod tests {
             "test_tool".to_string(),
         );
         assert_eq!(tool_result.injection_type, InjectionType::ToolResult);
-        assert_eq!(tool_result.metadata.get("tool_name").unwrap(), "test_tool");
+        assert_eq!(
+            tool_result.metadata.get("tool_name").expect("tool_name not found"),
+            "test_tool"
+        );
 
         let user_input = ResumeContext::user_input("Hello".to_string());
         assert_eq!(user_input.injection_type, InjectionType::UserInput);

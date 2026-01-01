@@ -1,18 +1,20 @@
-/**
- * Loci Phase 3 Week 1: 移动端 C FFI 接口
- *
- * 核心特性：
- * 1. 标准 C FFI 导出（跨平台兼容）
- * 2. Android JNI 接口（Java 互操作）
- * 3. iOS Objective-C 兼容接口
- * 4. 流式生成回调支持
- * 5. 线程安全保证
- *
- * ABI 稳定性：
- * - 所有导出函数使用 C 调用约定 (extern "C")
- * - 不透明指针传递（Opaque Pointer Pattern）
- * - 错误码返回（避免跨语言异常）
- */
+//! # Mobile C FFI Module
+//!
+//! This module provides C Foreign Function Interface (FFI) bindings for mobile platforms
+//! (Android and iOS) to interact with the Loci engine. It exposes a C-compatible API
+//! that can be called from Java/Kotlin (Android) and Objective-C/Swift (iOS) applications.
+//!
+//! The module manages engine instances using a handle-based system where each engine
+//! is assigned a unique integer handle. This allows multiple concurrent engine instances
+//! to be managed from mobile applications.
+//!
+//! ## Features
+//! - Engine initialization and lifecycle management
+//! - Synchronous text generation
+//! - Streaming text generation with callbacks
+//! - Platform-specific JNI bindings for Android
+//! - Platform-specific Objective-C bindings for iOS
+//! - Thread-safe engine registry with mutex protection
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
@@ -22,77 +24,102 @@ use once_cell::sync::Lazy;
 
 use crate::engine::{LociEngine, EngineConfig};
 
-// ==================== 全局状态管理 ====================
-
-/// 全局引擎注册表（线程安全）
+/// Global registry mapping engine handles to their corresponding engine instances.
+///
+/// This static HashMap stores all active engine instances, allowing them to be
+/// retrieved and managed using integer handles. The registry is protected by
+/// a Mutex to ensure thread-safe access across multiple mobile threads.
 static ENGINE_REGISTRY: Lazy<Mutex<HashMap<usize, Arc<Mutex<LociEngine>>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-/// 引擎句柄计数器（用于生成唯一 ID）
+/// Counter for generating unique engine handles.
+///
+/// This atomic counter increments each time a new engine is created,
+/// ensuring each engine receives a unique identifier.
 static HANDLE_COUNTER: Lazy<Mutex<usize>> = Lazy::new(|| Mutex::new(0));
 
-// ==================== 错误码定义 ====================
+// ============================================================================
+// Error Codes
+// ============================================================================
 
+/// Success status code - operation completed successfully
 pub const LOCI_OK: c_int = 0;
+/// Error code - invalid engine handle provided
 pub const LOCI_ERR_INVALID_HANDLE: c_int = -1;
+/// Error code - null pointer argument provided
 pub const LOCI_ERR_NULL_POINTER: c_int = -2;
+/// Error code - engine initialization failed
 pub const LOCI_ERR_INIT_FAILED: c_int = -3;
+/// Error code - text generation failed
 pub const LOCI_ERR_GENERATION_FAILED: c_int = -4;
+/// Error code - model file not found
 pub const LOCI_ERR_MODEL_NOT_FOUND: c_int = -5;
+/// Error code - insufficient memory available
 pub const LOCI_ERR_OUT_OF_MEMORY: c_int = -6;
+/// Error code - invalid argument provided
 pub const LOCI_ERR_INVALID_ARG: c_int = -7;
 
-// ==================== Streaming Callback ====================
+// ============================================================================
+// Type Definitions
+// ============================================================================
 
-/// Streaming generation callback function type (C-compatible).
+/// Callback function type for streaming text generation.
+///
+/// This function pointer is called for each token generated during streaming mode.
+/// It allows the mobile application to process tokens in real-time as they are generated.
 ///
 /// # Parameters
-/// - `user_data`: User-defined data pointer
-/// - `token`: Current generated token string (UTF-8)
-/// - `token_len`: Token length
+/// - `user_data`: Opaque pointer to user-provided data, passed through from the caller
+/// - `token`: Pointer to the generated token string (null-terminated)
+/// - `token_len`: Length of the token in bytes
 ///
 /// # Returns
-/// - `1`: Continue generation
-/// - `0`: Stop generation
+/// - Non-zero value to continue generation
+/// - Zero to stop generation early
+///
+/// # Safety
+/// This function is marked unsafe as it involves raw pointers and is called from C code.
 pub type StreamCallback = unsafe extern "C" fn(
     user_data: *mut c_void,
     token: *const c_char,
     token_len: c_int,
 ) -> c_int;
 
-// ==================== 核心 C FFI 接口 ====================
+// ============================================================================
+// Core FFI Functions
+// ============================================================================
 
-/// 初始化 Loci 引擎
+/// Initializes a new Loci engine instance with the specified configuration.
 ///
-/// # 参数
-/// - model_path: GGUF 模型文件路径（UTF-8 C 字符串）
-/// - n_threads: CPU 线程数（-1 表示自动检测）
-/// - n_gpu_layers: GPU 层数（-1 表示全部，0 表示纯 CPU）
+/// This function creates a new engine, loads the model from the specified path,
+/// and returns a handle that can be used for subsequent operations. The handle
+/// must be destroyed using `loci_destroy` when no longer needed.
 ///
-/// # 返回值
-/// - 成功：返回引擎句柄（非零）
-/// - 失败：返回 0
+/// # Parameters
+/// - `model_path`: Null-terminated C string path to the GGUF model file
+/// - `n_threads`: Number of CPU threads to use (-1 for automatic detection)
+/// - `n_gpu_layers`: Number of model layers to offload to GPU (0 for CPU-only)
 ///
-/// # 示例
-/// ```c
-/// void* engine = loci_init("/path/to/model.gguf", -1, -1);
-/// if (engine == NULL) {
-///     fprintf(stderr, "Failed to initialize Loci\n");
-/// }
-/// ```
+/// # Returns
+/// - Non-null pointer: Engine handle (cast to `*mut c_void`)
+/// - Null pointer: Initialization failed (check error logs)
+///
+/// # Safety
+/// This function is unsafe as it involves raw pointers and C string handling.
+/// The caller must ensure `model_path` is a valid null-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn loci_init(
     model_path: *const c_char,
     n_threads: c_int,
     n_gpu_layers: c_int,
 ) -> *mut c_void {
-    // 参数校验
+    // Validate model_path pointer
     if model_path.is_null() {
         eprintln!("[loci_init] ERROR: model_path is NULL");
         return std::ptr::null_mut();
     }
 
-    // 转换 C 字符串
+    // Convert C string to Rust string
     let model_path_str = match CStr::from_ptr(model_path).to_str() {
         Ok(s) => s,
         Err(e) => {
@@ -101,7 +128,7 @@ pub unsafe extern "C" fn loci_init(
         }
     };
 
-    // 创建引擎配置
+    // Create engine configuration
     let config = EngineConfig {
         model_path: model_path_str.to_string(),
         n_threads: if n_threads < 0 { num_cpus::get() as u32 } else { n_threads as u32 },
@@ -109,7 +136,7 @@ pub unsafe extern "C" fn loci_init(
         ..Default::default()
     };
 
-    // 初始化引擎
+    // Initialize the engine
     let engine = match LociEngine::new(config) {
         Ok(e) => e,
         Err(e) => {
@@ -118,14 +145,24 @@ pub unsafe extern "C" fn loci_init(
         }
     };
 
-    // 生成唯一句柄
-    let mut counter = HANDLE_COUNTER.lock().unwrap();
+    // Generate unique handle for this engine instance
+    let mut counter = HANDLE_COUNTER.lock()
+        .map_err(|e| {
+            eprintln!("[loci_init] ERROR: Failed to acquire handle counter lock: {}", e);
+            e
+        })
+        .unwrap_or_else(|_| return std::ptr::null_mut());
     *counter += 1;
     let handle = *counter;
     drop(counter);
 
-    // 注册到全局注册表
-    let mut registry = ENGINE_REGISTRY.lock().unwrap();
+    // Store engine in the global registry
+    let mut registry = ENGINE_REGISTRY.lock()
+        .map_err(|e| {
+            eprintln!("[loci_init] ERROR: Failed to acquire engine registry lock: {}", e);
+            e
+        })
+        .unwrap_or_else(|_| return std::ptr::null_mut());
     registry.insert(handle, Arc::new(Mutex::new(engine)));
     drop(registry);
 
@@ -133,27 +170,28 @@ pub unsafe extern "C" fn loci_init(
     handle as *mut c_void
 }
 
-/// 生成文本（阻塞式）
+/// Generates text synchronously from the given prompt.
 ///
-/// # 参数
-/// - engine: 引擎句柄（由 loci_init 返回）
-/// - prompt: 输入提示词（UTF-8 C 字符串）
-/// - max_tokens: 最大生成 token 数
-/// - out_text: 输出文本缓冲区（调用者负责分配和释放）
-/// - out_len: 输出缓冲区大小
+/// This function performs non-streaming text generation, returning the complete
+/// generated text in a single call. The output is written to the provided buffer.
 ///
-/// # 返回值
-/// - LOCI_OK: 成功
-/// - 错误码: 失败
+/// # Parameters
+/// - `engine`: Engine handle returned by `loci_init`
+/// - `prompt`: Null-terminated C string containing the input prompt
+/// - `max_tokens`: Maximum number of tokens to generate
+/// - `out_text`: Output buffer to receive the generated text (must be null-terminated)
+/// - `out_len`: Size of the output buffer in bytes (including space for null terminator)
 ///
-/// # 示例
-/// ```c
-/// char output[4096];
-/// int result = loci_generate(engine, "Hello", 50, output, 4096);
-/// if (result == LOCI_OK) {
-///     printf("Generated: %s\n", output);
-/// }
-/// ```
+/// # Returns
+/// - `LOCI_OK`: Success
+/// - `LOCI_ERR_INVALID_HANDLE`: Invalid engine handle
+/// - `LOCI_ERR_NULL_POINTER`: Null pointer argument
+/// - `LOCI_ERR_GENERATION_FAILED`: Text generation failed
+/// - `LOCI_ERR_INVALID_ARG`: Invalid buffer size
+///
+/// # Safety
+/// This function is unsafe as it involves raw pointers and buffer manipulation.
+/// The caller must ensure all pointers are valid and the output buffer has sufficient space.
 #[no_mangle]
 pub unsafe extern "C" fn loci_generate(
     engine: *mut c_void,
@@ -162,7 +200,7 @@ pub unsafe extern "C" fn loci_generate(
     out_text: *mut c_char,
     out_len: c_int,
 ) -> c_int {
-    // 参数校验
+    // Validate pointers
     if engine.is_null() {
         return LOCI_ERR_INVALID_HANDLE;
     }
@@ -172,22 +210,32 @@ pub unsafe extern "C" fn loci_generate(
 
     let handle = engine as usize;
 
-    // Get engine instance
-    let registry = ENGINE_REGISTRY.lock().unwrap();
+    // Retrieve engine from registry
+    let registry = ENGINE_REGISTRY.lock()
+        .map_err(|e| {
+            eprintln!("[loci_generate] ERROR: Failed to acquire engine registry lock: {}", e);
+            e
+        })
+        .unwrap_or_else(|_| return LOCI_ERR_INTERNAL);
     let engine_arc = match registry.get(&handle) {
         Some(e) => e.clone(),
         None => return LOCI_ERR_INVALID_HANDLE,
     };
     drop(registry);
 
-    // Convert input
+    // Convert prompt C string to Rust string
     let prompt_str = match CStr::from_ptr(prompt).to_str() {
         Ok(s) => s,
         Err(_) => return LOCI_ERR_NULL_POINTER,
     };
 
-    // 生成文本
-    let engine = engine_arc.lock().unwrap();
+    // Perform text generation
+    let engine = engine_arc.lock()
+        .map_err(|e| {
+            eprintln!("[loci_generate] ERROR: Failed to acquire engine lock: {}", e);
+            e
+        })
+        .unwrap_or_else(|_| return LOCI_ERR_INTERNAL);
     let result = match engine.generate(prompt_str, max_tokens as usize) {
         Ok(text) => text,
         Err(e) => {
@@ -196,41 +244,45 @@ pub unsafe extern "C" fn loci_generate(
         }
     };
 
-    // 写入输出缓冲区
-    // 安全检查：防止缓冲区溢出
+    // Validate output buffer size
     if out_len <= 0 {
         eprintln!("[loci_generate] ERROR: Invalid buffer size: {}", out_len);
         return LOCI_ERR_INVALID_ARG;
     }
 
+    // Copy generated text to output buffer
     let result_bytes = result.as_bytes();
-    // 确保有空间存放 null terminator
-    let available_space = (out_len - 1) as usize;
+    let available_space = (out_len - 1) as usize; // Reserve space for null terminator
     let copy_len = std::cmp::min(result_bytes.len(), available_space);
 
     std::ptr::copy_nonoverlapping(result_bytes.as_ptr(), out_text as *mut u8, copy_len);
-    *out_text.add(copy_len) = 0; // 添加空字符终止符
+    *out_text.add(copy_len) = 0; // Null-terminate the output
 
     LOCI_OK
 }
 
-/// 流式生成文本（回调式）
+/// Generates text with streaming callback support.
+///
+/// This function performs streaming text generation, calling the provided callback
+/// for each token as it is generated. This allows for real-time display of generated
+/// text and early termination if needed.
 ///
 /// # Parameters
-/// - `engine`: Engine handle
-/// - `prompt`: Input prompt text
+/// - `engine`: Engine handle returned by `loci_init`
+/// - `prompt`: Null-terminated C string containing the input prompt
 /// - `max_tokens`: Maximum number of tokens to generate
-/// - `callback`: Streaming callback function
-/// - `user_data`: User data passed to callback
+/// - `callback`: Function pointer called for each generated token
+/// - `user_data`: Opaque pointer passed to the callback function
 ///
 /// # Returns
 /// - `LOCI_OK`: Success
-/// - Error code: Failure
+/// - `LOCI_ERR_INVALID_HANDLE`: Invalid engine handle
+/// - `LOCI_ERR_NULL_POINTER`: Null pointer argument
+/// - `LOCI_ERR_GENERATION_FAILED`: Text generation failed
 ///
-/// # Features
-/// - True token-level streaming (callback invoked for each token)
-/// - Supports user interruption (callback returns 0)
-/// - Zero-copy design
+/// # Safety
+/// This function is unsafe as it involves raw pointers and callback invocation.
+/// The callback must be thread-safe and handle all tokens correctly.
 #[no_mangle]
 pub unsafe extern "C" fn loci_generate_stream(
     engine: *mut c_void,
@@ -239,38 +291,45 @@ pub unsafe extern "C" fn loci_generate_stream(
     callback: StreamCallback,
     user_data: *mut c_void,
 ) -> c_int {
+    // Validate pointers
     if engine.is_null() || prompt.is_null() {
         return LOCI_ERR_INVALID_HANDLE;
     }
 
     let handle = engine as usize;
 
-    // Get engine instance
-    let registry = ENGINE_REGISTRY.lock().unwrap();
+    // Retrieve engine from registry
+    let registry = ENGINE_REGISTRY.lock()
+        .map_err(|e| {
+            eprintln!("[loci_generate_stream] ERROR: Failed to acquire engine registry lock: {}", e);
+            e
+        })
+        .unwrap_or_else(|_| return LOCI_ERR_INTERNAL);
     let engine_arc = match registry.get(&handle) {
         Some(e) => e.clone(),
         None => return LOCI_ERR_INVALID_HANDLE,
     };
     drop(registry);
 
-    // Convert input
+    // Convert prompt C string to Rust string
     let prompt_str = match CStr::from_ptr(prompt).to_str() {
         Ok(s) => s,
         Err(_) => return LOCI_ERR_NULL_POINTER,
     };
 
-    // Create C callback adapter
+    // Wrapper struct to bridge C callback with Rust streaming trait
     struct CFfiCallback {
         callback: StreamCallback,
         user_data: *mut c_void,
     }
 
-    // Manually implement Send (caller guarantees thread safety)
+    // Mark callback as Send-safe for threading
     unsafe impl Send for CFfiCallback {}
 
+    // Implement Rust streaming callback trait for C FFI callback
     impl crate::streaming::StreamCallback for CFfiCallback {
         fn on_token(&mut self, token: &str, _token_id: i32, _position: usize) -> crate::streaming::StreamControlFlow {
-            // Convert to C string
+            // Convert token to C string
             let token_cstr = match CString::new(token) {
                 Ok(s) => s,
                 Err(_) => return crate::streaming::StreamControlFlow::Stop,
@@ -285,6 +344,7 @@ pub unsafe extern "C" fn loci_generate_stream(
                 )
             };
 
+            // Convert callback return value to flow control
             if should_continue == 0 {
                 crate::streaming::StreamControlFlow::Stop
             } else {
@@ -293,8 +353,13 @@ pub unsafe extern "C" fn loci_generate_stream(
         }
     }
 
-    // Execute streaming generation
-    let engine = engine_arc.lock().unwrap();
+    // Perform streaming generation
+    let engine = engine_arc.lock()
+        .map_err(|e| {
+            eprintln!("[loci_generate_stream] ERROR: Failed to acquire engine lock: {}", e);
+            e
+        })
+        .unwrap_or_else(|_| return LOCI_ERR_INTERNAL);
     let mut ffi_callback = CFfiCallback {
         callback,
         user_data,
@@ -309,14 +374,22 @@ pub unsafe extern "C" fn loci_generate_stream(
     }
 }
 
-/// 销毁引擎
+/// Destroys an engine instance and releases its resources.
 ///
-/// # 参数
-/// - engine: 引擎句柄
+/// This function removes the engine from the registry and allows its resources
+/// to be freed. After calling this function, the engine handle becomes invalid
+/// and should not be used.
 ///
-/// # 返回值
-/// - LOCI_OK: 成功
-/// - 错误码: 失败
+/// # Parameters
+/// - `engine`: Engine handle returned by `loci_init`
+///
+/// # Returns
+/// - `LOCI_OK`: Engine successfully destroyed
+/// - `LOCI_ERR_INVALID_HANDLE`: Invalid or already destroyed handle
+///
+/// # Safety
+/// This function is unsafe as it involves raw pointer handling.
+/// The caller must ensure the handle is valid.
 #[no_mangle]
 pub unsafe extern "C" fn loci_destroy(engine: *mut c_void) -> c_int {
     if engine.is_null() {
@@ -325,8 +398,13 @@ pub unsafe extern "C" fn loci_destroy(engine: *mut c_void) -> c_int {
 
     let handle = engine as usize;
 
-    // 从注册表移除
-    let mut registry = ENGINE_REGISTRY.lock().unwrap();
+    // Remove engine from registry
+    let mut registry = ENGINE_REGISTRY.lock()
+        .map_err(|e| {
+            eprintln!("[loci_destroy] ERROR: Failed to acquire engine registry lock: {}", e);
+            e
+        })
+        .unwrap_or_else(|_| return LOCI_ERR_INTERNAL);
     if registry.remove(&handle).is_some() {
         println!("[loci_destroy] Engine {} destroyed", handle);
         LOCI_OK
@@ -335,18 +413,35 @@ pub unsafe extern "C" fn loci_destroy(engine: *mut c_void) -> c_int {
     }
 }
 
-/// 获取最后一次错误信息（线程局部）
+/// Returns a description of the last error that occurred.
 ///
-/// # 返回值
-/// - 错误信息 C 字符串（静态生命周期）
+/// This function provides a human-readable error message that can be used
+/// for debugging and error reporting in mobile applications.
+///
+/// # Returns
+/// - Pointer to a null-terminated C string containing the error message
+/// - The string is static and should not be freed by the caller
+///
+/// # Safety
+/// This function is unsafe as it returns a raw pointer.
+/// The caller must ensure the pointer is valid before use.
 #[no_mangle]
 pub unsafe extern "C" fn loci_last_error() -> *const c_char {
-    // TODO: 实现线程局部错误存储
+    // TODO: Implement proper error tracking and message storage
     "Unknown error\0".as_ptr() as *const c_char
 }
 
-// ==================== Android JNI 接口 ====================
+// ============================================================================
+// Android JNI Bindings
+// ============================================================================
 
+/// Android-specific JNI bindings for Java/Kotlin integration.
+///
+/// This module provides JNI functions that can be called from Android Java/Kotlin
+/// code. The JNI layer handles string conversions and type mapping between
+/// Java and C, delegating the actual work to the core FFI functions.
+///
+/// The JNI functions follow the naming convention: `Java_<package>_<class>_<method>`
 #[cfg(target_os = "android")]
 pub mod android_jni {
     use super::*;
@@ -354,16 +449,25 @@ pub mod android_jni {
     use jni::objects::{JClass, JString};
     use jni::sys::{jlong, jint, jstring};
 
-    /// Java 类名：com.loci.LociEngine
+    /// JNI function to initialize a new engine instance from Android Java/Kotlin.
     ///
-    /// Java 示例：
-    /// ```java
-    /// LociEngine engine = new LociEngine("/sdcard/model.gguf", -1, -1);
-    /// String output = engine.generate("Hello", 50);
-    /// engine.destroy();
-    /// ```
-
-    /// JNI: 初始化引擎
+    /// This function is called from Java/Kotlin code via JNI and creates a new
+    /// Loci engine with the specified configuration. The engine handle is returned
+    /// as a jlong for use in subsequent JNI calls.
+    ///
+    /// # JNI Signature
+    /// `nativeInit(Ljava/lang/String;II)J`
+    ///
+    /// # Parameters
+    /// - `env`: JNI environment pointer
+    /// - `_class`: Java class object (unused)
+    /// - `model_path`: Java string containing the path to the model file
+    /// - `n_threads`: Number of CPU threads to use
+    /// - `n_gpu_layers`: Number of GPU layers to offload
+    ///
+    /// # Returns
+    /// - Non-zero: Engine handle (as jlong)
+    /// - Zero: Initialization failed
     #[no_mangle]
     pub unsafe extern "C" fn Java_com_loci_LociEngine_nativeInit(
         mut env: JNIEnv,
@@ -372,7 +476,7 @@ pub mod android_jni {
         n_threads: jint,
         n_gpu_layers: jint,
     ) -> jlong {
-        // 转换 Java String -> Rust String
+        // Convert Java string to Rust string
         let model_path_str: String = match env.get_string(&model_path) {
             Ok(s) => s.into(),
             Err(e) => {
@@ -381,13 +485,13 @@ pub mod android_jni {
             }
         };
 
-        // 转换为 C 字符串
+        // Convert to C string for FFI call
         let model_path_cstr = match CString::new(model_path_str) {
             Ok(s) => s,
             Err(_) => return 0,
         };
 
-        // 调用核心 FFI
+        // Call core FFI initialization function
         let handle = loci_init(
             model_path_cstr.as_ptr(),
             n_threads,
@@ -397,7 +501,24 @@ pub mod android_jni {
         handle as jlong
     }
 
-    /// JNI: 生成文本
+    /// JNI function to generate text from Android Java/Kotlin.
+    ///
+    /// This function is called from Java/Kotlin code via JNI and performs
+    /// synchronous text generation. The generated text is returned as a Java string.
+    ///
+    /// # JNI Signature
+    /// `nativeGenerate(JLjava/lang/String;I)Ljava/lang/String;`
+    ///
+    /// # Parameters
+    /// - `env`: JNI environment pointer
+    /// - `_class`: Java class object (unused)
+    /// - `engine_handle`: Engine handle returned by nativeInit
+    /// - `prompt`: Java string containing the input prompt
+    /// - `max_tokens`: Maximum number of tokens to generate
+    ///
+    /// # Returns
+    /// - Non-null: Java string containing the generated text
+    /// - Null: Generation failed
     #[no_mangle]
     pub unsafe extern "C" fn Java_com_loci_LociEngine_nativeGenerate(
         mut env: JNIEnv,
@@ -406,7 +527,7 @@ pub mod android_jni {
         prompt: JString,
         max_tokens: jint,
     ) -> jstring {
-        // 转换 Java String -> C String
+        // Convert Java prompt string to C string
         let prompt_str: String = match env.get_string(&prompt) {
             Ok(s) => s.into(),
             Err(_) => return std::ptr::null_mut(),
@@ -417,10 +538,10 @@ pub mod android_jni {
             Err(_) => return std::ptr::null_mut(),
         };
 
-        // 分配输出缓冲区
+        // Allocate output buffer
         let mut output = vec![0u8; 8192];
 
-        // 调用核心 FFI
+        // Call core FFI generation function
         let result = loci_generate(
             engine_handle as *mut c_void,
             prompt_cstr.as_ptr(),
@@ -433,7 +554,7 @@ pub mod android_jni {
             return std::ptr::null_mut();
         }
 
-        // 转换输出为 Java String
+        // Convert output C string to Java string
         let output_str = CStr::from_ptr(output.as_ptr() as *const c_char)
             .to_string_lossy();
 
@@ -443,7 +564,18 @@ pub mod android_jni {
         }
     }
 
-    /// JNI: 销毁引擎
+    /// JNI function to destroy an engine instance from Android Java/Kotlin.
+    ///
+    /// This function is called from Java/Kotlin code via JNI and releases
+    /// the resources associated with the specified engine handle.
+    ///
+    /// # JNI Signature
+    /// `nativeDestroy(J)V`
+    ///
+    /// # Parameters
+    /// - `_env`: JNI environment pointer (unused)
+    /// - `_class`: Java class object (unused)
+    /// - `engine_handle`: Engine handle to destroy
     #[no_mangle]
     pub unsafe extern "C" fn Java_com_loci_LociEngine_nativeDestroy(
         _env: JNIEnv,
@@ -454,51 +586,56 @@ pub mod android_jni {
     }
 }
 
-// ==================== iOS Objective-C 接口 ====================
+// ============================================================================
+// iOS Objective-C Bindings
+// ============================================================================
 
+/// iOS-specific Objective-C bindings for Swift/Obj-C integration.
+///
+/// This module provides Objective-C compatible functions that can be called
+/// from iOS applications written in Swift or Objective-C. This module is
+/// compiled only when targeting iOS.
+///
+/// # Note
+/// This module is currently a placeholder. Implementations should be added
+/// as needed for iOS integration, following the pattern used in the Android
+/// JNI module.
 #[cfg(target_os = "ios")]
 pub mod ios_objc {
     use super::*;
 
-    // iOS 使用标准 C FFI 接口
-    //
-    // Objective-C 示例：
-    // ```objc
-    // void* engine = loci_init("/path/to/model.gguf", -1, -1);
-    // char output[4096];
-    // loci_generate(engine, "Hello", 50, output, 4096);
-    // NSLog(@"Generated: %s", output);
-    // loci_destroy(engine);
-    // ```
-    //
-    // 或使用 Swift：
-    // ```swift
-    // let engine = loci_init("/path/to/model.gguf", -1, -1)
-    // var output = [CChar](repeating: 0, count: 4096)
-    // loci_generate(engine, "Hello", 50, &output, 4096)
-    // print("Generated: \(String(cString: output))")
-    // loci_destroy(engine)
-    // ```
-
-    // iOS 不需要额外的 JNI 封装，直接使用 C FFI
+    // TODO: Implement Objective-C bindings for iOS
+    // This should include:
+    // - Engine initialization functions
+    // - Text generation functions
+    // - Streaming generation functions
+    // - Resource cleanup functions
+    // - Error handling utilities
 }
 
-// ==================== 单元测试 ====================
+// ============================================================================
+// Unit Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::CString;
 
+    /// Tests the complete lifecycle of an FFI engine instance.
+    ///
+    /// This test verifies that engines can be created and destroyed properly
+    /// through the FFI interface.
     #[test]
     fn test_ffi_lifecycle() {
         unsafe {
-            // 初始化（使用虚拟路径，预期失败）
-            let model_path = CString::new("/tmp/test.gguf").unwrap();
+            // Create engine with test model path
+            let model_path = CString::new("/tmp/test.gguf")
+                .expect("Failed to create test model path CString");
             let engine = loci_init(model_path.as_ptr(), 4, 0);
 
-            // 注意：实际测试需要真实模型文件
-            // 这里只验证 API 调用不会崩溃
+            // Note: Actual engine initialization may fail if model doesn't exist
+            // This test primarily validates the FFI interface mechanics
 
             if !engine.is_null() {
                 loci_destroy(engine);
@@ -506,6 +643,9 @@ mod tests {
         }
     }
 
+    /// Tests that error codes are properly defined and distinct.
+    ///
+    /// This test verifies the error code constants are set correctly.
     #[test]
     fn test_error_codes() {
         assert_eq!(LOCI_OK, 0);

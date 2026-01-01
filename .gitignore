@@ -5,6 +5,9 @@ Cargo.lock
 
 # IDE
 .vscode/
+.kiro/
+.claude/
+.iflow/
 .idea/
 *.swp
 *.swo
@@ -31,3 +34,5 @@ bindings/dart/bridge_generated.dart
 # 临时文件
 *.tmp
 *.temp
+
+docs/

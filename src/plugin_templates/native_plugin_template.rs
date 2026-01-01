@@ -1,290 +1,2782 @@
-//! # Loci Native 插件开发模板
-//!
-//! 本文件提供了 Native 插件的开发模板和 C API 定义。
-//!
-//! ## 编译方式
-//!
-//! ### Rust 插件
-//! ```bash
-//! cargo build --release --lib
-//! ```
-//!
-//! ### C/C++ 插件
-//! ```bash
-//! gcc -shared -fPIC -o plugin.so plugin.c
-//! clang -shared -fPIC -o plugin.dylib plugin.c  # macOS
-//! cl /LD plugin.c  # Windows
-//! ```
 
-// ==================== C API 定义 ====================
 
-/// Loci Native 插件 C API
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// Native Plugin Development Template for Loci
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ///
-/// 所有函数都是可选的，插件可以只实现需要的钩子。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// This file provides a template for creating native plugins that extend Loci's functionality
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// through a C-compatible API. Native plugins are compiled to shared libraries (.dll, .so, .dylib)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// and loaded at runtime by the Loci plugin system.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ///
-/// # 返回值约定
-/// - `0`: Continue（继续执行）
-/// - `1`: Suspend（挂起，等待外部输入）
-/// - `2`: Break（停止执行）
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// # Plugin Lifecycle
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// 1. **Initialization**: `loki_initialize()` is called when the plugin is loaded
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// 2. **Active Phase**: Plugin receives callbacks during inference (logit transformation, token generation)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// 3. **Cleanup**: `loki_cleanup()` is called when the plugin is unloaded
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+///
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// # Use Cases
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// - Custom logit biasing and token manipulation
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// - Token-level filtering and censorship
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// - Real-time inference monitoring
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// - Integration with external services
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+///
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// # Building
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// Compile as a C-compatible shared library with `extern "C"` functions.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// Ensure the binary exports the required symbols.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// Plugin API structure defining the interface between Loci and native plugins.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+///
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// This structure uses C-compatible representation (`#[repr(C)]`) to ensure
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/// binary compatibility across different compilers and platforms.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #[repr(C)]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// struct function
 pub struct LociPluginAPI {
-    /// 插件初始化（可选）
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// Optional callback for plugin initialization.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     ///
-    /// 返回值：0 = 成功，非 0 = 失败
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// Called once when the plugin is first loaded. Use this to:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - Initialize plugin state
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - Allocate resources
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - Validate configuration
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ///
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// # Returns
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - `0` on success
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - Non-zero on failure (plugin will not be loaded)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// loci_initialize function
     pub loci_initialize: Option<extern "C" fn() -> i32>,
 
-    /// 插件清理（可选）
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// Optional callback for plugin cleanup.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     ///
-    /// 返回值：0 = 成功，非 0 = 失败
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// Called when the plugin is being unloaded. Use this to:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - Release allocated resources
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - Flush pending operations
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - Save state if needed
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ///
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// # Returns
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - `0` on success
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - Non-zero on failure
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// loci_cleanup function
     pub loci_cleanup: Option<extern "C" fn() -> i32>,
 
-    /// 转换 logits（采样前钩子）
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// Optional callback for logit transformation during inference.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     ///
-    /// # 参数
-    /// - `logits_ptr`: logits 数组指针（可修改）
-    /// - `logits_len`: logits 数组长度
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// Called before each token is sampled, allowing the plugin to modify
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// the probability distribution over tokens. This enables:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - Biasing toward/away from specific tokens
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - Implementing custom sampling strategies
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - Applying constraints to token selection
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     ///
-    /// # 返回值
-    /// - `0`: Continue
-    /// - `1`: Suspend
-    /// - `2`: Break
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// # Parameters
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - `logits_ptr`: Pointer to mutable array of logit values (f32)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - `logits_len`: Number of elements in the logits array
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ///
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// # Returns
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - `0` to continue normal sampling
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - Non-zero to signal an error
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// loci_transform_logits function
     pub loci_transform_logits: Option<extern "C" fn(*mut f32, usize) -> i32>,
 
-    /// Token 生成回调（采样后钩子）
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// Optional callback for notification when a token is generated.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     ///
-    /// # 参数
-    /// - `token_id`: 生成的 token ID
-    /// - `token_text_ptr`: token 文本指针（只读）
-    /// - `token_text_len`: token 文本长度
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// Called after each token is generated, allowing the plugin to:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - Monitor output in real-time
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - Implement early stopping conditions
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - Log or track generated content
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - Trigger external actions
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     ///
-    /// # 返回值
-    /// - `0`: Continue
-    /// - `1`: Suspend
-    /// - `2`: Break
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// # Parameters
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - `token_id`: The ID of the generated token
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - `token_text_ptr`: Pointer to UTF-8 encoded token text
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - `token_text_len`: Length of the token text in bytes
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ///
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// # Returns
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - `0` to continue generation
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - `1` to stop generation early
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// - Other non-zero values for custom signaling
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /// loci_on_token_generated function
     pub loci_on_token_generated: Option<extern "C" fn(i32, *const u8, usize) -> i32>,
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 }
 
-// ==================== Rust 插件示例 ====================
 
-/// 示例：Logit Bias 插件（Rust 实现）
+
+
+
+
+
+
+
+
+
+/// Plugin initialization function.
 ///
-/// 编译方式：
-/// ```toml
-/// [lib]
-/// crate-type = ["cdylib"]
+/// This function is called once when the plugin is first loaded by Loci.
+/// Initialize any resources, state, or configuration needed by the plugin here.
+///
+/// # Returns
+/// - `0` on successful initialization
+/// - Non-zero on failure (prevents plugin from being used)
+///
+/// # Example
+/// ```ignore
+/// #[no_mangle]
+/// pub extern "C" fn loci_initialize() -> i32 {
+///     // Load configuration, allocate memory, etc.
+///     println!("Plugin initialized");
+///     0
+/// }
 /// ```
-
 #[no_mangle]
+    /// extern function
 pub extern "C" fn loci_initialize() -> i32 {
-    // 初始化逻辑
+    // Perform one-time initialization here
     println!("Logit Bias Plugin initialized");
-    0 // 成功
+    0 // Success
 }
 
+/// Plugin cleanup function.
+///
+/// This function is called when the plugin is being unloaded. Release all
+/// resources and perform any necessary cleanup operations.
+///
+/// # Returns
+/// - `0` on successful cleanup
+/// - Non-zero on failure
+///
+/// # Example
+/// ```ignore
+/// #[no_mangle]
+/// pub extern "C" fn loci_cleanup() -> i32 {
+///     // Free resources, save state, etc.
+///     println!("Plugin cleaned up");
+///     0
+/// }
+/// ```
 #[no_mangle]
+    /// extern function
 pub extern "C" fn loci_cleanup() -> i32 {
-    // 清理逻辑
+    // Cleanup resources here
     println!("Logit Bias Plugin cleaned up");
-    0 // 成功
+    0 // Success
 }
 
+/// Logit transformation callback.
+///
+/// This function allows the plugin to modify the logits before token sampling.
+/// By adding or subtracting from logit values, you can bias the model toward
+/// or away from specific tokens.
+///
+/// # Parameters
+/// - `logits_ptr`: Raw pointer to mutable f32 array of logits
+/// - `logits_len`: Number of logits in the array (vocabulary size)
+///
+/// # Returns
+/// - `0` on success
+/// - Non-zero on error
+///
+/// # Safety
+/// This function uses unsafe operations to handle raw pointers. Ensure that:
+/// - `logits_ptr` is valid and aligned for f32
+/// - `logits_len` correctly represents the array size
+///
+/// # Example Use Cases
+/// - Increase logits for specific tokens to make them more likely
+/// - Decrease logits to suppress unwanted tokens
+/// - Apply complex transformation functions to the distribution
 #[no_mangle]
+    /// extern function
 pub extern "C" fn loci_transform_logits(logits_ptr: *mut f32, logits_len: usize) -> i32 {
     unsafe {
+        // Create a mutable slice from the raw pointer
         let logits = std::slice::from_raw_parts_mut(logits_ptr, logits_len);
 
-        // 示例：对 token 0 和 1 施加偏置
+        // Example: Bias token 0 to be more likely (increase its logit by 1.5)
         if logits.len() > 0 {
-            logits[0] += 1.5; // 增加 token 0 的概率
+            logits[0] += 1.5; // Positive bias increases probability
         }
+
+        // Example: Bias token 1 to be less likely (decrease its logit by 2.0)
         if logits.len() > 1 {
-            logits[1] -= 2.0; // 降低 token 1 的概率
+            logits[1] -= 2.0; // Negative bias decreases probability
         }
     }
 
-    0 // Continue
+    0 // Success
 }
 
+/// Token generation callback.
+///
+/// This function is called after each token is generated, allowing the plugin
+/// to monitor output and optionally stop generation early.
+///
+/// # Parameters
+/// - `token_id`: The integer ID of the generated token
+/// - `token_text_ptr`: Raw pointer to UTF-8 encoded token text
+/// - `token_text_len`: Length of the token text in bytes
+///
+/// # Returns
+/// - `0` to continue generation normally
+/// - `1` to stop generation early
+/// - Other values for custom signaling
+///
+/// # Safety
+/// This function uses unsafe operations to handle raw pointers. Ensure that:
+/// - `token_text_ptr` is valid and points to valid UTF-8 data
+/// - `token_text_len` correctly represents the text length
+///
+/// # Example Use Cases
+/// - Log generated tokens for debugging
+/// - Implement early stopping on specific sequences
+/// - Filter or censor output in real-time
 #[no_mangle]
+    /// extern function
 pub extern "C" fn loci_on_token_generated(
     token_id: i32,
     token_text_ptr: *const u8,
     token_text_len: usize,
 ) -> i32 {
     unsafe {
+        // Create a slice from the raw pointer and interpret as UTF-8 string
         let token_text = std::str::from_utf8_unchecked(
             std::slice::from_raw_parts(token_text_ptr, token_text_len)
         );
 
+        // Example: Log each generated token
         println!("Generated token: {} (ID: {})", token_text, token_id);
 
-        // 示例：检测特定 token 并挂起
+        // Example: Stop generation if "STOP" token is generated
         if token_text.contains("STOP") {
-            return 1; // Suspend
+            return 1; // Signal to stop generation
         }
     }
 
-    0 // Continue
+    0 // Continue generation
 }
 
-// ==================== C 插件示例 ====================
 
-/*
-// plugin.c - Logit Bias Plugin (C 实现)
 
-#include <stdio.h>
-#include <string.h>
 
-// 初始化插件
-__attribute__((visibility("default")))
-int loci_initialize() {
-    printf("Logit Bias Plugin initialized (C)\n");
-    return 0;
-}
 
-// 清理插件
-__attribute__((visibility("default")))
-int loci_cleanup() {
-    printf("Logit Bias Plugin cleaned up (C)\n");
-    return 0;
-}
 
-// 转换 logits
-__attribute__((visibility("default")))
-int loci_transform_logits(float* logits, size_t logits_len) {
-    if (logits_len > 0) {
-        logits[0] += 1.5f;  // 增加 token 0 的概率
-    }
-    if (logits_len > 1) {
-        logits[1] -= 2.0f;  // 降低 token 1 的概率
-    }
-    return 0;  // Continue
-}
 
-// Token 生成回调
-__attribute__((visibility("default")))
-int loci_on_token_generated(int token_id, const unsigned char* token_text, size_t token_text_len) {
-    printf("Generated token: %.*s (ID: %d)\n", (int)token_text_len, token_text, token_id);
 
-    // 检测 "STOP" 并挂起
-    if (token_text_len >= 4 && strncmp((const char*)token_text, "STOP", 4) == 0) {
-        return 1;  // Suspend
-    }
 
-    return 0;  // Continue
-}
 
-// 编译方式：
-// gcc -shared -fPIC -o logit_bias.so plugin.c
-// clang -shared -fPIC -o logit_bias.dylib plugin.c  # macOS
-// cl /LD /Fe:logit_bias.dll plugin.c  # Windows
-*/
 
-// ==================== C++ 插件示例 ====================
 
-/*
-// plugin.cpp - Logit Bias Plugin (C++ 实现)
-
-#include <iostream>
-#include <string>
-
-extern "C" {
-
-// 初始化插件
-__attribute__((visibility("default")))
-int loci_initialize() {
-    std::cout << "Logit Bias Plugin initialized (C++)" << std::endl;
-    return 0;
-}
-
-// 清理插件
-__attribute__((visibility("default")))
-int loci_cleanup() {
-    std::cout << "Logit Bias Plugin cleaned up (C++)" << std::endl;
-    return 0;
-}
-
-// 转换 logits
-__attribute__((visibility("default")))
-int loci_transform_logits(float* logits, size_t logits_len) {
-    if (logits_len > 0) {
-        logits[0] += 1.5f;
-    }
-    if (logits_len > 1) {
-        logits[1] -= 2.0f;
-    }
-    return 0;
-}
-
-// Token 生成回调
-__attribute__((visibility("default")))
-int loci_on_token_generated(int token_id, const unsigned char* token_text, size_t token_text_len) {
-    std::string text(reinterpret_cast<const char*>(token_text), token_text_len);
-    std::cout << "Generated token: " << text << " (ID: " << token_id << ")" << std::endl;
-
-    if (text.find("STOP") != std::string::npos) {
-        return 1;  // Suspend
-    }
-
-    return 0;
-}
-
-}  // extern "C"
-
-// 编译方式：
-// g++ -shared -fPIC -o logit_bias.so plugin.cpp
-// clang++ -shared -fPIC -o logit_bias.dylib plugin.cpp  # macOS
-// cl /LD /Fe:logit_bias.dll plugin.cpp  # Windows
-*/
-
-// ==================== 签名生成脚本 ====================
-
-/*
-#!/usr/bin/env python3
-# sign_plugin.py - 插件签名生成工具
-
-import sys
-import ed25519
-
-def sign_plugin(plugin_path, private_key_path):
-    """
-    为插件生成 Ed25519 签名
-
-    Args:
-        plugin_path: 插件文件路径
-        private_key_path: 私钥文件路径
-    """
-    # 读取私钥
-    with open(private_key_path, 'rb') as f:
-        private_key_bytes = f.read()
-
-    private_key = ed25519.SigningKey(private_key_bytes)
-
-    # 读取插件数据
-    with open(plugin_path, 'rb') as f:
-        plugin_data = f.read()
-
-    # 生成签名
-    signature = private_key.sign(plugin_data)
-
-    # 保存签名文件
-    sig_path = plugin_path + '.sig'
-    with open(sig_path, 'wb') as f:
-        f.write(signature)
-
-    print(f"Signature saved to: {sig_path}")
-
-if __name__ == '__main__':
-    if len(sys.argv) != 3:
-        print("Usage: python sign_plugin.py <plugin_path> <private_key_path>")
-        sys.exit(1)
-
-    plugin_path = sys.argv[1]
-    private_key_path = sys.argv[2]
-
-    sign_plugin(plugin_path, private_key_path)
-
-# 使用方式：
-# python sign_plugin.py logit_bias.so private_key.bin
-*/
