@@ -1,0 +1,38 @@
+# Rust
+/target
+Cargo.lock
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models (don't commit large model files)
+*.gguf
+*.bin
+models/
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.dll
+*.dylib
+*.lib
+*.exe
+dist/
+
+# Benchmarks
+/benches/results/
+
+# Temporary files
+*.tmp
+*.log

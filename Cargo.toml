@@ -1,0 +1,38 @@
+[package]
+name = "loci"
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/decade-afk/loci"
+authors = ["decade-afk"]
+description = "A cross-platform, plugin-based local LLM inference framework"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "loci"
+path = "src/lib.rs"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "loci"
+path = "src/main.rs"
+
+[dependencies]
+# CLI argument parsing
+clap = { version = "4.5", features = ["derive"] }
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+# C bindings
+libc = "0.2"
+
+[build-dependencies]
+cmake = "0.1"
+cc = "1.0"
+bindgen = "0.72"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "inference"
+harness = false
