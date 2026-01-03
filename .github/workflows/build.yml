@@ -213,7 +213,10 @@ jobs:
           name: loci-macos-${{ matrix.target }}
           path: loci-macos-${{ matrix.target }}.tar.gz
 
+  # Temporarily disabled: wasmtime doesn't support iOS yet
+  # Re-enable when wasmtime adds iOS support or we make WASM plugins optional
   build-ios:
+    if: false
     name: Build iOS
     runs-on: macos-latest
     strategy:
@@ -253,7 +256,10 @@ jobs:
           name: loci-ios-${{ matrix.target }}
           path: loci-ios-${{ matrix.target }}.tar.gz
 
+  # Temporarily disabled: wasmtime/cranelift doesn't support ARMv7 yet
+  # Re-enable when wasmtime adds ARMv7 support or we make WASM plugins optional
   build-android:
+    if: false
     name: Build Android
     runs-on: ubuntu-latest
     strategy:
@@ -326,7 +332,8 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build-windows, build-linux, build-macos, build-ios, build-android]
+    needs: [build-windows, build-linux, build-macos]
+    # TODO: Add build-ios and build-android when wasmtime supports these platforms
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
