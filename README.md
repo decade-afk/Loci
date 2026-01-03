@@ -1,23 +1,36 @@
 # Loci
-
 A cross-platform, plugin-based local LLM inference framework built in Rust.
 
 ## Features
 
+### Core Capabilities
 - **Fast & Efficient**: Built on native llama.cpp for high-performance inference
 - **Multi-Platform Support**:
   - Desktop: Windows (MSVC/MinGW), Linux (x86_64/ARM64), macOS (Intel/Apple Silicon)
   - Mobile: iOS (Device/Simulator), Android (ARM64/ARMv7/x86_64/x86)
 - **Multiple Distribution Formats**:
   - Standalone CLI executable
-  - Static library (`.a`/`.lib`)
-  - Dynamic library (`.dll`/`.so`/`.dylib`)
-  - C API for language interop
+  - Static library (`.a`/`.lib`) - 25 MB
+  - Dynamic library (`.dll`/`.so`/`.dylib`) - 7.6 MB
+  - C API for language interop (18 exported functions)
 - **GPU Acceleration**: Supports CUDA, Metal, and other backends
-- **Plugin System**: Extensible architecture for custom functionality
-- **Simple API**: Easy-to-use Rust API with C bindings
 - **Streaming Support**: Real-time token streaming for interactive applications
 - **Flexible Configuration**: Customizable context size, sampling parameters, and more
+
+### 🔥 Plugin System (Phase 1.1)
+- **Hot-Swappable Plugins**: Load/unload/reload plugins at runtime
+- **Static & Dynamic**: Support both compiled-in and shared library plugins
+- **Persistent Configuration**: Save/load plugin state via TOML files
+- **Centralized Registry**: Unified management for all plugins
+- **Text Processing Hooks**: pre_generate, post_generate, on_token
+- **Third-Party Integration**: Easy plugin development API
+
+### 🌐 Language Integration
+- **Rust API**: Type-safe, zero-cost abstractions
+- **C/C++ API**: Full FFI support with header files
+- **Python**: ctypes integration examples
+- **Node.js**: ffi-napi support
+- **Multi-Language**: Any language with FFI support
 
 ## Quick Start
 
@@ -237,15 +250,41 @@ loci/
 
 ## Roadmap
 
+### Phase 1.0 ✅ Complete
 - [x] Basic llama.cpp integration
 - [x] CLI tool
 - [x] Streaming support
-- [ ] Plugin architecture
-- [ ] WebAssembly support
-- [ ] Multi-model support
+- [x] C API export
+- [x] Static/dynamic library build
+
+### Phase 1.1 ✅ Complete
+- [x] Plugin architecture (static + dynamic)
+- [x] Hot-swappable plugins
+- [x] Plugin registry with persistence
+- [x] Extended C API (18 functions)
+- [x] Multi-language integration examples
+
+### Phase 1.5 (In Progress)
+- [ ] Multimodal support (LLaVA/Qwen-VL)
+- [ ] Advanced sampling algorithms
+- [ ] Embedding generation API
+
+### Phase 2 (Planned)
+- [ ] Dynamic backend loading
+- [ ] Candle backend (pure Rust)
+- [ ] Backend registry system
+
+### Phase 3 (Future)
+- [ ] WebAssembly plugin support
+- [ ] Cross-language plugins (WASM)
+- [ ] Plugin security (sandboxing)
+
+### Additional Features
 - [ ] Chat template support
 - [ ] Function calling
 - [ ] RAG integration
+- [ ] Batch inference
+- [ ] Model quantization tools
 
 ## Contributing
 

@@ -7,6 +7,24 @@ authors = ["decade-afk"]
 description = "A cross-platform, plugin-based local LLM inference framework"
 license = "MIT OR Apache-2.0"
 
+[features]
+# Default features: auto device detection
+default = ["auto-detect"]
+
+# GPU backend features
+cuda = []          # NVIDIA CUDA support
+metal = []         # Apple Metal support (macOS/iOS)
+vulkan = []        # Cross-platform Vulkan support
+rocm = []          # AMD ROCm support
+opencl = []        # OpenCL support (fallback GPU)
+
+# Runtime device auto-detection
+auto-detect = []
+
+# Combined features
+gpu = ["cuda", "metal", "vulkan", "rocm"]
+all-backends = ["gpu", "opencl"]
+
 [lib]
 name = "loci"
 path = "src/lib.rs"
@@ -24,6 +42,20 @@ anyhow = "1.0"
 thiserror = "1.0"
 # C bindings
 libc = "0.2"
+# Dynamic plugin loading
+libloading = "0.8"
+# Serialization for plugin config persistence
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+# High-performance synchronization primitives
+parking_lot = "0.12"
+# Concurrency utilities
+crossbeam = "0.8"
+# Memory-mapped file I/O for zero-copy model loading
+memmap2 = "0.9"
+# WASM runtime for plugin sandboxing (Phase 3)
+wasmtime = { version = "27.0", default-features = false, features = ["cranelift", "component-model"] }
+wasmtime-wasi = "27.0"
 
 [build-dependencies]
 cmake = "0.1"

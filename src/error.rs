@@ -23,6 +23,33 @@ pub enum LociError {
     #[error("llama.cpp error: {0}")]
     LlamaCppError(String),
 
+    #[error("Plugin error: {0}")]
+    PluginError(String),
+
+    #[error("Backend error: {0}")]
+    BackendError(String),
+
+    #[error("Unsupported operation: {0}")]
+    UnsupportedOperation(String),
+
+    #[error("Invalid token ID: {0}")]
+    InvalidToken(i32),
+
+    #[error("Model not found")]
+    ModelNotFound,
+
+    #[error("Session not found")]
+    SessionNotFound,
+
+    #[error("Invalid model path")]
+    InvalidModelPath,
+
+    #[error("Out of memory: {0}")]
+    OutOfMemory(String),
+
+    #[error("Invalid block ID: {0}")]
+    InvalidBlockId(u64),
+
     #[error("Other error: {0}")]
     Other(String),
 }

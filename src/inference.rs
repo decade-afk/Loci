@@ -1,12 +1,21 @@
-//! Core inference engine using native llama.cpp
+//! Core inference engine with plugin support
+//!
+//! This module provides the main `InferenceEngine` which orchestrates:
+//! - Backend selection and model loading
+//! - Plugin management (text processing hooks)
+//! - Unified inference API
 
+use crate::backend::{BackendParams, InferenceBackend, InferenceParams, Model, ModelExt};
+use crate::backends::{LlamaCppBackend, LlamaCppModel};
 use crate::error::{LociError, Result};
-use crate::ffi;
 use crate::model::ModelConfig;
 use crate::plugin::PluginManager;
-use std::ffi::c_int;
+use std::path::PathBuf;
 
-/// Parameters for text generation
+/// Parameters for text generation (legacy compatibility)
+///
+/// This is a convenience wrapper around `InferenceParams` for backward compatibility.
+/// New code should use `InferenceParams` directly.
 #[derive(Debug, Clone)]
 pub struct GenerationParams {
     /// Maximum tokens to generate
@@ -33,50 +42,62 @@ impl Default for GenerationParams {
     }
 }
 
+impl From<GenerationParams> for InferenceParams {
+    fn from(params: GenerationParams) -> Self {
+        InferenceParams {
+            max_tokens: params.max_tokens,
+            temperature: params.temperature,
+            top_p: params.top_p,
+            top_k: params.top_k,
+            repeat_penalty: params.repeat_penalty,
+            ..Default::default()
+        }
+    }
+}
+
 /// Main inference engine
+///
+/// Orchestrates backend, model, and plugin management. Provides a unified
+/// interface for text generation with plugin hooks.
+///
+/// Note: Currently hardcoded to use LlamaCppModel for Phase 1.
+/// Future versions will support generic backends.
 pub struct InferenceEngine {
-    model: ffi::LlamaModel,
-    context: ffi::LlamaContext,
+    model: LlamaCppModel,
     plugin_manager: PluginManager,
 }
 
 impl InferenceEngine {
     /// Create a new inference engine with the given model configuration
+    ///
+    /// This uses the llama.cpp backend by default (Phase 1 implementation).
     pub fn new(config: ModelConfig) -> Result<Self> {
         config.validate()?;
 
-        // Initialize backend
-        ffi::backend_init();
+        // Initialize llama.cpp backend
+        let mut backend = LlamaCppBackend::new();
+        backend.init()?;
 
-        // Set up model parameters
-        let mut model_params = ffi::model_default_params();
-        model_params.n_gpu_layers = config.n_gpu_layers as c_int;
+        // Set up backend parameters
+        let backend_params = BackendParams {
+            n_gpu_layers: config.n_gpu_layers,
+            use_gpu: config.use_gpu,
+            options: Vec::new(),
+        };
 
-        // Load model
-        let model = ffi::LlamaModel::from_file(
-            config.model_path.to_str().unwrap(),
-            &model_params,
-        )
-        .map_err(|e| LociError::ModelLoadError(e))?;
-
-        // Set up context parameters
-        let mut ctx_params = ffi::context_default_params();
-        ctx_params.n_ctx = config.n_ctx;
-        ctx_params.n_batch = config.n_batch;
-
-        if let Some(n_threads) = config.n_threads {
-            ctx_params.n_threads = n_threads as i32;
-        }
-
-        // Create context
-        let context = ffi::LlamaContext::new(&model, &ctx_params)
-            .map_err(|e| LociError::InferenceError(e))?;
+        // Load model directly as LlamaCppModel
+        // Phase 1: Hardcoded to llama.cpp backend
+        let model = LlamaCppModel::load(&config.model_path, backend_params)?;
 
         Ok(Self {
             model,
-            context,
             plugin_manager: PluginManager::new(),
         })
+    }
+
+    /// Create a new builder for configuring the engine
+    pub fn builder() -> InferenceEngineBuilder {
+        InferenceEngineBuilder::new()
     }
 
     /// Get plugin manager (mutable)
@@ -89,228 +110,99 @@ impl InferenceEngine {
         &self.plugin_manager
     }
 
-    /// Generate text from a prompt
+    /// Generate text from a prompt (legacy API)
+    ///
+    /// For new code, prefer using `generate_with_params` with `InferenceParams`.
     pub fn generate(&mut self, prompt: &str, params: GenerationParams) -> Result<String> {
+        let inference_params = InferenceParams::from(params);
+        self.generate_with_params(prompt, &inference_params)
+    }
+
+    /// Generate text from a prompt with full parameter control
+    pub fn generate_with_params(
+        &mut self,
+        prompt: &str,
+        params: &InferenceParams,
+    ) -> Result<String> {
         // Apply pre-generate plugins
-        let processed_prompt = self
-            .plugin_manager
-            .apply_pre_generate(prompt)?;
+        let processed_prompt = self.plugin_manager.apply_pre_generate(prompt)?;
 
-        // Tokenize prompt
-        let tokens = self
-            .model
-            .tokenize(&processed_prompt, true, false)
-            .map_err(|e| LociError::InferenceError(e))?;
-
-        // Clear previous context
-        self.context.kv_cache_clear();
-
-        // Create batch
-        let mut batch = ffi::batch_init(512, 0, 1);
-
-        // Add tokens to batch
-        for (i, &token) in tokens.iter().enumerate() {
-            let is_last = i == tokens.len() - 1;
-            unsafe {
-                batch.n_tokens = i as i32 + 1;
-                *batch.token.add(i) = token;
-                *batch.pos.add(i) = i as i32;
-                *batch.n_seq_id.add(i) = 1;
-                let seq_id_ptr = *batch.seq_id.add(i);
-                *seq_id_ptr = 0;
-                *batch.logits.add(i) = if is_last { 1 } else { 0 };
-            }
-        }
-
-        // Decode the batch
-        self.context
-            .decode(&mut batch)
-            .map_err(|e| LociError::InferenceError(e))?;
-
-        // Generate tokens
-        let mut result = String::new();
-        let n_vocab = self.model.n_vocab();
-        let mut n_cur = tokens.len(); // Track current position
-
-        for _ in 0..params.max_tokens {
-            // Get logits
-            let logits = self.context.get_logits_ith(batch.n_tokens - 1);
-
-            // Sample token (greedy for now)
-            let new_token = if params.temperature == 0.0 {
-                self.context.sample_greedy(logits, n_vocab)
-            } else {
-                self.context.sample_greedy(logits, n_vocab) // TODO: Implement proper sampling
-            };
-
-            // Check for EOS
-            if self.model.is_eog(new_token) {
-                break;
-            }
-
-            // Convert token to string
-            let token_str = self
-                .model
-                .token_to_str(new_token)
-                .map_err(|e| LociError::InferenceError(e))?;
-
-            result.push_str(&token_str);
-
-            // Prepare next batch
-            unsafe {
-                batch.n_tokens = 1;
-                *batch.token = new_token;
-                *batch.pos = n_cur as i32;
-                *batch.n_seq_id = 1;
-                let seq_id_ptr = *batch.seq_id;
-                *seq_id_ptr = 0;
-                *batch.logits = 1;
-            }
-
-            n_cur += 1;
-
-            // Decode
-            self.context
-                .decode(&mut batch)
-                .map_err(|e| LociError::InferenceError(e))?;
-        }
-
-        // Free batch
-        ffi::batch_free(batch);
+        // Perform inference
+        let response = self.model.infer_text(&processed_prompt, params)?;
 
         // Apply post-generate plugins
-        let final_response = self
-            .plugin_manager
-            .apply_post_generate(&result)?;
+        let final_response = self.plugin_manager.apply_post_generate(&response)?;
 
         Ok(final_response)
     }
 
-    /// Generate text with streaming output
+    /// Generate text with streaming output (legacy API)
     pub fn generate_stream<F>(
         &mut self,
         prompt: &str,
         params: GenerationParams,
+        callback: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&str) -> bool,
+    {
+        let inference_params = InferenceParams::from(params);
+        self.generate_stream_with_params(prompt, &inference_params, callback)
+    }
+
+    /// Generate text with streaming output
+    pub fn generate_stream_with_params<F>(
+        &mut self,
+        prompt: &str,
+        params: &InferenceParams,
         mut callback: F,
     ) -> Result<()>
     where
         F: FnMut(&str) -> bool,
     {
+        if !self.model.supports_streaming() {
+            return Err(LociError::UnsupportedOperation(
+                "Streaming not supported by current backend".to_string(),
+            ));
+        }
+
         // Apply pre-generate plugins
-        let processed_prompt = self
-            .plugin_manager
-            .apply_pre_generate(prompt)?;
+        let processed_prompt = self.plugin_manager.apply_pre_generate(prompt)?;
 
-        // Tokenize prompt
-        let tokens = self
-            .model
-            .tokenize(&processed_prompt, true, false)
-            .map_err(|e| LociError::InferenceError(e))?;
-
-        // Clear previous context
-        self.context.kv_cache_clear();
-
-        // Create batch
-        let mut batch = ffi::batch_init(512, 0, 1);
-
-        // Add tokens to batch
-        for (i, &token) in tokens.iter().enumerate() {
-            let is_last = i == tokens.len() - 1;
-            unsafe {
-                batch.n_tokens = i as i32 + 1;
-                *batch.token.add(i) = token;
-                *batch.pos.add(i) = i as i32;
-                *batch.n_seq_id.add(i) = 1;
-                let seq_id_ptr = *batch.seq_id.add(i);
-                *seq_id_ptr = 0;
-                *batch.logits.add(i) = if is_last { 1 } else { 0 };
-            }
-        }
-
-        // Decode the batch
-        self.context
-            .decode(&mut batch)
-            .map_err(|e| LociError::InferenceError(e))?;
-
-        // Generate tokens
-        let n_vocab = self.model.n_vocab();
-        let mut n_cur = tokens.len();
-
-        for _ in 0..params.max_tokens {
-            // Get logits
-            let logits = self.context.get_logits_ith(batch.n_tokens - 1);
-
-            // Sample token
-            let new_token = if params.temperature == 0.0 {
-                self.context.sample_greedy(logits, n_vocab)
-            } else {
-                self.context.sample_greedy(logits, n_vocab) // TODO: Implement proper sampling
+        // Wrap callback with plugin processing
+        let plugin_manager = &self.plugin_manager;
+        let wrapped_callback = |token: &str| -> bool {
+            let processed_token = match plugin_manager.apply_on_token(token) {
+                Ok(t) => t,
+                Err(_) => return false,
             };
+            callback(&processed_token)
+        };
 
-            // Check for EOS
-            if self.model.is_eog(new_token) {
-                break;
-            }
-
-            // Convert token to string
-            let token_str = self
-                .model
-                .token_to_str(new_token)
-                .map_err(|e| LociError::InferenceError(e))?;
-
-            // Apply token plugins
-            let processed_token = self
-                .plugin_manager
-                .apply_on_token(&token_str)?;
-
-            // Call callback
-            if !callback(&processed_token) {
-                break;
-            }
-
-            // Prepare next batch
-            unsafe {
-                batch.n_tokens = 1;
-                *batch.token = new_token;
-                *batch.pos = n_cur as i32;
-                *batch.n_seq_id = 1;
-                let seq_id_ptr = *batch.seq_id;
-                *seq_id_ptr = 0;
-                *batch.logits = 1;
-            }
-
-            // Decode
-            self.context
-                .decode(&mut batch)
-                .map_err(|e| LociError::InferenceError(e))?;
-
-            n_cur += 1;
-        }
-
-        // Free batch
-        ffi::batch_free(batch);
+        // Perform streaming inference using ModelExt trait
+        self.model
+            .infer_stream(&processed_prompt, params, wrapped_callback)?;
 
         Ok(())
     }
 
     /// Get model information
     pub fn model_info(&self) -> ModelInfo {
+        let metadata = self.model.metadata();
         ModelInfo {
-            n_vocab: self.model.n_vocab() as u32,
-            n_ctx_train: self.model.n_ctx_train() as u32,
-            n_embd: self.model.n_embd() as u32,
+            n_vocab: metadata.n_vocab,
+            n_ctx_train: metadata.n_ctx_train,
+            n_embd: metadata.n_embd,
         }
     }
-}
 
-impl Drop for InferenceEngine {
-    fn drop(&mut self) {
-        // Cleanup is handled by LlamaModel and LlamaContext Drop implementations
-        ffi::backend_free();
+    /// Get detailed model metadata
+    pub fn model_metadata(&self) -> crate::backend::ModelMetadata {
+        self.model.metadata()
     }
 }
 
-/// Information about the loaded model
+/// Information about the loaded model (legacy compatibility)
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
     /// Vocabulary size
@@ -319,4 +211,86 @@ pub struct ModelInfo {
     pub n_ctx_train: u32,
     /// Embedding dimension
     pub n_embd: u32,
+}
+
+/// Builder for configuring InferenceEngine
+pub struct InferenceEngineBuilder {
+    model_path: Option<PathBuf>,
+    n_ctx: u32,
+    n_threads: Option<u32>,
+    n_batch: u32,
+    use_gpu: bool,
+    n_gpu_layers: i32,
+}
+
+impl InferenceEngineBuilder {
+    fn new() -> Self {
+        Self {
+            model_path: None,
+            n_ctx: 4096,
+            n_threads: None,
+            n_batch: 512,
+            use_gpu: true,
+            n_gpu_layers: -1,
+        }
+    }
+
+    /// Set the model path
+    pub fn model_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
+        self.model_path = Some(path.into());
+        self
+    }
+
+    /// Set the context size
+    pub fn context_size(mut self, n_ctx: u32) -> Self {
+        self.n_ctx = n_ctx;
+        self
+    }
+
+    /// Set the number of threads
+    pub fn threads(mut self, n_threads: u32) -> Self {
+        self.n_threads = Some(n_threads);
+        self
+    }
+
+    /// Set the batch size
+    pub fn batch_size(mut self, n_batch: u32) -> Self {
+        self.n_batch = n_batch;
+        self
+    }
+
+    /// Disable GPU acceleration
+    pub fn cpu_only(mut self) -> Self {
+        self.use_gpu = false;
+        self.n_gpu_layers = 0;
+        self
+    }
+
+    /// Set GPU layers to offload
+    pub fn gpu_layers(mut self, n_gpu_layers: i32) -> Self {
+        self.n_gpu_layers = n_gpu_layers;
+        self
+    }
+
+    /// Build the inference engine
+    pub fn build(self) -> Result<InferenceEngine> {
+        let model_path = self
+            .model_path
+            .ok_or_else(|| LociError::ConfigError("Model path not specified".to_string()))?;
+
+        let mut config = ModelConfig::new(model_path)
+            .with_context_size(self.n_ctx)
+            .with_batch_size(self.n_batch)
+            .with_gpu_layers(self.n_gpu_layers);
+
+        if !self.use_gpu {
+            config = config.cpu_only();
+        }
+
+        if let Some(threads) = self.n_threads {
+            config = config.with_threads(threads);
+        }
+
+        InferenceEngine::new(config)
+    }
 }
