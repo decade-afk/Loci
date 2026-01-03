@@ -4,14 +4,15 @@
 //! - **Zero-copy logits access** via `LogitsView`
 //! - **Stateless samplers** (pure functions: logits + params → token)
 //! - **Composable transformations** (temperature, top-k, top-p, repetition penalty)
+//! - **Constraint-based guided generation** for structured output
 //! - **Plugin-friendly hooks** for logit-level intervention
 //!
 //! ## Architecture
 //!
 //! ```text
-//! Raw Logits → LogitsView (zero-copy) → Transforms → Sampling → Token
-//!              ↑
-//!              Plugin hooks can inject here
+//! Raw Logits → LogitsView (zero-copy) → Constraints → Transforms → Sampling → Token
+//!              ↑                         ↑
+//!              Plugin hooks             Guided generation
 //! ```
 //!
 //! ## Example
@@ -81,12 +82,21 @@ impl<'a> LogitsView<'a> {
         self.logits.get(token as usize).copied()
     }
 
-    /// Set logit value for a token
+    /// Set logit value for a token (i32 index)
     pub fn set(&mut self, token: i32, value: f32) -> Result<()> {
         if token < 0 || token >= self.n_vocab as i32 {
             return Err(LociError::InvalidToken(token));
         }
         self.logits[token as usize] = value;
+        Ok(())
+    }
+
+    /// Set logit value for a token (usize index)
+    pub fn set_usize(&mut self, token: usize, value: f32) -> Result<()> {
+        if token >= self.n_vocab {
+            return Err(LociError::InvalidToken(token as i32));
+        }
+        self.logits[token] = value;
         Ok(())
     }
 

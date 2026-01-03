@@ -50,11 +50,17 @@ fn main() {
         config.define("GGML_CLBLAST", "ON");
     }
 
-    // Fix for MinGW "file too big" error
-    #[cfg(target_os = "windows")]
-    {
+    // Fix for "file too big" error on Windows
+    // MinGW uses -Wa,-mbig-obj, MSVC uses /bigobj
+    let target = env::var("TARGET").unwrap_or_default();
+    if target.contains("windows-gnu") {
+        // MinGW toolchain
         config.cxxflag("-Wa,-mbig-obj");
         config.cflag("-Wa,-mbig-obj");
+    } else if target.contains("windows-msvc") {
+        // MSVC toolchain
+        config.cxxflag("/bigobj");
+        config.cflag("/bigobj");
     }
 
     let dst = config.build();
@@ -63,17 +69,21 @@ fn main() {
     println!("cargo:rustc-link-search=native={}/lib", dst.display());
     println!("cargo:rustc-link-search=native={}/lib64", dst.display());
 
-    // Windows MinGW 使用 :filename.a 格式来链接非标准命名的库
-    #[cfg(target_os = "windows")]
-    {
+    // 根据目标平台链接 llama.cpp 库
+    if target.contains("windows-gnu") {
+        // MinGW uses .a files with lib prefix
         println!("cargo:rustc-link-lib=static:+verbatim=libllama.a");
         println!("cargo:rustc-link-lib=static:+verbatim=ggml.a");
         println!("cargo:rustc-link-lib=static:+verbatim=ggml-cpu.a");
         println!("cargo:rustc-link-lib=static:+verbatim=ggml-base.a");
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
+    } else if target.contains("windows-msvc") {
+        // MSVC uses .lib files without lib prefix
+        println!("cargo:rustc-link-lib=static=llama");
+        println!("cargo:rustc-link-lib=static=ggml");
+        println!("cargo:rustc-link-lib=static=ggml-cpu");
+        println!("cargo:rustc-link-lib=static=ggml-base");
+    } else {
+        // Unix-like systems (Linux, macOS, etc.)
         println!("cargo:rustc-link-lib=static=llama");
         println!("cargo:rustc-link-lib=static=ggml");
         println!("cargo:rustc-link-lib=static=ggml-cpu");
@@ -81,16 +91,18 @@ fn main() {
     }
 
     // 链接系统库
-    #[cfg(target_os = "windows")]
-    {
+    if target.contains("windows-gnu") {
+        // MinGW specific libraries
         println!("cargo:rustc-link-lib=dylib=stdc++");
         println!("cargo:rustc-link-lib=dylib=gomp");
         println!("cargo:rustc-link-lib=dylib=winpthread");
         println!("cargo:rustc-link-lib=dylib=advapi32");
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
+    } else if target.contains("windows-msvc") {
+        // MSVC specific libraries
+        println!("cargo:rustc-link-lib=dylib=advapi32");
+        // Note: MSVC uses its own C++ runtime and doesn't need explicit stdc++/gomp/winpthread
+    } else {
+        // Unix-like systems (Linux, macOS, etc.)
         println!("cargo:rustc-link-lib=dylib=stdc++");
         println!("cargo:rustc-link-lib=dylib=m");
         println!("cargo:rustc-link-lib=dylib=gomp");
