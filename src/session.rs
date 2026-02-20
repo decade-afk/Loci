@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 /// Unique identifier for an inference session
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SessionId(u64);
+pub struct SessionId(pub u64);
 
 impl SessionId {
     pub fn as_u64(&self) -> u64 {
@@ -30,6 +30,64 @@ impl std::fmt::Display for SessionId {
     }
 }
 
+/// Session execution state
+///
+/// Tracks the current state of an inference session, enabling
+/// suspend/resume functionality for tool calls and external interactions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionState {
+    /// Session is actively running inference
+    Running,
+
+    /// Session is suspended, waiting for external input/tool results
+    ///
+    /// Contains:
+    /// - `reason`: Why the session was suspended (e.g., "tool_call", "user_input")
+    /// - `data`: Optional data for the external handler (e.g., tool parameters as JSON)
+    AwaitingExternal {
+        reason: String,
+        data: Option<String>,
+    },
+
+    /// Session is resuming from suspension with external data
+    ///
+    /// Contains the external data/tool result that was injected via `resume_session()`
+    Resuming {
+        external_data: String,
+    },
+
+    /// Session completed successfully
+    Completed,
+
+    /// Session encountered an error
+    Error {
+        message: String,
+    },
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        SessionState::Running
+    }
+}
+
+impl SessionState {
+    /// Check if session can accept new input
+    pub fn can_generate(&self) -> bool {
+        matches!(self, SessionState::Running | SessionState::Resuming { .. })
+    }
+
+    /// Check if session is waiting for external input
+    pub fn is_suspended(&self) -> bool {
+        matches!(self, SessionState::AwaitingExternal { .. })
+    }
+
+    /// Check if session is in a terminal state
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, SessionState::Completed | SessionState::Error { .. })
+    }
+}
+
 /// An inference session with its own state and context
 ///
 /// Each session maintains:
@@ -37,12 +95,28 @@ impl std::fmt::Display for SessionId {
 /// - Independent context tokens
 /// - Session-specific plugin manager
 /// - KV cache state (future)
+/// - Execution state (Running/Suspended/Resuming)
 pub struct InferenceSession {
     session_id: SessionId,
     model_id: ModelId,
     context_tokens: Vec<i32>,
     plugin_manager: PluginManager,
     max_context: u32,
+    /// Current execution state
+    state: SessionState,
+    /// Suspended generation context (preserved during suspension)
+    suspended_context: Option<SuspendedContext>,
+}
+
+/// Context preserved during session suspension
+#[derive(Debug, Clone)]
+struct SuspendedContext {
+    /// Partial prompt/generation when suspended
+    partial_output: String,
+    /// Number of tokens generated before suspension
+    tokens_generated: usize,
+    /// Maximum tokens requested
+    max_tokens: usize,
 }
 
 impl InferenceSession {
@@ -54,6 +128,8 @@ impl InferenceSession {
             context_tokens: Vec::new(),
             plugin_manager: PluginManager::new(),
             max_context,
+            state: SessionState::default(),
+            suspended_context: None,
         }
     }
 
@@ -85,6 +161,21 @@ impl InferenceSession {
     /// Get mutable reference to plugin manager
     pub fn plugin_manager_mut(&mut self) -> &mut PluginManager {
         &mut self.plugin_manager
+    }
+
+    /// Get current session state
+    pub fn state(&self) -> &SessionState {
+        &self.state
+    }
+
+    /// Check if session can accept new generation requests
+    pub fn can_generate(&self) -> bool {
+        self.state.can_generate()
+    }
+
+    /// Check if session is suspended and waiting for external input
+    pub fn is_suspended(&self) -> bool {
+        self.state.is_suspended()
     }
 
     /// Generate text using this session
@@ -145,6 +236,59 @@ impl InferenceSession {
         }
 
         Ok(processed_response)
+    }
+
+    /// Resume a suspended session with external data/tool results
+    ///
+    /// # Arguments
+    ///
+    /// * `external_data` - Data from external source (e.g., tool call result, user input)
+    ///
+    /// # Returns
+    ///
+    /// Ok if session was successfully resumed, Err if session is not suspended
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Session suspends for tool call
+    /// let result = session.generate(&registry, "Use calculator to add 5+3", 100);
+    /// // => Session enters AwaitingExternal state with tool call data
+    ///
+    /// // External system executes tool
+    /// let tool_result = "8";
+    ///
+    /// // Resume session with tool result
+    /// session.resume_session(tool_result.to_string())?;
+    ///
+    /// // Continue generation
+    /// let final_result = session.generate(&registry, "", 100)?;
+    /// ```
+    pub fn resume_session(&mut self, external_data: String) -> Result<()> {
+        // Verify session is in suspended state
+        if !self.is_suspended() {
+            return Err(LociError::InvalidSessionState(format!(
+                "Cannot resume session {} - not in suspended state (current: {:?})",
+                self.session_id, self.state
+            )));
+        }
+
+        // Transition to Resuming state
+        self.state = SessionState::Resuming { external_data };
+
+        Ok(())
+    }
+
+    /// Manually suspend the session
+    ///
+    /// This can be used by plugins or application logic to suspend a session.
+    ///
+    /// # Arguments
+    ///
+    /// * `reason` - Reason for suspension
+    /// * `data` - Optional data for external handler
+    pub fn suspend(&mut self, reason: String, data: Option<String>) {
+        self.state = SessionState::AwaitingExternal { reason, data };
     }
 
     /// Clear session context

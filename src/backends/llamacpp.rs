@@ -38,7 +38,7 @@ impl InferenceBackend for LlamaCppBackend {
             version: env!("CARGO_PKG_VERSION").to_string(),
             supports_text: true,
             supports_multimodal: false,
-            supports_embeddings: false,
+            supports_embeddings: true,
             supports_streaming: true,
             has_gpu_support: true,
             supported_formats: vec!["gguf".to_string()],
@@ -201,6 +201,52 @@ impl Model for LlamaCppModel {
         true
     }
 
+    fn supports_embeddings(&self) -> bool {
+        true
+    }
+
+    fn generate_embeddings(&mut self, text: &str) -> Result<Vec<f32>> {
+        // Tokenize the input text
+        let tokens = self.model.tokenize(text, true, false)
+            .map_err(|e| LociError::InferenceError(e))?;
+
+        if tokens.is_empty() {
+            return Err(LociError::InferenceError("Empty input text".to_string()));
+        }
+
+        // Create batch for embedding generation
+        let n_tokens = tokens.len();
+        let mut batch = ffi::batch_init(n_tokens as i32, 0, 1);
+
+        batch.n_tokens = n_tokens as i32;
+
+        unsafe {
+            for (i, &token) in tokens.iter().enumerate() {
+                *batch.token.add(i) = token;
+                *batch.pos.add(i) = i as i32;
+                *batch.n_seq_id.add(i) = 1;
+                *(*batch.seq_id.add(i)).add(0) = 0;
+                *batch.logits.add(i) = 0; // false
+            }
+
+            // Set last token to generate embeddings
+            *batch.logits.add(n_tokens - 1) = 1; // true
+        }
+
+        // Decode the batch
+        self.context.decode(&mut batch)
+            .map_err(|e| LociError::InferenceError(e))?;
+
+        // Get embeddings for the last token
+        let embeddings = self.context.get_embeddings()
+            .map_err(|e| LociError::InferenceError(e))?;
+
+        // Clean up batch
+        ffi::batch_free(batch);
+
+        Ok(embeddings)
+    }
+
     fn infer_text(&mut self, prompt: &str, params: &InferenceParams) -> Result<String> {
         // Recreate context with inference parameters
         self.recreate_context(params)?;
@@ -303,6 +349,31 @@ impl Model for LlamaCppModel {
         ffi::batch_free(batch);
 
         Ok(result)
+    }
+
+    fn infer_stream(
+        &mut self,
+        prompt: &str,
+        params: &InferenceParams,
+        callback: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<()> {
+        crate::backend::ModelExt::infer_stream(self, prompt, params, |token| callback(token))
+    }
+
+    fn infer_multimodal_stream(
+        &mut self,
+        text: &str,
+        images: &[crate::backend::Image],
+        params: &InferenceParams,
+        callback: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<()> {
+        crate::backend::ModelExt::infer_multimodal_stream(
+            self,
+            text,
+            images,
+            params,
+            |token| callback(token),
+        )
     }
 }
 

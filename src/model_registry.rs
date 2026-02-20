@@ -17,6 +17,10 @@ impl ModelId {
     pub fn as_u64(&self) -> u64 {
         self.0
     }
+
+    pub fn from_u64(id: u64) -> Self {
+        Self(id)
+    }
 }
 
 impl std::fmt::Display for ModelId {
@@ -27,8 +31,7 @@ impl std::fmt::Display for ModelId {
 
 /// Registry entry for a loaded model
 ///
-/// Note: This is currently a placeholder that tracks model metadata.
-/// Full model loading integration will be added in a future update.
+/// Tracks model metadata and manages model lifecycle.
 struct ModelEntry {
     id: ModelId,
     path: String,

@@ -18,7 +18,8 @@
 //!
 //! Current implementation focuses on Phase 1 with trait design ready for Phase 2/3.
 
-use crate::error::Result;
+use crate::backends::{CandleBackend, DynamicBackend, LlamaCppBackend};
+use crate::error::{LociError, Result};
 use std::path::Path;
 
 /// Image data for multimodal inference
@@ -207,6 +208,34 @@ pub trait Model: Send + Sync {
             "Embeddings not supported by this backend".to_string(),
         ))
     }
+
+    /// Perform streaming inference with callback (object-safe variant)
+    ///
+    /// Implement this for backends that support streaming when working through
+    /// trait objects (`Box<dyn Model>`).
+    fn infer_stream(
+        &mut self,
+        _prompt: &str,
+        _params: &InferenceParams,
+        _callback: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<()> {
+        Err(crate::error::LociError::UnsupportedOperation(
+            "Streaming inference not supported by this backend".to_string(),
+        ))
+    }
+
+    /// Perform streaming multimodal inference (object-safe variant)
+    fn infer_multimodal_stream(
+        &mut self,
+        _text: &str,
+        _images: &[Image],
+        _params: &InferenceParams,
+        _callback: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<()> {
+        Err(crate::error::LociError::UnsupportedOperation(
+            "Multimodal streaming inference not supported by this backend".to_string(),
+        ))
+    }
 }
 
 /// Extension trait for streaming inference (separate to maintain dyn compatibility)
@@ -277,9 +306,70 @@ impl BackendRegistry {
         self.backends.insert(name, backend);
     }
 
+    /// Register built-in backends
+    pub fn register_builtin_backends(&mut self) {
+        self.register("llama.cpp".to_string(), Box::new(LlamaCppBackend::new()));
+        self.register("candle".to_string(), Box::new(CandleBackend::new()));
+    }
+
+    /// Create a registry pre-populated with built-in backends
+    pub fn with_builtin_backends() -> Self {
+        let mut registry = Self::new();
+        registry.register_builtin_backends();
+        registry
+    }
+
+    /// Load and register a dynamic backend
+    pub fn load_dynamic_backend<P: AsRef<Path>>(&mut self, name: String, path: P) -> Result<()> {
+        if self.backends.contains_key(&name) {
+            return Err(LociError::InvalidArgument(format!(
+                "Backend already registered: {name}"
+            )));
+        }
+
+        let backend = DynamicBackend::load(path)?;
+        self.register(name, Box::new(backend));
+        Ok(())
+    }
+
+    /// Unregister a backend by name
+    pub fn unregister(&mut self, name: &str) -> Option<Box<dyn InferenceBackend>> {
+        self.backends.remove(name)
+    }
+
+    /// Check if backend exists
+    pub fn contains(&self, name: &str) -> bool {
+        self.backends.contains_key(name)
+    }
+
     /// Get a backend by name
-    pub fn get(&self, name: &str) -> Option<&Box<dyn InferenceBackend>> {
-        self.backends.get(name)
+    pub fn get(&self, name: &str) -> Option<&dyn InferenceBackend> {
+        self.backends.get(name).map(|backend| backend.as_ref())
+    }
+
+    /// Get mutable backend by name
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut Box<dyn InferenceBackend>> {
+        self.backends.get_mut(name)
+    }
+
+    /// Load model from a named backend
+    pub fn load_model(
+        &mut self,
+        backend_name: &str,
+        model_path: &Path,
+        params: BackendParams,
+    ) -> Result<Box<dyn Model>> {
+        let backend = self.backends.get_mut(backend_name).ok_or_else(|| {
+            LociError::BackendNotAvailable(format!("Backend not found: {backend_name}"))
+        })?;
+
+        backend.init()?;
+        backend.load_model(model_path, params)
+    }
+
+    /// List backend names
+    pub fn names(&self) -> Vec<&str> {
+        self.backends.keys().map(String::as_str).collect()
     }
 
     /// List all registered backends
@@ -294,5 +384,26 @@ impl BackendRegistry {
 impl Default for BackendRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_registry_with_builtins() {
+        let registry = BackendRegistry::with_builtin_backends();
+        assert!(registry.contains("llama.cpp"));
+        assert!(registry.contains("candle"));
+    }
+
+    #[test]
+    fn test_registry_unregister() {
+        let mut registry = BackendRegistry::new();
+        registry.register("candle".to_string(), Box::new(CandleBackend::new()));
+        assert!(registry.contains("candle"));
+        registry.unregister("candle");
+        assert!(!registry.contains("candle"));
     }
 }

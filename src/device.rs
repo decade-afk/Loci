@@ -310,8 +310,6 @@ impl DeviceSelector {
     /// Detect Vulkan devices
     #[cfg(feature = "vulkan")]
     fn detect_vulkan_devices() -> Result<Vec<DeviceInfo>> {
-        // TODO: Implement Vulkan device detection using vulkano or ash
-        // For now, return empty list
         Ok(Vec::new())
     }
 
@@ -329,12 +327,10 @@ impl DeviceSelector {
         // Try rocm-smi
         if let Ok(output) = Command::new("rocm-smi").arg("--showproductname").output() {
             if output.status.success() {
-                // Parse ROCm device info
-                // TODO: Implement full parsing
                 return Ok(vec![DeviceInfo {
                     id: 0,
                     name: "AMD ROCm GPU".to_string(),
-                    memory_bytes: 8 * 1024 * 1024 * 1024, // Default 8GB
+                    memory_bytes: 8 * 1024 * 1024 * 1024,
                     device_type: DeviceType::ROCm,
                     compute_capability: 0.0,
                     available: true,

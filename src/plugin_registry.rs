@@ -247,7 +247,13 @@ impl PluginRegistry {
     ) -> Result<()> {
         let lib_path = library_path.as_ref();
 
-        // Load the shared library
+        // Load the shared library with error handling
+        if !lib_path.exists() {
+            return Err(LociError::PluginError(format!(
+                "Plugin library not found: {}",
+                lib_path.display()
+            )));
+        }
         let library = unsafe {
             Library::new(lib_path).map_err(|e| {
                 LociError::PluginError(format!(
@@ -268,8 +274,16 @@ impl PluginRegistry {
             })?
         };
 
-        // Create the plugin instance
+        // Create the plugin instance with safety checks
         let plugin_ptr = unsafe { constructor() };
+        
+        // Validate pointer before using it
+        if plugin_ptr.is_null() {
+            return Err(LociError::PluginError(
+                "Plugin constructor returned null pointer".to_string()
+            ));
+        }
+        
         let mut plugin: Box<dyn Plugin> = unsafe { Box::from_raw(plugin_ptr) };
 
         // Initialize the plugin

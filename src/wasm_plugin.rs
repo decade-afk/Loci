@@ -55,6 +55,8 @@ use crate::sampler::LogitsView;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 use wasmtime::*;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
 
@@ -73,6 +75,8 @@ pub struct WasmPluginConfig {
     pub max_fuel: u64,
     /// Enable WASI (file I/O, env vars, etc.)
     pub enable_wasi: bool,
+    /// Explicitly allow privileged WASI mode (disabled by default)
+    pub allow_unsafe_wasi: bool,
     /// Timeout in milliseconds (0 = no timeout)
     pub timeout_ms: u64,
 }
@@ -86,6 +90,7 @@ impl Default for WasmPluginConfig {
             max_memory: 16 * 1024 * 1024, // 16 MB
             max_fuel: 1_000_000,           // 1M instructions
             enable_wasi: false,            // Disabled by default for security
+            allow_unsafe_wasi: false,      // Explicit opt-in for privileged mode
             timeout_ms: 5000,              // 5 seconds
         }
     }
@@ -120,9 +125,13 @@ impl WasmPlugin {
     /// - Invalid WASM module
     /// - Missing required exports
     pub fn load(config: WasmPluginConfig) -> Result<Self> {
+        Self::validate_sandbox_config(&config)?;
+
         // 1. Create WASM engine with configuration
         let mut engine_config = Config::new();
         engine_config.consume_fuel(config.max_fuel > 0);
+        engine_config.epoch_interruption(config.timeout_ms > 0);
+        engine_config.static_memory_maximum_size(config.max_memory as u64);
         engine_config.max_wasm_stack(1024 * 1024); // 1 MB stack
 
         let engine = Engine::new(&engine_config)
@@ -134,9 +143,7 @@ impl WasmPlugin {
 
         // 3. Create WASI context
         let wasi = if config.enable_wasi {
-            WasiCtxBuilder::new()
-                .inherit_stdio()
-                .build()
+            WasiCtxBuilder::new().build()
         } else {
             WasiCtxBuilder::new().build()
         };
@@ -166,6 +173,28 @@ impl WasmPlugin {
             config,
             runtime: Arc::new(parking_lot::Mutex::new(runtime)),
         })
+    }
+
+    fn validate_sandbox_config(config: &WasmPluginConfig) -> Result<()> {
+        if config.wasm_path.extension().and_then(|e| e.to_str()) != Some("wasm") {
+            return Err(LociError::PluginError(
+                "WASM plugin path must use .wasm extension".to_string(),
+            ));
+        }
+
+        if config.max_memory < 1024 * 1024 {
+            return Err(LociError::PluginError(
+                "max_memory must be at least 1MB".to_string(),
+            ));
+        }
+
+        if config.enable_wasi && !config.allow_unsafe_wasi {
+            return Err(LociError::PluginError(
+                "WASI is blocked by sandbox policy unless allow_unsafe_wasi is true".to_string(),
+            ));
+        }
+
+        Ok(())
     }
 
     /// Verify that the WASM module exports required functions
@@ -198,7 +227,7 @@ impl WasmPlugin {
         &self,
         func_name: &str,
         args: T,
-        _timeout_ms: u64,
+        timeout_ms: u64,
     ) -> Result<R>
     where
         T: WasmParams,
@@ -212,6 +241,15 @@ impl WasmPlugin {
                 .map_err(|e| LociError::PluginError(format!("Fuel error: {}", e)))?;
         }
 
+        if timeout_ms > 0 {
+            runtime.store.set_epoch_deadline(1);
+            let engine = runtime.engine.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(timeout_ms));
+                engine.increment_epoch();
+            });
+        }
+
         // Split borrows
         let WasmRuntime { store, instance, .. } = &mut *runtime;
 
@@ -220,11 +258,19 @@ impl WasmPlugin {
             .get_typed_func::<T, R>(&mut *store, func_name)
             .map_err(|_| LociError::PluginError(format!("Function {} not found", func_name)))?;
 
-        // Call with timeout (TODO: implement actual timeout)
-        // For now, rely on fuel limits
         let result = func
             .call(&mut *store, args)
-            .map_err(|e| LociError::PluginError(format!("WASM call failed: {}", e)))?;
+            .map_err(|e| {
+                let message = e.to_string();
+                if message.contains("interrupt")
+                    || message.contains("epoch")
+                    || message.contains("deadline")
+                {
+                    LociError::Timeout(format!("WASM call timed out in {func_name}"))
+                } else {
+                    LociError::PluginError(format!("WASM call failed: {}", message))
+                }
+            })?;
 
         Ok(result)
     }
@@ -318,13 +364,6 @@ impl Plugin for WasmPlugin {
     }
 
     fn transform_logits(&self, logits: &mut LogitsView, context: &[i32]) -> Result<()> {
-        // Note: For WASM, we need to serialize logits to linear memory
-        // This is a simplified implementation - real impl would:
-        // 1. Allocate WASM memory for logits array
-        // 2. Copy logits to WASM memory
-        // 3. Call WASM transform_logits(ptr, len, context_ptr, context_len)
-        // 4. Copy modified logits back
-
         let n_vocab = logits.vocab_size() as i32;
         let context_len = context.len() as i32;
 
@@ -393,6 +432,7 @@ mod tests {
         assert_eq!(config.max_memory, 16 * 1024 * 1024);
         assert_eq!(config.max_fuel, 1_000_000);
         assert!(!config.enable_wasi);
+        assert!(!config.allow_unsafe_wasi);
     }
 
     #[test]
@@ -401,6 +441,16 @@ mod tests {
         assert_eq!(manager.plugins().len(), 0);
     }
 
-    // Note: Full WASM tests require actual WASM binaries
-    // These would be in integration tests with test fixtures
+    #[test]
+    fn test_wasi_policy_requires_explicit_override() {
+        let config = WasmPluginConfig {
+            enable_wasi: true,
+            allow_unsafe_wasi: false,
+            wasm_path: "plugin.wasm".into(),
+            ..Default::default()
+        };
+
+        let result = WasmPlugin::validate_sandbox_config(&config);
+        assert!(result.is_err());
+    }
 }

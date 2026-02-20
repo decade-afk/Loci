@@ -1,6 +1,45 @@
 # Loci
 A cross-platform, plugin-based local LLM inference framework built in Rust.
 
+## 🎯 Plugin System - Highly Extensible
+
+Loci features a **highly plugin-capable architecture** that allows you to extend functionality without modifying the core engine:
+
+### Three Plugin Types
+- **Static Plugins**: Compiled into the binary for maximum performance
+- **Dynamic Plugins**: Load/unload at runtime via shared libraries
+- **WASM Plugins**: Sandboxed execution for security and cross-language support
+
+### Plugin Hooks
+- `pre_generate`: Modify prompts before inference
+- `transform_logits`: Advanced token-level control
+- `on_token`: Real-time streaming processing
+- `post_generate`: Format and filter responses
+
+### Example Plugins
+```rust
+use loci::prelude::*;
+use loci::examples::plugins::*;
+
+// Filter offensive language
+let profanity = ProfanityFilterPlugin::new("filter");
+engine.plugin_manager_mut().register(profanity)?;
+
+// Format output as JSON
+let json = JsonFormatterPlugin::new("json");
+engine.plugin_manager_mut().register(json)?;
+
+// Auto-translate
+let translator = TranslationPlugin::english_to_chinese("trans");
+engine.plugin_manager_mut().register(translator)?;
+
+// Explain code
+let explainer = CodeExplainerPlugin::detailed("explainer");
+engine.plugin_manager_mut().register(explainer)?;
+```
+
+See [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) for complete plugin development documentation.
+
 ## Features
 
 ### Core Capabilities
@@ -141,11 +180,34 @@ Options:
   -t, --temperature <TEMP>         Temperature (0.0 = greedy) [default: 0.8]
       --top-p <TOP_P>              Top-p sampling [default: 0.95]
       --top-k <TOP_K>              Top-k sampling [default: 40]
+      --backend <BACKEND>          Backend name (llama.cpp/candle/custom) [default: llama.cpp]
       --threads <THREADS>          Number of threads
       --cpu-only                   Disable GPU acceleration
       --gpu-layers <LAYERS>        GPU layers to offload (-1 = all) [default: -1]
   -s, --stream                     Enable streaming output
   -h, --help                       Print help
+```
+
+### Runtime Backend & RAG Selection
+
+```rust
+use loci::prelude::*;
+use loci::inference::InferenceEngine;
+
+// Backend selection at build time
+let mut engine = InferenceEngine::builder()
+    .model_path("model.gguf")
+    .backend("llama.cpp")
+    .build()?;
+
+// Hot-swappable RAG plugin registration and activation
+engine.add_in_memory_rag_plugin(
+    "kb",
+    vec![RagDocument::new("doc-1", "Loci supports plugin-based inference.")],
+    3,
+    Some("Answer using retrieved context.".to_string()),
+)?;
+engine.activate_rag_plugin("kb")?;
 ```
 
 ## Configuration
@@ -231,6 +293,12 @@ cargo bench
 
 For cross-compilation and platform-specific builds, see [BUILD.md](BUILD.md).
 
+## Documentation
+
+- **[API Documentation](docs/API.md)** - Complete API reference for Rust and C
+- **[Build Guide](BUILD.md)** - Platform-specific build instructions
+- **[Plugin Guide](PLUGIN_GUIDE.md)** - Developing plugins for Loci
+
 ## Project Structure
 
 ```
@@ -241,8 +309,13 @@ loci/
 │   ├── error.rs        # Error types
 │   ├── model.rs        # Model configuration
 │   └── inference.rs    # Inference engine
+├── docs/               # Documentation
+│   ├── API.md          # API reference
+│   └── archive/        # Archived documentation
 ├── tests/              # Integration tests
 ├── benches/            # Benchmarks
+├── examples/           # Usage examples
+├── models/             # Model files directory
 ├── deps/
 │   └── llama.cpp/      # llama.cpp submodule
 └── Cargo.toml
@@ -264,27 +337,50 @@ loci/
 - [x] Extended C API (18 functions)
 - [x] Multi-language integration examples
 
-### Phase 1.5 (In Progress)
-- [ ] Multimodal support (LLaVA/Qwen-VL)
-- [ ] Advanced sampling algorithms
-- [ ] Embedding generation API
+### Phase 1.5 ✅ Complete
+- [x] Multimodal support (CLIP ViT-L/14, Multimodal Fusion)
+- [x] Vision encoder plugins (CLIP, SigLIP)
+- [x] Multimodal plugin registry
+- [x] Token-level fusion strategies
+- [x] Cross-modal attention fusion
+- [x] Advanced sampling algorithms (Top-K, Top-P, Mirostat, Typical Sampling)
+- [x] Embedding generation API
 
-### Phase 2 (Planned)
-- [ ] Dynamic backend loading
-- [ ] Candle backend (pure Rust)
-- [ ] Backend registry system
+### Phase 2 ✅ Complete
+- [x] Deep Programmable Adapter System
+- [x] LoRA/QLoRA adapter support
+- [x] Adapter fusion strategies
+- [x] Model hot-swap registry
+- [x] Dynamic LoRA merging
+- [x] Dynamic backend loading
+- [x] Candle backend (pure Rust)
+- [x] Backend registry system
 
-### Phase 3 (Future)
-- [ ] WebAssembly plugin support
-- [ ] Cross-language plugins (WASM)
-- [ ] Plugin security (sandboxing)
+### Phase 3 ✅ Complete
+- [x] WebAssembly plugin support
+- [x] WASM runtime integration
+- [x] Cross-language plugins (WASM)
+- [x] WASM plugin registry
+- [x] Plugin security (sandboxing)
 
 ### Additional Features
-- [ ] Chat template support
-- [ ] Function calling
-- [ ] RAG integration
-- [ ] Batch inference
-- [ ] Model quantization tools
+- [x] Radix Tree prefix caching
+- [x] Paged KV cache with memory budgeting
+- [x] Session management (suspend/resume)
+- [x] Deep programmable hooks
+- [x] Constraint system for guided generation
+- [x] Device auto-detection and selection
+- [x] Chat template support
+- [x] Function calling
+- [x] RAG integration
+- [x] Batch inference
+- [x] Model quantization tools
+
+## Documentation
+
+- **[API Documentation](docs/API.md)** - Complete API reference for Rust and C
+- **[Build Guide](BUILD.md)** - Platform-specific build instructions
+- **[Plugin Guide](PLUGIN_GUIDE.md)** - Developing plugins for Loci
 
 ## Contributing
 

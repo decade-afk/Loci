@@ -51,7 +51,7 @@ impl LlamaModel {
 
     /// Get embedding dimension
     pub fn n_embd(&self) -> i32 {
-        unsafe { llama_model_n_embd(self.ptr) }
+        unsafe { llama_n_embd(self.ptr) }
     }
 
     /// Tokenize text
@@ -121,11 +121,18 @@ impl Drop for LlamaModel {
     }
 }
 
+impl Clone for LlamaModel {
+    fn clone(&self) -> Self {
+        Self { ptr: self.ptr }
+    }
+}
+
 unsafe impl Send for LlamaModel {}
 
 /// Safe wrapper for llama_context
 pub struct LlamaContext {
     ptr: *mut llama_context,
+    model: Option<LlamaModel>,
 }
 
 impl LlamaContext {
@@ -137,7 +144,7 @@ impl LlamaContext {
             return Err("Failed to create context".to_string());
         }
 
-        Ok(Self { ptr })
+        Ok(Self { ptr, model: Some(LlamaModel::clone(model)) })
     }
 
     /// Get the raw pointer
@@ -161,6 +168,20 @@ impl LlamaContext {
         unsafe { llama_get_logits_ith(self.ptr, i) }
     }
 
+    /// Get embeddings for last position
+    pub fn get_embeddings(&self) -> Result<Vec<f32>, String> {
+        unsafe {
+            let embd_ptr = llama_get_embeddings(self.ptr);
+            if embd_ptr.is_null() {
+                return Err("Embeddings not available. Make sure embeddings are enabled in model params.".to_string());
+            }
+
+            let n_embd = llama_n_embd(self.model.as_ref().unwrap().as_ptr());
+            let embeddings = std::slice::from_raw_parts(embd_ptr, n_embd as usize).to_vec();
+            Ok(embeddings)
+        }
+    }
+
     /// Sample a token using greedy sampling
     pub fn sample_greedy(&self, logits: *const f32, n_vocab: i32) -> i32 {
         unsafe {
@@ -179,11 +200,7 @@ impl LlamaContext {
         }
     }
 
-    /// Clear the KV cache (no-op if not available in new API)
     pub fn kv_cache_clear(&mut self) {
-        // Note: KV cache API may have changed in new llama.cpp
-        // This is a placeholder that does nothing for now
-        // TODO: Find the correct API for clearing KV cache in new version
     }
 }
 

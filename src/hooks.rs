@@ -61,7 +61,7 @@ impl Default for HookPriority {
 }
 
 /// Hook execution control
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookControl {
     /// Continue to next hook
     Continue,
@@ -69,6 +69,16 @@ pub enum HookControl {
     Break,
     /// Skip remaining hooks and use original value
     SkipRemaining,
+    /// Suspend inference and wait for external tool/input
+    ///
+    /// This allows plugins to request external data (e.g., tool calls, user input)
+    /// before continuing generation. The session will enter `AwaitingExternal` state.
+    Suspend {
+        /// Reason for suspension (e.g., "tool_call", "user_input")
+        reason: String,
+        /// Data to be passed to external handler (e.g., tool call parameters)
+        data: Option<String>,
+    },
 }
 
 /// Context information passed to hooks
@@ -701,7 +711,10 @@ impl HookManager {
     }
 
     /// Execute model hooks
-    pub fn execute_model<F>(&mut self, executor: F) -> Result<()>
+    ///
+    /// Returns `Ok(HookControl::Continue)` if all hooks complete normally,
+    /// or the first `Suspend`/`Break`/`SkipRemaining` control signal encountered.
+    pub fn execute_model<F>(&mut self, executor: F) -> Result<HookControl>
     where
         F: Fn(&mut dyn ModelHooks, &HookContext) -> Result<HookControl>,
     {
@@ -718,12 +731,16 @@ impl HookManager {
             ctx.total_hooks = total;
 
             match executor(hook.as_mut(), &ctx)? {
-                HookControl::Break => break,
-                HookControl::SkipRemaining => break,
+                HookControl::Break => return Ok(HookControl::Break),
+                HookControl::SkipRemaining => return Ok(HookControl::SkipRemaining),
                 HookControl::Continue => continue,
+                suspend @ HookControl::Suspend { .. } => {
+                    // Return suspend signal to caller so they can handle it
+                    return Ok(suspend);
+                }
             }
         }
-        Ok(())
+        Ok(HookControl::Continue)
     }
 
     /// Get hook count

@@ -268,7 +268,7 @@ mod tests {
 
     fn session_id(n: u64) -> SessionId {
         // This is a test helper - in real code SessionId is created by SessionManager
-        unsafe { std::mem::transmute(n) }
+        SessionId(n)
     }
 
     #[test]

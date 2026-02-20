@@ -1,24 +1,37 @@
 use std::env;
 use std::path::PathBuf;
 
-fn main() {
-    println!("cargo:rerun-if-changed=deps/llama.cpp");
+/// Path to the llama.cpp dependency
+const LLAMA_CPP_PATH: &str = "deps/llama.cpp";
 
+fn main() {
+    // Tell Cargo to rerun this build script when the llama.cpp dependency changes
+    println!("cargo:rerun-if-changed={}", LLAMA_CPP_PATH);
+
+    // Get the output directory where generated files should be placed
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // 使用 CMake 编译 llama.cpp
-    let mut config = cmake::Config::new("deps/llama.cpp");
+    // Configure CMake to build llama.cpp with specific options
+    let mut config = cmake::Config::new(LLAMA_CPP_PATH);
     config
+        // Disable shared library building to use static linking
         .define("BUILD_SHARED_LIBS", "OFF")
+        // Disable building tests to reduce compilation time
         .define("LLAMA_BUILD_TESTS", "OFF")
+        // Disable building examples to reduce compilation time
         .define("LLAMA_BUILD_EXAMPLES", "OFF")
+        // Disable building server to reduce compilation time
         .define("LLAMA_BUILD_SERVER", "OFF")
+        // Disable building tools to reduce compilation time
         .define("LLAMA_BUILD_TOOLS", "OFF")
+        // Disable curl dependency to simplify build process
         .define("LLAMA_CURL", "OFF")
+        // Disable native optimizations to improve portability
         .define("GGML_NATIVE", "OFF")
+        // Enable OpenMP for CPU parallelization
         .define("GGML_OPENMP", "ON");
 
-    // GPU backend configuration based on feature flags
+    // Configure GPU backends based on feature flags
     #[cfg(feature = "cuda")]
     {
         println!("cargo:warning=Building with CUDA support");
@@ -65,11 +78,31 @@ fn main() {
 
     let dst = config.build();
 
-    // 链接库
+    // Specify library search paths for linking
     println!("cargo:rustc-link-search=native={}/lib", dst.display());
     println!("cargo:rustc-link-search=native={}/lib64", dst.display());
 
-    // 根据目标平台链接 llama.cpp 库
+    // Link llama.cpp libraries based on the target platform
+    link_libraries(&target);
+
+    // Link system libraries based on the target platform
+    link_system_libraries(&target);
+
+    // Generate Rust bindings for llama.cpp header
+    let bindings = bindgen::Builder::default()
+        .header("deps/llama.cpp/include/llama.h")
+        .clang_arg(format!("-I{}/include", dst.display()))
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .generate()
+        .expect("Unable to generate bindings");
+
+    bindings
+        .write_to_file(out_dir.join("bindings.rs"))
+        .expect("Couldn't write bindings!");
+}
+
+/// Links the required llama.cpp libraries based on the target platform
+fn link_libraries(target: &str) {
     if target.contains("windows-gnu") {
         // MinGW uses .a files with lib prefix
         println!("cargo:rustc-link-lib=static:+verbatim=libllama.a");
@@ -89,8 +122,10 @@ fn main() {
         println!("cargo:rustc-link-lib=static=ggml-cpu");
         println!("cargo:rustc-link-lib=static=ggml-base");
     }
+}
 
-    // 链接系统库
+/// Links the required system libraries based on the target platform
+fn link_system_libraries(target: &str) {
     if target.contains("windows-gnu") {
         // MinGW specific libraries
         println!("cargo:rustc-link-lib=dylib=stdc++");
@@ -107,16 +142,4 @@ fn main() {
         println!("cargo:rustc-link-lib=dylib=m");
         println!("cargo:rustc-link-lib=dylib=gomp");
     }
-
-    // 生成绑定
-    let bindings = bindgen::Builder::default()
-        .header("deps/llama.cpp/include/llama.h")
-        .clang_arg(format!("-I{}/include", dst.display()))
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
-        .generate()
-        .expect("Unable to generate bindings");
-
-    bindings
-        .write_to_file(out_dir.join("bindings.rs"))
-        .expect("Couldn't write bindings!");
 }

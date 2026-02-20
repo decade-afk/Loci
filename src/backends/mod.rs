@@ -5,14 +5,18 @@
 //! ## Available Backends
 //!
 //! - `llamacpp`: Native llama.cpp backend (Phase 1 - production ready)
+//! - `candle`: Pure Rust backend
+//! - `dynamic`: Runtime loaded backend via shared library
 //!
 //! ## Planned Backends
 //!
-//! - `candle`: Pure Rust backend using HuggingFace Candle (Phase 2)
-//! - `onnx`: ONNX Runtime backend (Phase 2)
-//! - Dynamic loading via libloading (Phase 2)
-//! - WASM backends via wasmtime (Phase 3)
+//! - `onnx`: ONNX Runtime backend
+//! - WASM backends via wasmtime
 
 pub mod llamacpp;
+pub mod candle;
+pub mod dynamic;
 
+pub use candle::{CandleBackend, CandleModel};
+pub use dynamic::DynamicBackend;
 pub use llamacpp::{LlamaCppBackend, LlamaCppModel};

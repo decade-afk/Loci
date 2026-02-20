@@ -16,6 +16,10 @@ struct Args {
     #[arg(short, long)]
     prompt: Option<String>,
 
+    /// Backend name (llama.cpp, candle, or dynamically registered backend)
+    #[arg(long, default_value = "llama.cpp")]
+    backend: String,
+
     /// Context size
     #[arg(short = 'c', long, default_value_t = 4096)]
     context_size: u32,
@@ -56,25 +60,28 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    // Create model configuration
-    let mut config = ModelConfig::new(&args.model)
-        .with_context_size(args.context_size)
-        .with_gpu_layers(args.gpu_layers);
-
-    if args.cpu_only {
-        config = config.cpu_only();
-    }
-
-    if let Some(threads) = args.threads {
-        config = config.with_threads(threads);
-    }
-
     println!("Loading model from: {}", args.model.display());
+    println!("Backend: {}", args.backend);
     println!("Context size: {}", args.context_size);
     println!("GPU layers: {}", args.gpu_layers);
 
+    let mut builder = InferenceEngine::builder()
+        .model_path(&args.model)
+        .backend(&args.backend)
+        .context_size(args.context_size)
+        .batch_size(512)
+        .gpu_layers(args.gpu_layers);
+
+    if args.cpu_only {
+        builder = builder.cpu_only();
+    }
+
+    if let Some(threads) = args.threads {
+        builder = builder.threads(threads);
+    }
+
     // Create inference engine
-    let mut engine = InferenceEngine::new(config)?;
+    let mut engine = builder.build()?;
 
     // Get model info
     let info = engine.model_info();
