@@ -26,21 +26,19 @@ fn main() -> Result<()> {
             .build()?;
 
         // First call will compute
-        let result1 = engine.generate_with_params(
-            "What is Rust?",
-            &InferenceParams::default(),
-        )?;
+        let result1 = engine.generate_with_params("What is Rust?", &InferenceParams::default())?;
 
         // Second call will use cache
-        let result2 = engine.generate_with_params(
-            "What is Rust?",
-            &InferenceParams::default(),
-        )?;
+        let result2 = engine.generate_with_params("What is Rust?", &InferenceParams::default())?;
 
         // Check cache statistics
         let stats = engine.cache_stats();
-        println!("Cache hits: {}, misses: {}, hit rate: {:.2}%",
-                 stats.hits, stats.misses, stats.hit_rate() * 100.0);
+        println!(
+            "Cache hits: {}, misses: {}, hit rate: {:.2}%",
+            stats.hits,
+            stats.misses,
+            stats.hit_rate() * 100.0
+        );
     }
 
     // Example 2: Timeout control
@@ -69,8 +67,10 @@ fn main() -> Result<()> {
 
         // Check timeout statistics
         let timeout_stats = engine.timeout_stats();
-        println!("Timeouts: {}, completed: {}",
-                 timeout_stats.timeouts, timeout_stats.completed);
+        println!(
+            "Timeouts: {}, completed: {}",
+            timeout_stats.timeouts, timeout_stats.completed
+        );
     }
 
     // Example 3: Resource management
@@ -93,10 +93,8 @@ fn main() -> Result<()> {
         println!("Resource summary: {}", engine.resource_summary());
 
         // Generate with resource monitoring
-        let result = engine.generate_with_params(
-            "What is machine learning?",
-            &InferenceParams::default(),
-        )?;
+        let result = engine
+            .generate_with_params("What is machine learning?", &InferenceParams::default())?;
 
         println!("Generated text: {}", result);
     }
@@ -117,8 +115,10 @@ fn main() -> Result<()> {
 
         // Check concurrency status
         let stats = engine.concurrency_stats();
-        println!("Active: {}, queued: {}, peak: {}",
-                 stats.active_ops, stats.queued_ops, stats.peak_concurrent);
+        println!(
+            "Active: {}, queued: {}, peak: {}",
+            stats.active_ops, stats.queued_ops, stats.peak_concurrent
+        );
 
         // Generate with concurrency control
         let result = engine.generate_with_params(
@@ -135,9 +135,7 @@ fn main() -> Result<()> {
         let mut engine = InferenceEngine::builder()
             .model_path("path/to/model.gguf")
             .with_cache(true)
-            .with_concurrency_config(
-                ConcurrencyConfig::new().with_max_concurrent(4)
-            )
+            .with_concurrency_config(ConcurrencyConfig::new().with_max_concurrent(4))
             .build()?;
 
         let prompts = vec![
@@ -148,10 +146,7 @@ fn main() -> Result<()> {
         ];
 
         // Sequential batch inference
-        let results = engine.generate_batch(
-            &prompts,
-            &InferenceParams::default(),
-        )?;
+        let results = engine.generate_batch(&prompts, &InferenceParams::default())?;
 
         for (prompt, result) in prompts.iter().zip(results.iter()) {
             match result {
@@ -199,36 +194,39 @@ fn main() -> Result<()> {
             .with_cache_config(
                 CacheConfig::new()
                     .with_max_entries(1000)
-                    .with_ttl(Duration::from_secs(3600))
+                    .with_ttl(Duration::from_secs(3600)),
             )
             .with_timeout(true)
-            .with_timeout_config(
-                TimeoutConfig::new()
-                    .with_default_timeout(Duration::from_secs(60))
-            )
+            .with_timeout_config(TimeoutConfig::new().with_default_timeout(Duration::from_secs(60)))
             .with_resource_limits(
                 ResourceLimits::new()
                     .with_max_memory_bytes(8_000_000_000)
-                    .with_max_concurrent_ops(4)
+                    .with_max_concurrent_ops(4),
             )
             .with_concurrency_config(
                 ConcurrencyConfig::new()
                     .with_max_concurrent(4)
-                    .with_queue_size(100)
+                    .with_queue_size(100),
             )
             .build()?;
 
         // Get comprehensive statistics
-        println!("Cache stats: hits={}, misses={}",
-                 engine.cache_stats().hits,
-                 engine.cache_stats().misses);
-        println!("Timeout stats: completed={}, timeouts={}",
-                 engine.timeout_stats().completed,
-                 engine.timeout_stats().timeouts);
+        println!(
+            "Cache stats: hits={}, misses={}",
+            engine.cache_stats().hits,
+            engine.cache_stats().misses
+        );
+        println!(
+            "Timeout stats: completed={}, timeouts={}",
+            engine.timeout_stats().completed,
+            engine.timeout_stats().timeouts
+        );
         println!("Resource: {}", engine.resource_summary());
-        println!("Concurrency: active={}, queued={}",
-                 engine.concurrency_stats().active_ops,
-                 engine.concurrency_stats().queued_ops);
+        println!(
+            "Concurrency: active={}, queued={}",
+            engine.concurrency_stats().active_ops,
+            engine.concurrency_stats().queued_ops
+        );
     }
 
     Ok(())
@@ -242,10 +240,7 @@ fn manual_cache_management() -> Result<()> {
         .build()?;
 
     // Generate some content
-    engine.generate_with_params(
-        "Test prompt",
-        &InferenceParams::default(),
-    )?;
+    engine.generate_with_params("Test prompt", &InferenceParams::default())?;
 
     // Manually cleanup expired cache entries
     engine.cleanup_cache();
@@ -267,10 +262,7 @@ fn error_recovery_with_timeout() -> Result<()> {
     let mut engine = InferenceEngine::builder()
         .model_path("path/to/model.gguf")
         .with_timeout(true)
-        .with_timeout_config(
-            TimeoutConfig::new()
-                .with_default_timeout(Duration::from_secs(30))
-        )
+        .with_timeout_config(TimeoutConfig::new().with_default_timeout(Duration::from_secs(30)))
         .build()?;
 
     // Try with short timeout
@@ -283,7 +275,7 @@ fn error_recovery_with_timeout() -> Result<()> {
         Err(e) => {
             if e.to_string().contains("timed out") {
                 println!("Operation timed out, retrying with longer timeout...");
-                
+
                 // Retry with longer timeout
                 match engine.generate_with_timeout(
                     "Long prompt that might timeout",
@@ -309,7 +301,7 @@ fn resource_aware_inference() -> Result<()> {
         .with_resource_limits(
             ResourceLimits::new()
                 .with_max_memory_percent(75.0)
-                .with_max_cpu_percent(85.0)
+                .with_max_cpu_percent(85.0),
         )
         .build()?;
 
@@ -320,19 +312,17 @@ fn resource_aware_inference() -> Result<()> {
     }
 
     // Generate
-    let result = engine.generate_with_params(
-        "What is cloud computing?",
-        &InferenceParams::default(),
-    )?;
+    let result =
+        engine.generate_with_params("What is cloud computing?", &InferenceParams::default())?;
 
     println!("Result: {}", result);
 
     // Check resource usage after generation
     let stats = engine.resource_stats();
-    println!("Memory usage: {} / {} ({:.1}%)",
-             stats.memory.current_usage,
-             stats.memory.total_allocated,
-             stats.memory.usage_percent);
+    println!(
+        "Memory usage: {} / {} ({:.1}%)",
+        stats.memory.current_usage, stats.memory.total_allocated, stats.memory.usage_percent
+    );
 
     Ok(())
 }

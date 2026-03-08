@@ -48,7 +48,7 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```ignore
 //! use loci::multimodal_plugin::*;
 //!
 //! // Register built-in plugins

@@ -3,8 +3,8 @@
 //! This example shows how to use the chat template system to format conversations
 //! for different model types (ChatML, Llama, Alpaca, etc.)
 
+use loci::chat_template::{ChatMessage, ChatTemplate, ChatTemplateBuilder, ChatTemplateType};
 use loci::prelude::*;
-use loci::chat_template::{ChatMessage, ChatTemplate, ChatTemplateType, ChatTemplateBuilder};
 
 fn main() -> Result<()> {
     println!("=== Chat Template Demo ===\n");
@@ -30,9 +30,9 @@ fn main() -> Result<()> {
     // Example 3: Alpaca format
     println!("3. Alpaca Format:");
     let alpaca = ChatTemplate::alpaca();
-    let simple_messages = vec![
-        ChatMessage::user("Explain quantum computing in simple terms."),
-    ];
+    let simple_messages = vec![ChatMessage::user(
+        "Explain quantum computing in simple terms.",
+    )];
     let prompt = alpaca.format(&simple_messages)?;
     println!("{}\n", prompt);
 
@@ -44,7 +44,7 @@ fn main() -> Result<()> {
         .user_format("Human: ", "\n")
         .assistant_format("AI: ", "\n")
         .build();
-    
+
     let custom_messages = vec![
         ChatMessage::user("Hello!"),
         ChatMessage::assistant("Hi there!"),
@@ -55,13 +55,8 @@ fn main() -> Result<()> {
     // Example 5: Format with system prompt
     println!("5. With System Prompt:");
     let template = ChatTemplate::new(ChatTemplateType::Vicuna);
-    let user_messages = vec![
-        ChatMessage::user("What's the capital of France?"),
-    ];
-    let prompt = template.format_with_system(
-        "You are a geography expert.",
-        &user_messages,
-    )?;
+    let user_messages = vec![ChatMessage::user("What's the capital of France?")];
+    let prompt = template.format_with_system("You are a geography expert.", &user_messages)?;
     println!("{}\n", prompt);
 
     Ok(())

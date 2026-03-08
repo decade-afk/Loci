@@ -1,10 +1,11 @@
 use loci::prelude::*;
 
 fn main() -> Result<()> {
-    let mut rag = RagEngine::new(HashEmbeddingProvider::default()).with_chunking(ChunkingConfig {
-        chunk_size: 32,
-        chunk_overlap: 8,
-    })?;
+    let mut rag =
+        RagEngine::new(HashEmbeddingProvider::default()).with_chunking(ChunkingConfig {
+            chunk_size: 32,
+            chunk_overlap: 8,
+        })?;
 
     rag.ingest_documents(vec![
         RagDocument::new(

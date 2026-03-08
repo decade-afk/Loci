@@ -131,6 +131,7 @@ pub struct SamplingParams {
     pub temperature: f32,
     pub top_k: u32,
     pub top_p: f32,
+    pub min_p: f32,
     pub repeat_penalty: f32,
     pub seed: u64,
 }
@@ -141,6 +142,7 @@ impl Default for SamplingParams {
             temperature: 0.8,
             top_k: 40,
             top_p: 0.95,
+            min_p: 0.0,
             repeat_penalty: 1.1,
             seed: 0,
         }
@@ -153,6 +155,7 @@ impl SamplingParams {
             temperature: 0.0,
             top_k: 1,
             top_p: 1.0,
+            min_p: 0.0,
             repeat_penalty: 1.0,
             seed: 0,
         }
@@ -163,6 +166,7 @@ impl SamplingParams {
             temperature: 1.2,
             top_k: 0,
             top_p: 0.95,
+            min_p: 0.0,
             repeat_penalty: 1.1,
             seed: 0,
         }
@@ -207,6 +211,9 @@ fn sample_from_probs(probs: &LogitsView, params: &SamplingParams) -> i32 {
     let mut view = LogitsView::new(&mut probs_copy);
     if params.top_p < 1.0 {
         apply_top_p(&mut view, params.top_p);
+    }
+    if params.min_p > 0.0 {
+        apply_min_p(&mut view, params.min_p);
     }
 
     // Re-normalize after filtering
@@ -266,6 +273,25 @@ fn apply_top_p(probs: &mut LogitsView, top_p: f32) {
     // Zero out tokens not in keep_tokens
     for i in 0..probs.vocab_size() {
         if !keep_tokens.contains(&i) {
+            probs.set_usize(i, 0.0).ok();
+        }
+    }
+}
+
+/// Apply Min-P filtering: keep tokens with p >= min_p * max_p
+fn apply_min_p(probs: &mut LogitsView, min_p: f32) {
+    let max_prob = probs
+        .as_slice()
+        .iter()
+        .copied()
+        .fold(0.0f32, f32::max);
+    if max_prob <= 0.0 {
+        return;
+    }
+
+    let threshold = max_prob * min_p;
+    for i in 0..probs.vocab_size() {
+        if probs.as_slice()[i] < threshold {
             probs.set_usize(i, 0.0).ok();
         }
     }

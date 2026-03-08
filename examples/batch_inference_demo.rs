@@ -2,8 +2,10 @@
 //!
 //! This example shows how to process multiple prompts efficiently using batch inference
 
+use loci::batch_inference::{
+    BatchConfig, BatchInferenceBuilder, BatchInferenceProcessor, PromptBatch,
+};
 use loci::prelude::*;
-use loci::batch_inference::{PromptBatch, BatchConfig, BatchInferenceProcessor, BatchInferenceBuilder};
 
 fn main() -> Result<()> {
     println!("=== Batch Inference Demo ===\n");
@@ -30,9 +32,16 @@ fn main() -> Result<()> {
     let result = processor.process_batch(batch)?;
 
     println!("Total time: {}ms", result.total_time_ms);
-    println!("Average time per prompt: {:.2}ms", result.avg_time_per_prompt_ms);
+    println!(
+        "Average time per prompt: {:.2}ms",
+        result.avg_time_per_prompt_ms
+    );
     println!("Success rate: {:.1}%", result.success_rate() * 100.0);
-    println!("Successful: {}, Failed: {}\n", result.successful_count(), result.failed_count());
+    println!(
+        "Successful: {}, Failed: {}\n",
+        result.successful_count(),
+        result.failed_count()
+    );
 
     for (i, response) in result.responses.iter().enumerate() {
         match response {
@@ -57,15 +66,15 @@ fn main() -> Result<()> {
     );
 
     let result = parallel_processor.process_batch(large_batch)?;
-    println!("Total time: {}ms (should be faster than sequential)", result.total_time_ms);
+    println!(
+        "Total time: {}ms (should be faster than sequential)",
+        result.total_time_ms
+    );
     println!("Processed {} prompts\n", result.responses.len());
 
     // Example 3: Batch with progress callback
     println!("3. Batch with Progress Tracking:");
-    let progress_processor = BatchInferenceProcessor::new(
-        mock_inference,
-        BatchConfig::default(),
-    );
+    let progress_processor = BatchInferenceProcessor::new(mock_inference, BatchConfig::default());
 
     let batch = PromptBatch::new(
         vec![
@@ -77,7 +86,12 @@ fn main() -> Result<()> {
     );
 
     let result = progress_processor.process_with_progress(batch, |current, total| {
-        println!("  Progress: {}/{} ({:.1}%)", current, total, (current as f64 / total as f64) * 100.0);
+        println!(
+            "  Progress: {}/{} ({:.1}%)",
+            current,
+            total,
+            (current as f64 / total as f64) * 100.0
+        );
     })?;
 
     println!("Completed in {}ms\n", result.total_time_ms);
@@ -90,13 +104,13 @@ fn main() -> Result<()> {
         .continue_on_error(true)
         .build(mock_inference);
 
-    let batch = PromptBatch::new(
-        vec!["Test prompt".to_string()],
-        InferenceParams::default(),
-    );
+    let batch = PromptBatch::new(vec!["Test prompt".to_string()], InferenceParams::default());
 
     let result = processor.process_batch(batch)?;
-    println!("Processed with custom config: {} prompts", result.responses.len());
+    println!(
+        "Processed with custom config: {} prompts",
+        result.responses.len()
+    );
 
     Ok(())
 }

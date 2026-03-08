@@ -1,15 +1,8 @@
 //! Example: Advanced Logits Manipulation Plugin
 //!
-//! This demonstrates the power of the new plugin system with logit-level intervention.
-//!
-//! ## What this shows:
-//! - Zero-copy logits manipulation
-//! - Token banning/boosting
-//! - Context-aware transformations
-//! - Plugin composition
+//! This demonstrates logit-level plugin hooks with the current `LogitsView` API.
 
 use loci::prelude::*;
-use loci::sampler::LogitsView;
 
 /// Plugin that bans specific tokens (e.g., profanity filter)
 struct TokenBanPlugin {
@@ -32,9 +25,15 @@ impl Plugin for TokenBanPlugin {
     }
 
     fn transform_logits(&self, logits: &mut LogitsView, _context: &[i32]) -> Result<()> {
-        // Ban specific tokens by setting their logits to -infinity
-        logits.apply_mask(&self.banned_tokens);
-        println!("[TokenBanPlugin] Banned {} tokens", self.banned_tokens.len());
+        for &token in &self.banned_tokens {
+            if token >= 0 && (token as usize) < logits.vocab_size() {
+                logits.set(token, f32::NEG_INFINITY)?;
+            }
+        }
+        println!(
+            "[TokenBanPlugin] Banned {} tokens",
+            self.banned_tokens.len()
+        );
         Ok(())
     }
 }
@@ -60,16 +59,15 @@ impl Plugin for TechnicalTermBoostPlugin {
     }
 
     fn transform_logits(&self, logits: &mut LogitsView, context: &[i32]) -> Result<()> {
-        // Only boost if we're in a technical context (e.g., last tokens suggest code)
-        let is_code_context = context.len() > 2; // Simplified heuristic
-
+        let is_code_context = context.len() > 2;
         if is_code_context {
             for &(token, bias) in &self.boost_map {
-                logits.apply_bias(token, bias)?;
+                if let Some(current) = logits.get(token) {
+                    logits.set(token, current + bias)?;
+                }
             }
-            println!("[TechTermBoost] Boosted {} technical terms", self.boost_map.len());
+            println!("[TechTermBoost] Boosted {} terms", self.boost_map.len());
         }
-
         Ok(())
     }
 }
@@ -99,23 +97,18 @@ impl Plugin for ContextAwareRepetitionPlugin {
     }
 
     fn transform_logits(&self, logits: &mut LogitsView, context: &[i32]) -> Result<()> {
-        // Get recent tokens within window
         let recent_start = context.len().saturating_sub(self.window_size);
         let recent_tokens = &context[recent_start..];
 
-        // Count token frequencies
         let mut token_counts: std::collections::HashMap<i32, usize> =
             std::collections::HashMap::new();
         for &token in recent_tokens {
             *token_counts.entry(token).or_insert(0) += 1;
         }
 
-        // Apply stronger penalty to more frequent tokens
         for (&token, &count) in &token_counts {
             if count > 1 {
                 let dynamic_penalty = self.base_penalty * (count as f32).sqrt();
-
-                // Apply penalty (llama.cpp convention: divide positive, multiply negative)
                 if let Some(logit) = logits.get(token) {
                     let new_value = if logit > 0.0 {
                         logit / dynamic_penalty
@@ -128,10 +121,9 @@ impl Plugin for ContextAwareRepetitionPlugin {
         }
 
         println!(
-            "[ContextRepetition] Applied dynamic penalty to {} repeated tokens",
+            "[ContextRepetition] Penalized {} repeated tokens",
             token_counts.iter().filter(|(_, &c)| c > 1).count()
         );
-
         Ok(())
     }
 }
@@ -165,72 +157,36 @@ impl Plugin for TokenStatsPlugin {
     fn post_sample(&self, token_id: i32) -> Result<i32> {
         let mut count = self.token_count.lock().unwrap();
         *count += 1;
-
         if *count % 10 == 0 {
             println!("[TokenStats] Generated {} tokens", *count);
         }
-
-        Ok(token_id) // Pass through unchanged
+        Ok(token_id)
     }
 }
 
 fn main() -> Result<()> {
-    println!("=== Loci Logits Plugin Demo ===\n");
+    println!("=== Loci Logits Plugin Demo ===");
+    println!("1. TokenBanPlugin");
+    println!("2. TechnicalTermBoostPlugin");
+    println!("3. ContextAwareRepetitionPlugin");
+    println!("4. TokenStatsPlugin");
 
-    // Note: This is a demonstration of the plugin API
-    // In a real scenario, you would:
-    // 1. Load a model
-    // 2. Register these plugins
-    // 3. Run inference
+    let stats_plugin = TokenStatsPlugin::new();
+    let _ban_plugin = TokenBanPlugin::new(vec![123, 456]);
+    let _boost_plugin = TechnicalTermBoostPlugin::new(vec![(789, 2.0)]);
+    let _repeat_plugin = ContextAwareRepetitionPlugin::new(1.2, 32);
 
-    println!("Available plugin types:");
-    println!("1. TokenBanPlugin - Bans specific tokens (e.g., profanity filtering)");
-    println!("2. TechnicalTermBoostPlugin - Boosts technical terms in code generation");
-    println!("3. ContextAwareRepetitionPlugin - Dynamic repetition penalty");
-    println!("4. TokenStatsPlugin - Logs token generation statistics");
-
-    println!("\n=== Plugin Composition Example ===");
-    println!("Plugins can be chained together:");
-    println!("  Input Logits");
-    println!("     ↓");
-    println!("  TokenBanPlugin (mask banned tokens)");
-    println!("     ↓");
-    println!("  TechnicalTermBoostPlugin (boost relevant terms)");
-    println!("     ↓");
-    println!("  ContextAwareRepetitionPlugin (penalize repetition)");
-    println!("     ↓");
-    println!("  Sampler (temperature, top-k, top-p)");
-    println!("     ↓");
-    println!("  TokenStatsPlugin (log statistics)");
-    println!("     ↓");
-    println!("  Final Token");
-
-    println!("\n=== Zero-Copy Benefits ===");
-    println!("- Logits are modified in-place (no allocation)");
-    println!("- Plugins receive mutable view (&mut LogitsView)");
-    println!("- Multiple plugins compose without copying");
-    println!("- FFI-safe integration with llama.cpp");
-
-    println!("\n=== Usage Example (Pseudocode) ===");
-    println!(r#"
-// Create plugins
-let ban_plugin = TokenBanPlugin::new(vec![123, 456]); // Ban tokens 123, 456
-let boost_plugin = TechnicalTermBoostPlugin::new(vec![(789, 2.0)]); // Boost token 789
-let repeat_plugin = ContextAwareRepetitionPlugin::new(1.2, 32);
-let stats_plugin = TokenStatsPlugin::new();
-
-// Register with engine
+    println!(
+        "{}",
+        r#"Pseudo flow:
 engine.plugin_manager_mut().register(ban_plugin)?;
 engine.plugin_manager_mut().register(boost_plugin)?;
 engine.plugin_manager_mut().register(repeat_plugin)?;
 engine.plugin_manager_mut().register(stats_plugin)?;
-
-// Generate text - plugins automatically apply
 let response = engine.generate("Write a Rust function", params)?;
+println!("Total tokens generated: {}", stats_plugin.get_count());"#
+    );
 
-// Check statistics
-println!("Total tokens generated: {}", stats_plugin.get_count());
-    "#);
-
+    println!("Current stats count (demo): {}", stats_plugin.get_count());
     Ok(())
 }

@@ -3,8 +3,8 @@
 //! This example shows how to use the function calling system to enable
 //! LLMs to call external functions
 
+use loci::function_calling::{FunctionCall, FunctionCallingManager, FunctionDefinition};
 use loci::prelude::*;
-use loci::function_calling::{FunctionDefinition, FunctionCall, FunctionCallingManager};
 
 fn main() -> Result<()> {
     println!("=== Function Calling Demo ===\n");
@@ -13,23 +13,28 @@ fn main() -> Result<()> {
     let mut manager = FunctionCallingManager::new();
 
     // Define a weather function
-    let weather_func = FunctionDefinition::new(
-        "get_weather",
-        "Get the current weather for a location",
-    )
-    .add_parameter("location", "string", "City name or location", true)
-    .add_parameter("unit", "string", "Temperature unit (celsius/fahrenheit)", false);
+    let weather_func =
+        FunctionDefinition::new("get_weather", "Get the current weather for a location")
+            .add_parameter("location", "string", "City name or location", true)
+            .add_parameter(
+                "unit",
+                "string",
+                "Temperature unit (celsius/fahrenheit)",
+                false,
+            );
 
     manager.register_function(weather_func);
 
     // Define a calculator function
-    let calc_func = FunctionDefinition::new(
-        "calculate",
-        "Perform a mathematical calculation",
-    )
-    .add_parameter("operation", "string", "Operation to perform (+, -, *, /)", true)
-    .add_parameter("a", "number", "First number", true)
-    .add_parameter("b", "number", "Second number", true);
+    let calc_func = FunctionDefinition::new("calculate", "Perform a mathematical calculation")
+        .add_parameter(
+            "operation",
+            "string",
+            "Operation to perform (+, -, *, /)",
+            true,
+        )
+        .add_parameter("a", "number", "First number", true)
+        .add_parameter("b", "number", "Second number", true);
 
     manager.register_function(calc_func);
 
@@ -97,7 +102,7 @@ fn main() -> Result<()> {
 fn execute_weather_function(call: &FunctionCall) -> String {
     let location = call.get_string("location").unwrap_or_default();
     let unit = call.get_string("unit").unwrap_or("celsius".to_string());
-    
+
     format!(
         "The weather in {} is 22°{} with partly cloudy skies.",
         location,
@@ -114,7 +119,13 @@ fn execute_calculator_function(call: &FunctionCall) -> String {
         "+" => a + b,
         "-" => a - b,
         "*" => a * b,
-        "/" => if b != 0.0 { a / b } else { f64::NAN },
+        "/" => {
+            if b != 0.0 {
+                a / b
+            } else {
+                f64::NAN
+            }
+        }
         _ => f64::NAN,
     };
 

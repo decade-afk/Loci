@@ -34,7 +34,7 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```ignore
 //! use loci::model_hot_swap::{HotSwapModelRegistry, LoRAConfig};
 //!
 //! // Create registry

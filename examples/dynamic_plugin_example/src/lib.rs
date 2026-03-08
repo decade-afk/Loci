@@ -4,7 +4,7 @@
 //! Build with: cargo build --release
 //! The output will be in target/release/example_dynamic_plugin.dll (Windows)
 
-use loci::plugin::Plugin;
+use loci::plugin::{dynamic_plugin_from_opaque, dynamic_plugin_into_opaque, DynamicPluginOpaque, Plugin};
 use loci::error::Result;
 
 /// A dynamic plugin that converts text to ROT13
@@ -61,17 +61,21 @@ impl Plugin for Rot13Plugin {
 /// Required export for dynamic loading
 /// This function is called by the PluginRegistry to create an instance
 #[no_mangle]
-pub extern "C" fn create_plugin() -> *mut dyn Plugin {
+pub extern "C" fn create_plugin_v1() -> DynamicPluginOpaque {
     let plugin = Rot13Plugin::new();
-    Box::into_raw(Box::new(plugin))
+    dynamic_plugin_into_opaque(Box::new(plugin))
+}
+
+/// Backward-compatible symbol name.
+#[no_mangle]
+pub extern "C" fn create_plugin() -> DynamicPluginOpaque {
+    create_plugin_v1()
 }
 
 /// Optional: Destroy function for cleanup
 #[no_mangle]
-pub extern "C" fn destroy_plugin(ptr: *mut dyn Plugin) {
-    if !ptr.is_null() {
-        unsafe {
-            let _ = Box::from_raw(ptr);
-        }
+pub extern "C" fn destroy_plugin_v1(opaque: DynamicPluginOpaque) {
+    if let Some(_plugin) = unsafe { dynamic_plugin_from_opaque(opaque) } {
+        // drop plugin
     }
 }

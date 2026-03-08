@@ -6,6 +6,12 @@ repository = "https://github.com/decade-afk/loci"
 authors = ["decade-afk"]
 description = "A cross-platform, plugin-based local LLM inference framework"
 license = "MIT OR Apache-2.0"
+exclude = [
+    ".tmp_pip/**",
+    ".pip_cache/**",
+    "target/**",
+    "examples/**/target/**",
+]
 
 [features]
 # Default features: auto device detection

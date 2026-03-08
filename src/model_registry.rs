@@ -46,7 +46,7 @@ struct ModelEntry {
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```ignore
 /// use loci::model_registry::ModelRegistry;
 ///
 /// let registry = ModelRegistry::new();

@@ -1,0 +1,210 @@
+﻿openapi: 3.0.3
+info:
+  title: Loci REST API
+  version: "0.1.0"
+  description: |
+    REST endpoints exposed by `loci serve`.
+    Prompt safety limit is configured at process startup via CLI/env:
+    `--max-prompt-bytes` (minimum 1024) or `LOCI_MAX_PROMPT_BYTES`.
+    If both are set, CLI value takes priority.
+servers:
+  - url: http://127.0.0.1:8080
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: health
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /v1/health:
+    get:
+      summary: Health check (versioned path)
+      operationId: healthV1
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /info:
+    get:
+      summary: Runtime model information
+      operationId: info
+      responses:
+        "200":
+          description: Model information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InfoResponse"
+  /v1/info:
+    get:
+      summary: Runtime model information (versioned path)
+      operationId: infoV1
+      responses:
+        "200":
+          description: Model information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InfoResponse"
+  /generate:
+    post:
+      summary: Generate text
+      operationId: generate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateRequest"
+      responses:
+        "200":
+          description: Generation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerateResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Payload too large
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal inference error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/generate:
+    post:
+      summary: Generate text (versioned path)
+      operationId: generateV1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateRequest"
+      responses:
+        "200":
+          description: Generation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerateResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: Payload too large
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal inference error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+    InfoResponse:
+      type: object
+      required: [status, version, n_vocab, n_ctx_train, n_embd]
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string
+          example: "0.1.0"
+        n_vocab:
+          type: integer
+          format: int32
+          example: 151936
+        n_ctx_train:
+          type: integer
+          format: int32
+          example: 32768
+        n_embd:
+          type: integer
+          format: int32
+          example: 1024
+    GenerateRequest:
+      type: object
+      required: [prompt]
+      properties:
+        prompt:
+          type: string
+          description: UTF-8 prompt text. Effective max bytes is runtime-configured in server process.
+          example: "Hello, introduce Loci in one sentence."
+        max_tokens:
+          type: integer
+          format: int32
+          minimum: 1
+          example: 128
+        temperature:
+          type: number
+          format: float
+          minimum: 0
+          example: 0.7
+        top_p:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          example: 0.95
+        min_p:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          example: 0.0
+        top_k:
+          type: integer
+          format: int32
+          minimum: 0
+          example: 40
+        repetition_penalty:
+          type: number
+          format: float
+          minimum: 0
+          example: 1.1
+    GenerateResponse:
+      type: object
+      required: [response]
+      properties:
+        response:
+          type: string
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: "invalid JSON payload for /generate: expected value at line 1 column 1"

@@ -85,6 +85,8 @@ pub struct InferenceParams {
     pub temperature: f32,
     /// Top-p (nucleus) sampling
     pub top_p: f32,
+    /// Min-p sampling
+    pub min_p: f32,
     /// Top-k sampling
     pub top_k: u32,
     /// Repetition penalty
@@ -100,6 +102,7 @@ impl Default for InferenceParams {
             max_tokens: 512,
             temperature: 0.8,
             top_p: 0.95,
+            min_p: 0.0,
             top_k: 40,
             repeat_penalty: 1.1,
         }

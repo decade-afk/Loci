@@ -18,10 +18,7 @@ fn test_capability_1_detect_available_devices() {
     assert!(selector.device_count() >= 1, "应该至少检测到CPU设备");
 
     // 验证：CPU设备应该可用
-    assert!(
-        selector.has_backend(DeviceType::CPU),
-        "CPU后端应该始终可用"
-    );
+    assert!(selector.has_backend(DeviceType::CPU), "CPU后端应该始终可用");
 
     // 打印所有检测到的设备
     println!("检测到 {} 个设备:", selector.device_count());

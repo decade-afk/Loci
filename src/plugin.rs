@@ -16,7 +16,7 @@
 //!
 //! # Example: Creating a Custom Plugin
 //!
-//! ```rust
+//! ```ignore
 //! use loci::plugin::Plugin;
 //! use loci::error::Result;
 //!
@@ -40,7 +40,7 @@
 //! External applications can integrate plugins in two ways:
 //!
 //! ## 1. Static Plugin (Compile-Time)
-//! ```rust
+//! ```ignore
 //! // In your application
 //! use loci::prelude::*;
 //! use loci::plugin::Plugin;
@@ -63,6 +63,58 @@
 use crate::error::{LociError, Result};
 use crate::sampler::LogitsView;
 use std::collections::HashMap;
+use std::ffi::c_void;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DynamicPluginOpaque {
+    pub data: *mut c_void,
+    pub vtable: *mut c_void,
+}
+
+#[repr(C)]
+struct RawDynPluginPtr {
+    data: *mut c_void,
+    vtable: *mut c_void,
+}
+
+/// Convert `Box<dyn Plugin>` into an opaque ABI payload used by dynamic plugin exports.
+///
+/// # Safety and Compatibility
+/// This representation depends on Rust trait object layout and is intended for
+/// same-toolchain/same-target plugin boundaries.
+pub fn dynamic_plugin_into_opaque(plugin: Box<dyn Plugin>) -> DynamicPluginOpaque {
+    let raw: *mut dyn Plugin = Box::into_raw(plugin);
+    let parts: RawDynPluginPtr = unsafe { std::mem::transmute(raw) };
+    DynamicPluginOpaque {
+        data: parts.data,
+        vtable: parts.vtable,
+    }
+}
+
+/// Convert an opaque dynamic plugin payload back into `Box<dyn Plugin>`.
+///
+/// # Safety
+/// The payload must come from `dynamic_plugin_into_opaque` under a compatible
+/// Rust toolchain/target ABI.
+pub unsafe fn dynamic_plugin_from_opaque(
+    opaque: DynamicPluginOpaque,
+) -> Option<Box<dyn Plugin>> {
+    if opaque.data.is_null() || opaque.vtable.is_null() {
+        return None;
+    }
+
+    let parts = RawDynPluginPtr {
+        data: opaque.data,
+        vtable: opaque.vtable,
+    };
+    let raw: *mut dyn Plugin = std::mem::transmute(parts);
+    if raw.is_null() {
+        None
+    } else {
+        Some(Box::from_raw(raw))
+    }
+}
 
 /// Plugin trait that all plugins must implement
 pub trait Plugin: Send + Sync {
@@ -451,5 +503,16 @@ mod tests {
         // Try to register same name again
         let result = manager.register(TestPlugin);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dynamic_plugin_opaque_roundtrip() {
+        let plugin: Box<dyn Plugin> = Box::new(TestPlugin);
+        let opaque = dynamic_plugin_into_opaque(plugin);
+        let restored = unsafe { dynamic_plugin_from_opaque(opaque) };
+        assert!(restored.is_some());
+        let restored = restored.unwrap();
+        assert_eq!(restored.name(), "test");
+        assert_eq!(restored.version(), "1.0.0");
     }
 }

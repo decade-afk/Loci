@@ -7,10 +7,9 @@
 //! 4. Persisting plugin configuration to TOML
 //! 5. Loading configuration from file
 
-use loci::plugin::Plugin;
-use loci::plugin_registry::{PluginRegistry, PluginConfig};
 use loci::error::Result;
-use std::collections::HashMap;
+use loci::plugin::Plugin;
+use loci::plugin_registry::PluginRegistry;
 
 /// Example static plugin
 struct StaticGreeterPlugin {
@@ -35,7 +34,10 @@ impl Plugin for StaticGreeterPlugin {
     }
 
     fn init(&mut self) -> Result<()> {
-        println!("[StaticGreeter] Initialized with greeting: '{}'", self.greeting);
+        println!(
+            "[StaticGreeter] Initialized with greeting: '{}'",
+            self.greeting
+        );
         Ok(())
     }
 
@@ -84,9 +86,11 @@ fn main() -> Result<()> {
 
     // 2. List all plugins
     println!("2. Current plugin list:");
-    for (name, version, enabled, is_dynamic) in registry.list() {
-        let plugin_type = if is_dynamic { "dynamic" } else { "static" };
-        println!("   - {} v{} (enabled: {}, type: {})", name, version, enabled, plugin_type);
+    for (name, version, enabled, plugin_type) in registry.list() {
+        println!(
+            "   - {} v{} (enabled: {}, type: {})",
+            name, version, enabled, plugin_type
+        );
     }
     println!();
 
@@ -141,9 +145,11 @@ fn main() -> Result<()> {
     registry2.load_from_file(config_path)?;
 
     println!("   Loaded plugins:");
-    for (name, version, enabled, is_dynamic) in registry2.list() {
-        let plugin_type = if is_dynamic { "dynamic" } else { "static" };
-        println!("   - {} v{} (enabled: {}, type: {})", name, version, enabled, plugin_type);
+    for (name, version, enabled, plugin_type) in registry2.list() {
+        println!(
+            "   - {} v{} (enabled: {}, type: {})",
+            name, version, enabled, plugin_type
+        );
     }
     println!();
 
@@ -153,7 +159,7 @@ fn main() -> Result<()> {
     println!("   ```rust");
     println!("   registry.load_dynamic_plugin(\"path/to/plugin.dll\")?;");
     println!("   ```");
-    println!("   The plugin shared library must export a 'create_plugin' function.");
+    println!("   The plugin shared library should export 'create_plugin_v1' (or legacy 'create_plugin').");
     println!();
 
     println!("=== Demo Complete ===");

@@ -39,7 +39,7 @@ pub struct CpuStats {
 }
 
 /// Resource usage statistics
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ResourceStats {
     /// Memory statistics
     pub memory: MemoryStats,
@@ -47,6 +47,16 @@ pub struct ResourceStats {
     pub cpu: CpuStats,
     /// Timestamp of measurement
     pub timestamp: Instant,
+}
+
+impl Default for ResourceStats {
+    fn default() -> Self {
+        Self {
+            memory: MemoryStats::default(),
+            cpu: CpuStats::default(),
+            timestamp: Instant::now(),
+        }
+    }
 }
 
 /// Resource limits configuration
@@ -138,6 +148,7 @@ impl Default for MonitorConfig {
 }
 
 /// Resource manager for tracking and limiting resource usage
+#[derive(Clone)]
 pub struct ResourceManager {
     limits: ResourceLimits,
     config: MonitorConfig,

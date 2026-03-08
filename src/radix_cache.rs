@@ -268,7 +268,12 @@ impl RadixTree {
         for &token in tokens {
             let next_node = {
                 let node = current.read();
-                node.get_child(token)?
+                node.get_child(token)
+            };
+
+            let Some(next_node) = next_node else {
+                // No further path; return the longest prefix matched so far.
+                break;
             };
 
             matched_tokens.push(token);

@@ -6,7 +6,7 @@
 //! - Centralized plugin management across multiple engines
 
 use crate::error::{LociError, Result};
-use crate::plugin::Plugin;
+use crate::plugin::{dynamic_plugin_from_opaque, DynamicPluginOpaque, Plugin};
 use crate::sampler::LogitsView;
 use crate::wasm_plugin::{WasmPlugin, WasmPluginConfig};
 use libloading::{Library, Symbol};
@@ -25,6 +25,27 @@ pub enum PluginType {
     Dynamic,
     /// WASM plugin (sandboxed execution)
     Wasm,
+}
+
+impl PluginType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            PluginType::Static => "static",
+            PluginType::Dynamic => "dynamic",
+            PluginType::Wasm => "wasm",
+        }
+    }
+}
+
+/// Runtime plugin metadata for management/integration.
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginRuntimeInfo {
+    pub name: String,
+    pub version: String,
+    pub enabled: bool,
+    pub plugin_type: String,
+    pub source: Option<String>,
+    pub hot_reloadable: bool,
 }
 
 /// Plugin configuration that can be serialized to/from TOML
@@ -64,13 +85,13 @@ pub struct RegistryConfig {
 
 /// Type alias for the plugin constructor function
 /// Dynamic plugins must export a function with this signature:
-/// ```
+/// ```ignore
 /// #[no_mangle]
-/// pub extern "C" fn create_plugin() -> *mut dyn Plugin {
-///     Box::into_raw(Box::new(MyPlugin::new()))
+/// pub extern "C" fn create_plugin_v1() -> DynamicPluginOpaque {
+///     dynamic_plugin_into_opaque(Box::new(MyPlugin::new()))
 /// }
 /// ```
-type PluginConstructor = unsafe extern "C" fn() -> *mut dyn Plugin;
+type PluginConstructor = unsafe extern "C" fn() -> DynamicPluginOpaque;
 
 /// Represents a dynamically loaded plugin
 pub struct DynamicPlugin {
@@ -209,6 +230,7 @@ impl PluginRegistry {
 
         if self.static_plugins.contains_key(&name)
             || self.dynamic_plugins.contains_key(&name)
+            || self.wasm_plugins.contains_key(&name)
         {
             return Err(LociError::PluginError(format!(
                 "Plugin '{}' already registered",
@@ -266,25 +288,34 @@ impl PluginRegistry {
 
         // Get the plugin constructor function
         let constructor: Symbol<PluginConstructor> = unsafe {
-            library.get(b"create_plugin").map_err(|e| {
-                LociError::PluginError(format!(
-                    "Failed to find 'create_plugin' symbol: {}",
-                    e
-                ))
-            })?
+            // Preferred symbol for explicit opaque ABI.
+            match library.get(b"create_plugin_v1") {
+                Ok(sym) => sym,
+                Err(_) => {
+                    // Backward compatibility fallback for old plugin naming.
+                    library.get(b"create_plugin").map_err(|e| {
+                        LociError::PluginError(format!(
+                            "Failed to find dynamic constructor symbol ('create_plugin_v1' or 'create_plugin'): {}",
+                            e
+                        ))
+                    })?
+                }
+            }
         };
 
-        // Create the plugin instance with safety checks
-        let plugin_ptr = unsafe { constructor() };
-        
-        // Validate pointer before using it
-        if plugin_ptr.is_null() {
+        // Create plugin instance and validate opaque payload.
+        let plugin_opaque = unsafe { constructor() };
+        let mut plugin = unsafe { dynamic_plugin_from_opaque(plugin_opaque) }.ok_or_else(|| {
+            LociError::PluginError(
+                "Plugin constructor returned invalid plugin payload".to_string(),
+            )
+        })?;
+
+        if plugin.name().is_empty() {
             return Err(LociError::PluginError(
-                "Plugin constructor returned null pointer".to_string()
+                "Plugin returned empty name".to_string(),
             ));
         }
-        
-        let mut plugin: Box<dyn Plugin> = unsafe { Box::from_raw(plugin_ptr) };
 
         // Initialize the plugin
         plugin.init()?;
@@ -300,6 +331,7 @@ impl PluginRegistry {
 
         if self.static_plugins.contains_key(&name)
             || self.dynamic_plugins.contains_key(&name)
+            || self.wasm_plugins.contains_key(&name)
         {
             return Err(LociError::PluginError(format!(
                 "Plugin '{}' already registered",
@@ -557,7 +589,66 @@ impl PluginRegistry {
             ));
         }
 
+        // Keep list order deterministic for CLI/tests and plugin chain predictability.
+        result.sort_by(|a, b| a.0.cmp(&b.0));
         result
+    }
+
+    /// List plugins with richer runtime metadata for integrations.
+    pub fn list_detailed(&self) -> Vec<PluginRuntimeInfo> {
+        let mut result = Vec::new();
+
+        for (name, plugin) in &self.static_plugins {
+            result.push(PluginRuntimeInfo {
+                name: name.clone(),
+                version: plugin.version().to_string(),
+                enabled: self.is_enabled(name),
+                plugin_type: PluginType::Static.as_str().to_string(),
+                source: None,
+                hot_reloadable: false,
+            });
+        }
+
+        for (name, dynamic) in &self.dynamic_plugins {
+            result.push(PluginRuntimeInfo {
+                name: name.clone(),
+                version: dynamic.plugin.version().to_string(),
+                enabled: self.is_enabled(name),
+                plugin_type: PluginType::Dynamic.as_str().to_string(),
+                source: dynamic
+                    .config
+                    .library_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+                hot_reloadable: true,
+            });
+        }
+
+        for (name, wasm) in &self.wasm_plugins {
+            result.push(PluginRuntimeInfo {
+                name: name.clone(),
+                version: wasm.version().to_string(),
+                enabled: self.is_enabled(name),
+                plugin_type: PluginType::Wasm.as_str().to_string(),
+                source: Some(wasm.config().wasm_path.to_string_lossy().to_string()),
+                hot_reloadable: true,
+            });
+        }
+
+        result.sort_by(|a, b| a.name.cmp(&b.name));
+        result
+    }
+
+    /// Query one plugin by name with rich metadata.
+    pub fn get_info(&self, name: &str) -> Option<PluginRuntimeInfo> {
+        self.list_detailed().into_iter().find(|p| p.name == name)
+    }
+
+    /// Check if plugin exists in current registry.
+    pub fn contains(&self, name: &str) -> bool {
+        self.static_plugins.contains_key(name)
+            || self.dynamic_plugins.contains_key(name)
+            || self.wasm_plugins.contains_key(name)
     }
 
     /// List only enabled plugins
@@ -587,6 +678,46 @@ impl PluginRegistry {
     /// Get count of WASM plugins
     pub fn count_wasm(&self) -> usize {
         self.wasm_plugins.len()
+    }
+
+    /// Unified unload entrypoint for hot-swappable plugin types.
+    pub fn unload(&mut self, name: &str) -> Result<()> {
+        if self.dynamic_plugins.contains_key(name) {
+            return self.unload_dynamic_plugin(name);
+        }
+        if self.wasm_plugins.contains_key(name) {
+            return self.unload_wasm_plugin(name);
+        }
+        if self.static_plugins.contains_key(name) {
+            return Err(LociError::PluginError(format!(
+                "Static plugin '{}' cannot be unloaded at runtime (disable it instead)",
+                name
+            )));
+        }
+        Err(LociError::PluginError(format!(
+            "Plugin '{}' not found",
+            name
+        )))
+    }
+
+    /// Unified reload entrypoint for hot-swappable plugin types.
+    pub fn reload(&mut self, name: &str) -> Result<()> {
+        if self.dynamic_plugins.contains_key(name) {
+            return self.reload_dynamic_plugin(name);
+        }
+        if self.wasm_plugins.contains_key(name) {
+            return self.reload_wasm_plugin(name);
+        }
+        if self.static_plugins.contains_key(name) {
+            return Err(LociError::PluginError(format!(
+                "Static plugin '{}' cannot be hot-reloaded",
+                name
+            )));
+        }
+        Err(LociError::PluginError(format!(
+            "Plugin '{}' not found",
+            name
+        )))
     }
 
     /// Apply pre-generate hooks (only enabled plugins)
@@ -824,5 +955,23 @@ mod tests {
 
         // Cleanup
         let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_registry_detailed_info_and_unified_controls_for_static() {
+        let mut registry = PluginRegistry::new();
+        registry.register_static(TestPlugin::new("test_static")).unwrap();
+
+        let info = registry.get_info("test_static").expect("info should exist");
+        assert_eq!(info.plugin_type, "static");
+        assert!(!info.hot_reloadable);
+        assert!(info.source.is_none());
+        assert!(registry.contains("test_static"));
+
+        let unload_err = registry.unload("test_static").unwrap_err();
+        assert!(format!("{unload_err}").contains("cannot be unloaded"));
+
+        let reload_err = registry.reload("test_static").unwrap_err();
+        assert!(format!("{reload_err}").contains("cannot be hot-reloaded"));
     }
 }

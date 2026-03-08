@@ -50,9 +50,18 @@ fn test_timeout_clamping() {
         .with_max_timeout(Duration::from_millis(500));
 
     // Test clamping
-    assert_eq!(config.clamp_timeout(Duration::from_millis(50)), Duration::from_millis(100));
-    assert_eq!(config.clamp_timeout(Duration::from_millis(1000)), Duration::from_millis(500));
-    assert_eq!(config.clamp_timeout(Duration::from_millis(300)), Duration::from_millis(300));
+    assert_eq!(
+        config.clamp_timeout(Duration::from_millis(50)),
+        Duration::from_millis(100)
+    );
+    assert_eq!(
+        config.clamp_timeout(Duration::from_millis(1000)),
+        Duration::from_millis(500)
+    );
+    assert_eq!(
+        config.clamp_timeout(Duration::from_millis(300)),
+        Duration::from_millis(300)
+    );
 }
 
 #[test]
@@ -115,9 +124,7 @@ fn test_resource_manager() {
 
 #[test]
 fn test_concurrency_manager() {
-    let manager = ConcurrencyManager::with_config(
-        ConcurrencyConfig::new().with_max_concurrent(2)
-    );
+    let manager = ConcurrencyManager::with_config(ConcurrencyConfig::new().with_max_concurrent(2));
 
     let guard1 = manager.acquire().unwrap();
     assert_eq!(manager.active_operations(), 1);

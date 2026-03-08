@@ -132,23 +132,15 @@ fn test_capability_4_session_communication() {
 
     // Test 3: Control messages
     println!("\n测试控制消息:");
-    bus.send(
-        s1,
-        s2,
-        SessionMessage::Control(ControlMessage::Ping),
-    )
-    .unwrap();
+    bus.send(s1, s2, SessionMessage::Control(ControlMessage::Ping))
+        .unwrap();
 
     if let Some((from, msg)) = bus.try_recv(s2).unwrap() {
         match msg {
             SessionMessage::Control(ControlMessage::Ping) => {
                 println!("  S2 收到 Ping，发送 Pong");
-                bus.send(
-                    s2,
-                    from,
-                    SessionMessage::Control(ControlMessage::Pong),
-                )
-                .unwrap();
+                bus.send(s2, from, SessionMessage::Control(ControlMessage::Pong))
+                    .unwrap();
             }
             _ => panic!("Expected ping"),
         }
@@ -230,7 +222,10 @@ fn test_capability_5_paged_kv_cache() {
     assert_eq!(session_cache.num_tokens(), 100);
     assert_eq!(session_cache.num_blocks(), 4);
     println!("  ✓ 添加 100 tokens");
-    println!("    分配了 {} 个 blocks (每block 32 tokens)", session_cache.num_blocks());
+    println!(
+        "    分配了 {} 个 blocks (每block 32 tokens)",
+        session_cache.num_blocks()
+    );
 
     // Test prefix sharing
     println!("\n测试Prefix共享:");

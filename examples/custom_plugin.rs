@@ -10,8 +10,8 @@
 //! Run with:
 //! cargo run --example custom_plugin -- -m <model_path> -p "Your prompt"
 
-use loci::prelude::*;
 use loci::plugin::Plugin;
+use loci::prelude::*;
 use std::path::PathBuf;
 
 /// Example plugin: Adds Markdown formatting to responses
@@ -35,7 +35,10 @@ impl Plugin for MarkdownFormatterPlugin {
     }
 
     fn init(&mut self) -> Result<()> {
-        println!("[MarkdownFormatter] Initializing plugin v{}", self.version());
+        println!(
+            "[MarkdownFormatter] Initializing plugin v{}",
+            self.version()
+        );
         Ok(())
     }
 
@@ -45,10 +48,7 @@ impl Plugin for MarkdownFormatterPlugin {
         }
 
         // Wrap prompt in a structured format
-        let formatted = format!(
-            "**User Query:**\n{}\n\n**Assistant Response:**\n",
-            prompt
-        );
+        let formatted = format!("**User Query:**\n{}\n\n**Assistant Response:**\n", prompt);
         Ok(formatted)
     }
 
@@ -120,10 +120,7 @@ struct ContentFilterPlugin {
 impl ContentFilterPlugin {
     fn new() -> Self {
         Self {
-            blocked_words: vec![
-                "badword1".to_string(),
-                "badword2".to_string(),
-            ],
+            blocked_words: vec!["badword1".to_string(), "badword2".to_string()],
         }
     }
 }
@@ -203,8 +200,13 @@ fn main() -> anyhow::Result<()> {
     // List registered plugins
     let plugins = engine.plugin_manager().list();
     println!("Registered {} plugins:", plugins.len());
-    for (name, version) in plugins {
-        println!("  - {} (v{})", name, version);
+    for (name, version, enabled) in plugins {
+        println!(
+            "  - {} (v{}) [{}]",
+            name,
+            version,
+            if enabled { "enabled" } else { "disabled" }
+        );
     }
 
     println!("\n--- Generating Response ---\n");

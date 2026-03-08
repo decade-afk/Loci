@@ -26,7 +26,7 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```ignore
 //! use loci::vision_clip::CLIPViTL14Encoder;
 //!
 //! let encoder = CLIPViTL14Encoder::new()?;

@@ -183,7 +183,8 @@ mod multi_plugin_tests {
 
         // Create fake logits data
         let mut logits_data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
-        let mut logits = unsafe { LogitsView::from_raw(logits_data.as_mut_ptr(), logits_data.len()) };
+        let mut logits =
+            unsafe { LogitsView::from_raw(logits_data.as_mut_ptr(), logits_data.len()) };
 
         let context = vec![1i32, 2, 3];
 

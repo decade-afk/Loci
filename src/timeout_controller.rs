@@ -102,6 +102,7 @@ impl TimeoutStats {
 }
 
 /// Timeout controller for managing operation timeouts
+#[derive(Clone)]
 pub struct TimeoutController {
     config: TimeoutConfig,
     stats: Arc<parking_lot::Mutex<TimeoutStats>>,
@@ -193,7 +194,7 @@ impl TimeoutController {
         
         // If average completion time is much higher than estimated, 
         // timeout is likely
-        avg_ms > 0.0 && estimated_duration.as_millis() as f64 < avg_ms * 0.5
+        avg_ms > 0.0 && (estimated_duration.as_millis() as f64) < avg_ms * 0.5
     }
 
     /// Get recommended timeout based on history

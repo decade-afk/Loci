@@ -146,10 +146,10 @@ fn demonstrate_hook_suspension() {
                 println!("→ Tool executed, result: {}", result);
                 println!("→ Ready to resume with result");
             }
-        },
+        }
         HookControl::Continue => {
             println!("→ Continue normal generation");
-        },
-        _ => {},
+        }
+        _ => {}
     }
 }

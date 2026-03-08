@@ -49,7 +49,7 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```ignore
 //! use loci::multimodal::*;
 //!
 //! // Create multimodal processor

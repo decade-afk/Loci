@@ -95,6 +95,7 @@ struct QueuedRequest {
 }
 
 /// Concurrency manager for handling concurrent operations
+#[derive(Clone)]
 pub struct ConcurrencyManager {
     config: ConcurrencyConfig,
     active_ops: Arc<Mutex<u32>>,
@@ -169,7 +170,9 @@ impl ConcurrencyManager {
 
                 return Ok(ConcurrencyGuard {
                     active_ops: self.active_ops.clone(),
+                    queue: self.queue.clone(),
                     stats: self.stats.clone(),
+                    condvar: self.condvar.clone(),
                 });
             }
         }
@@ -266,24 +269,10 @@ impl ConcurrencyManager {
 
         Ok(ConcurrencyGuard {
             active_ops: self.active_ops.clone(),
+            queue: self.queue.clone(),
             stats: self.stats.clone(),
+            condvar: self.condvar.clone(),
         })
-    }
-
-    /// Release a slot (called by guard)
-    fn release(&self) {
-        let mut active = self.active_ops.lock();
-        if *active > 0 {
-            *active -= 1;
-        }
-
-        // Notify next queued request
-        self.condvar.notify_one();
-
-        let mut queue = self.queue.lock();
-        let mut stats = self.stats.lock();
-        stats.active_ops = *active;
-        stats.queued_ops = queue.len();
     }
 
     /// Get concurrency statistics
@@ -322,7 +311,9 @@ impl Default for ConcurrencyManager {
 /// Concurrency guard that releases slot when dropped
 pub struct ConcurrencyGuard {
     active_ops: Arc<Mutex<u32>>,
+    queue: Arc<Mutex<VecDeque<QueuedRequest>>>,
     stats: Arc<Mutex<ConcurrencyStats>>,
+    condvar: Arc<Condvar>,
 }
 
 impl Drop for ConcurrencyGuard {
@@ -332,22 +323,28 @@ impl Drop for ConcurrencyGuard {
             *active -= 1;
         }
         
+        self.condvar.notify_one();
+
+        let queued_ops = self.queue.lock().len();
         let mut stats = self.stats.lock();
         stats.active_ops = *active;
+        stats.queued_ops = queued_ops;
     }
 }
 
 /// Rate limiter for operations per second
 struct RateLimiter {
-    tokens: u32,
+    tokens: f64,
     last_update: Instant,
+    initialized: bool,
 }
 
 impl RateLimiter {
     fn new() -> Self {
         Self {
-            tokens: 0,
+            tokens: 0.0,
             last_update: Instant::now(),
+            initialized: false,
         }
     }
 
@@ -357,15 +354,23 @@ impl RateLimiter {
         }
 
         let now = Instant::now();
+        let max_tokens = max_ops as f64;
+        if !self.initialized {
+            // Allow an initial burst up to max_ops immediately.
+            self.tokens = max_tokens;
+            self.last_update = now;
+            self.initialized = true;
+        }
+
         let elapsed = now.duration_since(self.last_update);
         
         // Refill tokens based on elapsed time
-        let new_tokens = (elapsed.as_secs_f64() * max_ops as f64) as u32;
-        self.tokens = (self.tokens + new_tokens).min(max_ops);
+        let new_tokens = elapsed.as_secs_f64() * max_tokens;
+        self.tokens = (self.tokens + new_tokens).min(max_tokens);
         self.last_update = now;
 
-        if self.tokens > 0 {
-            self.tokens -= 1;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
             true
         } else {
             false
@@ -406,7 +411,7 @@ impl<T> ConnectionPool<T> {
     fn populate_min(&self) -> Result<()> {
         let mut pool = self.pool.lock();
         while pool.len() < self.min_size {
-            let conn = (self.create_fn)();
+            let conn = (self.create_fn)()?;
             pool.push_back(conn);
             
             let mut stats = self.stats.lock();
@@ -433,7 +438,7 @@ impl<T> ConnectionPool<T> {
         } else {
             // Create new connection if under max
             if pool.len() < self.max_size {
-                let conn = (self.create_fn)();
+                let conn = (self.create_fn)()?;
                 let mut stats = self.stats.lock();
                 stats.active += 1;
                 stats.total_created += 1;
@@ -534,12 +539,15 @@ mod tests {
         let guard2 = manager.acquire().unwrap();
         assert_eq!(manager.active_operations(), 2);
 
-        // Third acquire should still work if queue is available
-        let guard3 = manager.acquire().unwrap();
-        assert_eq!(manager.active_operations(), 3);
-
         drop(guard1);
+        assert_eq!(manager.active_operations(), 1);
+
+        let guard3 = manager.acquire().unwrap();
         assert_eq!(manager.active_operations(), 2);
+
+        drop(guard2);
+        drop(guard3);
+        assert_eq!(manager.active_operations(), 0);
     }
 
     #[test]

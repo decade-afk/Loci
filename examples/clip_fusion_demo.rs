@@ -29,7 +29,10 @@ fn main() -> Result<()> {
 
     // Create a sample image (in real usage, load from file)
     let image = create_sample_image()?;
-    println!("✓ Sample image created: {}×{} RGB", image.width, image.height);
+    println!(
+        "✓ Sample image created: {}×{} RGB",
+        image.width, image.height
+    );
 
     // Encode image to embeddings
     println!("\nEncoding image with CLIP ViT-L/14...");
@@ -43,7 +46,10 @@ fn main() -> Result<()> {
 
     // Demonstrate accessing embeddings
     let cls_token = image_embedding.cls_token();
-    println!("  - CLS token embedding (first 5 values): {:?}", &cls_token[..5]);
+    println!(
+        "  - CLS token embedding (first 5 values): {:?}",
+        &cls_token[..5]
+    );
 
     // ========================================================================
     // Feature 2: Zero-Copy Image Embedding Injection
@@ -57,7 +63,10 @@ fn main() -> Result<()> {
     let _embedding_clone3 = image_embedding.clone();
 
     println!("✓ Created 3 clones of image embedding (zero-copy)");
-    println!("  - Original Arc strong count: {}", Arc::strong_count(image_embedding.data()));
+    println!(
+        "  - Original Arc strong count: {}",
+        Arc::strong_count(image_embedding.data())
+    );
     println!("  - Memory copied: 0 bytes");
     println!("  - All clones share the same underlying data");
 
@@ -71,8 +80,12 @@ fn main() -> Result<()> {
     println!("✓ Verified: All clones point to same memory address");
 
     // Access different parts without copying
-    let patch_0 = embedding_clone1.patch_at(0).ok_or(LociError::InvalidArgument("Invalid patch index".into()))?;
-    let patch_1 = embedding_clone2.patch_at(1).ok_or(LociError::InvalidArgument("Invalid patch index".into()))?;
+    let patch_0 = embedding_clone1
+        .patch_at(0)
+        .ok_or(LociError::InvalidArgument("Invalid patch index".into()))?;
+    let patch_1 = embedding_clone2
+        .patch_at(1)
+        .ok_or(LociError::InvalidArgument("Invalid patch index".into()))?;
     println!("✓ Accessed individual patch embeddings (zero-copy slicing)");
     println!("  - Patch 0 (first 3 values): {:?}", &patch_0[..3]);
     println!("  - Patch 1 (first 3 values): {:?}", &patch_1[..3]);
@@ -136,10 +149,8 @@ fn main() -> Result<()> {
     };
 
     let fusion_interleaved = MultimodalFusion::new(fusion_config_interleaved);
-    let fused_interleaved = fusion_interleaved.fuse_with_vision(
-        text_tokens.clone(),
-        embedding_clone1.clone(),
-    )?;
+    let fused_interleaved =
+        fusion_interleaved.fuse_with_vision(text_tokens.clone(), embedding_clone1.clone())?;
 
     println!("✓ Fused sequence created (interleaved mode)");
     println!("  - Total tokens: {}", fused_interleaved.len());
@@ -157,10 +168,8 @@ fn main() -> Result<()> {
     };
 
     let fusion_suffix = MultimodalFusion::new(fusion_config_suffix);
-    let fused_suffix = fusion_suffix.fuse_with_vision(
-        text_tokens.clone(),
-        embedding_clone2.clone(),
-    )?;
+    let fused_suffix =
+        fusion_suffix.fuse_with_vision(text_tokens.clone(), embedding_clone2.clone())?;
 
     println!("✓ Fused sequence created (suffix mode)");
     println!("  - Total tokens: {}", fused_suffix.len());
@@ -185,8 +194,10 @@ fn main() -> Result<()> {
 
     println!("✓ Batch encoded successfully");
     println!("  - Images processed: {}", batch_embeddings.len());
-    println!("  - Total embedding vectors: {}",
-             batch_embeddings.len() * batch_embeddings[0].seq_len());
+    println!(
+        "  - Total embedding vectors: {}",
+        batch_embeddings.len() * batch_embeddings[0].seq_len()
+    );
 
     // ========================================================================
     // Real-world Usage Example
@@ -225,14 +236,8 @@ fn main() -> Result<()> {
     println!("  - Total tokens: {}", final_sequence.len());
     println!("  - Embedding dimension: {}", 1024);
 
-    // Get actual embedding data (still zero-copy via Arc)
-    if let Some(emb) = final_sequence.embedding_at(0) {
-        println!("  - Vision embeddings stored: Yes");
-        println!("  - First token embedding (sample): [{:.4}, {:.4}, {:.4}, ...]",
-                 emb[0], emb[1], emb[2]);
-    } else {
-        println!("  - Vision embeddings stored: No (or token 0 is not a vision token)");
-    }
+    // Current public API exposes fused token structure directly.
+    println!("  - First fused token: {:?}", final_sequence.token_at(0));
 
     // ========================================================================
     // Summary
@@ -245,8 +250,10 @@ fn main() -> Result<()> {
     println!("✓ Production ready: All features integrated");
 
     println!("\nMemory efficiency:");
-    println!("  - Image embedding size: {:.2} MB",
-             (image_embedding.seq_len() * image_embedding.dim() * 4) as f32 / 1_048_576.0);
+    println!(
+        "  - Image embedding size: {:.2} MB",
+        (image_embedding.seq_len() * image_embedding.dim() * 4) as f32 / 1_048_576.0
+    );
     println!("  - Clones created: 3");
     println!("  - Additional memory used: 0 bytes (zero-copy)");
 

@@ -57,7 +57,10 @@ fn main() {
             matched_tokens.len(),
             matched_blocks.len()
         );
-        println!("✓ Prefix cache hit! Reusing {} blocks", matched_blocks.len());
+        println!(
+            "✓ Prefix cache hit! Reusing {} blocks",
+            matched_blocks.len()
+        );
     }
     println!();
 
@@ -78,18 +81,12 @@ fn main() {
 
     // Query with Prompt A
     if let Some((matched_tokens, matched_blocks)) = cache.match_prefix(&tokens_a) {
-        println!(
-            "Query Prompt A → Matched {} blocks",
-            matched_blocks.len()
-        );
+        println!("Query Prompt A → Matched {} blocks", matched_blocks.len());
     }
 
     // Query with Prompt B
     if let Some((matched_tokens, matched_blocks)) = cache.match_prefix(&tokens_b) {
-        println!(
-            "Query Prompt B → Matched {} blocks",
-            matched_blocks.len()
-        );
+        println!("Query Prompt B → Matched {} blocks", matched_blocks.len());
     }
     println!();
 
@@ -127,7 +124,9 @@ fn main() {
 
     // Simulate multiple "sessions" accessing the cache
     for session_id in 0..3_u64 {
-        let tokens: Vec<TokenId> = (2000 + session_id * 10..2032 + session_id * 10).map(|x| x as u32).collect();
+        let tokens: Vec<TokenId> = (2000 + session_id * 10..2032 + session_id * 10)
+            .map(|x| x as u32)
+            .collect();
 
         // Try to match prefix
         if let Some((_matched_tokens, matched_blocks)) = shared_cache.match_prefix(&tokens) {

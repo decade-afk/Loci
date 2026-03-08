@@ -36,3 +36,7 @@ dist/
 # Temporary files
 *.tmp
 *.log
+.tmp_pip/
+.pip_cache/
+.hf_cache/
+examples/

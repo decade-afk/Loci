@@ -20,7 +20,6 @@ use crate::plugin::PluginManager;
 use crate::rag::{InMemoryRagPlugin, RagDocument, RagPlugin};
 use crate::resource_manager::{ResourceLimits, ResourceManager};
 use crate::timeout_controller::{TimeoutConfig, TimeoutController, TimeoutGuard};
-use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -38,6 +37,8 @@ pub struct GenerationParams {
     pub temperature: f32,
     /// Top-p (nucleus) sampling threshold
     pub top_p: f32,
+    /// Min-p sampling threshold
+    pub min_p: f32,
     /// Top-k sampling threshold
     pub top_k: u32,
     /// Repetition penalty
@@ -50,6 +51,7 @@ impl Default for GenerationParams {
             max_tokens: 512,
             temperature: 0.8,
             top_p: 0.95,
+            min_p: 0.0,
             top_k: 40,
             repeat_penalty: 1.1,
         }
@@ -62,6 +64,7 @@ impl From<GenerationParams> for InferenceParams {
             max_tokens: params.max_tokens,
             temperature: params.temperature,
             top_p: params.top_p,
+            min_p: params.min_p,
             top_k: params.top_k,
             repeat_penalty: params.repeat_penalty,
             ..Default::default()
@@ -87,6 +90,7 @@ pub struct InferenceEngine {
     concurrency_manager: Arc<ConcurrencyManager>,
     cache_enabled: bool,
     timeout_enabled: bool,
+    default_inference_params: InferenceParams,
 }
 
 impl InferenceEngine {
@@ -108,11 +112,19 @@ impl InferenceEngine {
     ) -> Result<Self> {
         config.validate()?;
 
-        let backend_params = BackendParams {
+        let mut backend_params = BackendParams {
             n_gpu_layers: config.n_gpu_layers,
             use_gpu: config.use_gpu,
-            options: Vec::new(),
+            options: vec![
+                ("n_ctx".to_string(), config.n_ctx.to_string()),
+                ("n_batch".to_string(), config.n_batch.to_string()),
+            ],
         };
+        if let Some(n_threads) = config.n_threads {
+            backend_params
+                .options
+                .push(("n_threads".to_string(), n_threads.to_string()));
+        }
 
         let model = backend_registry.load_model(backend_name, &config.model_path, backend_params)?;
 
@@ -130,6 +142,12 @@ impl InferenceEngine {
             concurrency_manager: Arc::new(ConcurrencyManager::new()),
             cache_enabled: true,
             timeout_enabled: true,
+            default_inference_params: InferenceParams {
+                n_ctx: config.n_ctx,
+                n_batch: config.n_batch,
+                n_threads: config.n_threads,
+                ..Default::default()
+            },
         })
     }
 
@@ -165,11 +183,19 @@ impl InferenceEngine {
         config: ModelConfig,
     ) -> Result<()> {
         config.validate()?;
-        let backend_params = BackendParams {
+        let mut backend_params = BackendParams {
             n_gpu_layers: config.n_gpu_layers,
             use_gpu: config.use_gpu,
-            options: Vec::new(),
+            options: vec![
+                ("n_ctx".to_string(), config.n_ctx.to_string()),
+                ("n_batch".to_string(), config.n_batch.to_string()),
+            ],
         };
+        if let Some(n_threads) = config.n_threads {
+            backend_params
+                .options
+                .push(("n_threads".to_string(), n_threads.to_string()));
+        }
 
         let model = self
             .backend_registry
@@ -177,6 +203,9 @@ impl InferenceEngine {
 
         self.model = model;
         self.backend_name = backend_name.to_string();
+        self.default_inference_params.n_ctx = config.n_ctx;
+        self.default_inference_params.n_batch = config.n_batch;
+        self.default_inference_params.n_threads = config.n_threads;
         Ok(())
     }
 
@@ -303,7 +332,7 @@ impl InferenceEngine {
 
     /// Generate text from a prompt (legacy API).
     pub fn generate(&mut self, prompt: &str, params: GenerationParams) -> Result<String> {
-        let inference_params = InferenceParams::from(params);
+        let inference_params = self.generation_params_to_inference(params);
         self.generate_with_params(prompt, &inference_params)
     }
 
@@ -349,7 +378,7 @@ impl InferenceEngine {
     where
         F: FnMut(&str) -> bool,
     {
-        let inference_params = InferenceParams::from(params);
+        let inference_params = self.generation_params_to_inference(params);
         self.generate_stream_with_params(prompt, &inference_params, callback)
     }
 
@@ -553,7 +582,8 @@ impl InferenceEngine {
         }
 
         let timeout_context = self.timeout_controller.create_context(Some(timeout))?;
-        let _guard = TimeoutGuard::new(&self.timeout_controller);
+        let timeout_controller = self.timeout_controller.clone();
+        let _guard = TimeoutGuard::new(&timeout_controller);
 
         // Check cache first
         if self.cache_enabled {
@@ -600,6 +630,20 @@ impl InferenceEngine {
         Ok(final_response)
     }
 
+    fn generation_params_to_inference(&self, params: GenerationParams) -> InferenceParams {
+        InferenceParams {
+            n_ctx: self.default_inference_params.n_ctx,
+            n_batch: self.default_inference_params.n_batch,
+            n_threads: self.default_inference_params.n_threads,
+            max_tokens: params.max_tokens,
+            temperature: params.temperature,
+            top_p: params.top_p,
+            min_p: params.min_p,
+            top_k: params.top_k,
+            repeat_penalty: params.repeat_penalty,
+        }
+    }
+
     // ==================== Enhanced Streaming ====================
 
     /// Generate text with streaming output and timeout control
@@ -624,7 +668,8 @@ impl InferenceEngine {
         }
 
         let timeout_context = self.timeout_controller.create_context(Some(timeout))?;
-        let _guard = TimeoutGuard::new(&self.timeout_controller);
+        let timeout_controller = self.timeout_controller.clone();
+        let _guard = TimeoutGuard::new(&timeout_controller);
 
         // Acquire resources
         let _resource_guard = self.resource_manager.acquire()?;

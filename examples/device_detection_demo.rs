@@ -43,8 +43,10 @@ fn main() -> Result<()> {
     // 3. Automatic device selection
     println!("3. Automatic Device Selection:");
     let auto_config = selector.auto_select();
-    println!("   Selected: {} (Device ID: {})",
-        auto_config.device_type, auto_config.device_id);
+    println!(
+        "   Selected: {} (Device ID: {})",
+        auto_config.device_type, auto_config.device_id
+    );
     println!("   GPU Layers: {}\n", auto_config.n_gpu_layers);
 
     // 4. Model size-based recommendation
@@ -60,8 +62,10 @@ fn main() -> Result<()> {
 
     for (name, size) in model_sizes {
         let config = selector.recommend_for_model(size);
-        println!("   {} ({} GB) -> {} (Device {}, {} GPU layers)",
-            name, size, config.device_type, config.device_id, config.n_gpu_layers);
+        println!(
+            "   {} ({} GB) -> {} (Device {}, {} GPU layers)",
+            name, size, config.device_type, config.device_id, config.n_gpu_layers
+        );
     }
 
     println!("\n5. Usage Examples:\n");

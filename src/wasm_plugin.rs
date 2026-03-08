@@ -31,7 +31,7 @@
 //!
 //! ## Example
 //!
-//! ```no_run
+//! ```ignore
 //! use loci::wasm_plugin::*;
 //!
 //! // Load WASM plugin

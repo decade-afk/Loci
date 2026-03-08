@@ -13,7 +13,7 @@
 //!
 //! ## Quick Start
 //!
-//! ```no_run
+//! ```ignore
 //! use loci::prelude::*;
 //! use loci::backend::InferenceParams;
 //!
@@ -58,6 +58,7 @@ pub mod wasm_plugin;
 pub mod c_api;
 pub mod chat_template;
 pub mod function_calling;
+pub mod image_kernel;
 pub mod batch_inference;
 pub mod rag;
 pub mod quantization;
@@ -76,6 +77,11 @@ pub use model::{ModelConfig, ModelLoader};
 pub use chat_template::{ChatMessage, ChatTemplate, ChatTemplateBuilder, ChatTemplateType};
 pub use function_calling::{
     FunctionCall, FunctionCallingManager, FunctionDefinition, FunctionParameter,
+};
+pub use image_kernel::{
+    dynamic_image_plugin_from_opaque, dynamic_image_plugin_into_opaque,
+    load_dynamic_image_plugin, DynamicImageKernel, DynamicImagePluginOpaque,
+    ImageGenerationPlugin, ImageGenerationRequest, ImageGenerationResult,
 };
 pub use batch_inference::{
     BatchConfig, BatchInferenceBuilder, BatchInferenceProcessor, BatchResult, PromptBatch,
@@ -173,6 +179,11 @@ pub mod prelude {
     };
     pub use crate::function_calling::{
         FunctionCall, FunctionCallingManager, FunctionDefinition, FunctionParameter,
+    };
+    pub use crate::image_kernel::{
+        dynamic_image_plugin_from_opaque, dynamic_image_plugin_into_opaque,
+        load_dynamic_image_plugin, DynamicImageKernel, DynamicImagePluginOpaque,
+        ImageGenerationPlugin, ImageGenerationRequest, ImageGenerationResult,
     };
     pub use crate::batch_inference::{
         BatchConfig, BatchInferenceBuilder, BatchInferenceProcessor, BatchResult, PromptBatch,

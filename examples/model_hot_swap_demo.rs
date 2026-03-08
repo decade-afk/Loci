@@ -111,7 +111,9 @@ fn main() {
         scale: 0.8,
     };
 
-    registry.merge_lora(model2, lora_code).expect("Failed to merge code LoRA");
+    registry
+        .merge_lora(model2, lora_code)
+        .expect("Failed to merge code LoRA");
 
     if let Some(m) = registry.get_model(model2) {
         let loras = m.active_loras();

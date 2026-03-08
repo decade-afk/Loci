@@ -7,9 +7,13 @@ const LLAMA_CPP_PATH: &str = "deps/llama.cpp";
 fn main() {
     // Tell Cargo to rerun this build script when the llama.cpp dependency changes
     println!("cargo:rerun-if-changed={}", LLAMA_CPP_PATH);
+    println!("cargo:rerun-if-changed=src/ffi_shim.c");
+    println!("cargo:rerun-if-env-changed=LOCI_CPU_OPT");
 
     // Get the output directory where generated files should be placed
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    let target = env::var("TARGET").unwrap_or_default();
 
     // Configure CMake to build llama.cpp with specific options
     let mut config = cmake::Config::new(LLAMA_CPP_PATH);
@@ -28,8 +32,56 @@ fn main() {
         .define("LLAMA_CURL", "OFF")
         // Disable native optimizations to improve portability
         .define("GGML_NATIVE", "OFF")
-        // Enable OpenMP for CPU parallelization
-        .define("GGML_OPENMP", "ON");
+        // Disable OpenMP for better Windows MinGW runtime stability.
+        .define("GGML_OPENMP", "OFF");
+
+    // Windows MinGW optimization tiers (stability first):
+    // - safe : disable SIMD extensions
+    // - sse42: enable only SSE4.2
+    // - avx  : enable AVX (+SSE4.2), keep AVX2/FMA/F16C/BMI2 off
+    // - avx2 : enable AVX2 stack (highest perf, may be less stable on some setups)
+    if target.contains("windows-gnu") {
+        let opt = env::var("LOCI_CPU_OPT").unwrap_or_else(|_| "sse42".to_string());
+        match opt.as_str() {
+            "safe" => {
+                config
+                    .define("GGML_SSE42", "OFF")
+                    .define("GGML_AVX", "OFF")
+                    .define("GGML_AVX2", "OFF")
+                    .define("GGML_FMA", "OFF")
+                    .define("GGML_F16C", "OFF")
+                    .define("GGML_BMI2", "OFF");
+            }
+            "avx" => {
+                config
+                    .define("GGML_SSE42", "ON")
+                    .define("GGML_AVX", "ON")
+                    .define("GGML_AVX2", "OFF")
+                    .define("GGML_FMA", "OFF")
+                    .define("GGML_F16C", "OFF")
+                    .define("GGML_BMI2", "OFF");
+            }
+            "avx2" => {
+                config
+                    .define("GGML_SSE42", "ON")
+                    .define("GGML_AVX", "ON")
+                    .define("GGML_AVX2", "ON")
+                    .define("GGML_FMA", "ON")
+                    .define("GGML_F16C", "ON")
+                    .define("GGML_BMI2", "ON");
+            }
+            _ => {
+                // Default to a balanced, safer tier.
+                config
+                    .define("GGML_SSE42", "ON")
+                    .define("GGML_AVX", "OFF")
+                    .define("GGML_AVX2", "OFF")
+                    .define("GGML_FMA", "OFF")
+                    .define("GGML_F16C", "OFF")
+                    .define("GGML_BMI2", "OFF");
+            }
+        }
+    }
 
     // Configure GPU backends based on feature flags
     #[cfg(feature = "cuda")]
@@ -54,7 +106,7 @@ fn main() {
     #[cfg(feature = "rocm")]
     {
         println!("cargo:warning=Building with ROCm support");
-        config.define("GGML_HIPBLAS", "ON");  // ROCm uses HIP BLAS
+        config.define("GGML_HIPBLAS", "ON"); // ROCm uses HIP BLAS
     }
 
     #[cfg(feature = "opencl")]
@@ -65,7 +117,6 @@ fn main() {
 
     // Fix for "file too big" error on Windows
     // MinGW uses -Wa,-mbig-obj, MSVC uses /bigobj
-    let target = env::var("TARGET").unwrap_or_default();
     if target.contains("windows-gnu") {
         // MinGW toolchain
         config.cxxflag("-Wa,-mbig-obj");
@@ -77,6 +128,13 @@ fn main() {
     }
 
     let dst = config.build();
+
+    // Build a small C shim to avoid by-value FFI calls for llama_batch on Windows.
+    cc::Build::new()
+        .file("src/ffi_shim.c")
+        .include("deps/llama.cpp/include")
+        .include("deps/llama.cpp/ggml/include")
+        .compile("loci_ffi_shim");
 
     // Specify library search paths for linking
     println!("cargo:rustc-link-search=native={}/lib", dst.display());
@@ -129,8 +187,6 @@ fn link_system_libraries(target: &str) {
     if target.contains("windows-gnu") {
         // MinGW specific libraries
         println!("cargo:rustc-link-lib=dylib=stdc++");
-        println!("cargo:rustc-link-lib=dylib=gomp");
-        println!("cargo:rustc-link-lib=dylib=winpthread");
         println!("cargo:rustc-link-lib=dylib=advapi32");
     } else if target.contains("windows-msvc") {
         // MSVC specific libraries
@@ -140,6 +196,5 @@ fn link_system_libraries(target: &str) {
         // Unix-like systems (Linux, macOS, etc.)
         println!("cargo:rustc-link-lib=dylib=stdc++");
         println!("cargo:rustc-link-lib=dylib=m");
-        println!("cargo:rustc-link-lib=dylib=gomp");
     }
 }

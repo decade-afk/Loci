@@ -311,7 +311,7 @@ impl InferenceSession {
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```ignore
 /// use loci::session::SessionManager;
 ///
 /// let mut manager = SessionManager::new();

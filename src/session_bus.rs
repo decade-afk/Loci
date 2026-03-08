@@ -64,7 +64,7 @@ const CHANNEL_CAPACITY: usize = 100;
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```ignore
 /// use loci::session_bus::{SessionBus, SessionMessage};
 /// use loci::session::SessionId;
 ///

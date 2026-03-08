@@ -3,8 +3,8 @@
 //! This example demonstrates plugin functionality without requiring a full model.
 //! It tests plugin registration, enable/disable, and text processing.
 
-use loci::plugin::{Plugin, PluginManager};
 use loci::error::Result;
+use loci::plugin::{Plugin, PluginManager};
 
 /// Test plugin 1: Adds prefix
 struct PrefixPlugin {
@@ -167,7 +167,10 @@ fn main() -> Result<()> {
     println!("8. Testing plugin unregistration:");
     println!("   Before: {} plugins", manager.count());
     manager.unregister("uppercase")?;
-    println!("   After unregister 'uppercase': {} plugins", manager.count());
+    println!(
+        "   After unregister 'uppercase': {} plugins",
+        manager.count()
+    );
     println!();
 
     println!("9. Final plugin list:");

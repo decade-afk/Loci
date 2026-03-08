@@ -11,7 +11,7 @@
  * - Streaming generation
  * - Plugin system (hot-swappable)
  * - Persistent configuration
- * - Thread-safe operations
+ * - Thread-safe serialized engine calls
  *
  * Build artifacts:
  * - Static library: libloci.a (Linux/macOS), loci.lib (Windows)
@@ -85,6 +85,9 @@ typedef struct {
  * @param token The generated token (null-terminated string)
  * @param user_data User-provided data passed through
  * @return true to continue generation, false to stop
+ *
+ * Note: callbacks should not call generation/destroy APIs on the same
+ * `LociEngine*` reentrantly. Engine calls are serialized.
  */
 typedef bool (*LociStreamCallback)(const char* token, void* user_data);
 
@@ -112,6 +115,13 @@ LociEngine* loci_engine_new(const char* model_path, uint32_t n_ctx, int32_t n_gp
  * @param temperature Sampling temperature (0.0 to 2.0, typical 0.7)
  * @return Generated text (must be freed with loci_free_string), or NULL on error
  *
+ * Current safety guard defaults to ~24 KiB UTF-8 bytes and can be configured
+ * with environment variable `LOCI_MAX_PROMPT_BYTES` (minimum 1024).
+ * Long prompts are tokenized internally in UTF-8-safe chunks for stability.
+ *
+ * If the same engine is currently executing another call, this returns NULL
+ * and `loci_get_last_error()` reports that the engine is busy.
+ *
  * @example
  * char* response = loci_generate(engine, "What is AI?", 200, 0.8f);
  * printf("%s\n", response);
@@ -125,6 +135,61 @@ char* loci_generate(
 );
 
 /**
+ * @brief Generate text from an explicit UTF-8 byte buffer
+ * @param engine Valid engine pointer
+ * @param prompt UTF-8 byte buffer
+ * @param prompt_len Prompt byte length
+ * @param max_tokens Maximum tokens to generate
+ * @param temperature Sampling temperature
+ * @return Generated text (must be freed with loci_free_string), or NULL on error
+ */
+char* loci_generate_with_len(
+    LociEngine* engine,
+    const char* prompt,
+    uint32_t prompt_len,
+    uint32_t max_tokens,
+    float temperature
+);
+
+/**
+ * @brief Generate text from a prompt and wait for engine lock if busy
+ * @param engine Valid engine pointer
+ * @param prompt Input prompt (null-terminated)
+ * @param max_tokens Maximum tokens to generate
+ * @param temperature Sampling temperature
+ * @param wait_timeout_ms Lock wait timeout in milliseconds (0 = no wait)
+ * @return Generated text (must be freed with loci_free_string), or NULL on error
+ *
+ * If waiting times out, `loci_get_last_error()` reports lock timeout.
+ */
+char* loci_generate_wait(
+    LociEngine* engine,
+    const char* prompt,
+    uint32_t max_tokens,
+    float temperature,
+    uint32_t wait_timeout_ms
+);
+
+/**
+ * @brief Generate text from explicit UTF-8 bytes and wait for engine lock if busy
+ * @param engine Valid engine pointer
+ * @param prompt UTF-8 byte buffer
+ * @param prompt_len Prompt byte length
+ * @param max_tokens Maximum tokens to generate
+ * @param temperature Sampling temperature
+ * @param wait_timeout_ms Lock wait timeout in milliseconds (0 = no wait)
+ * @return Generated text (must be freed with loci_free_string), or NULL on error
+ */
+char* loci_generate_wait_with_len(
+    LociEngine* engine,
+    const char* prompt,
+    uint32_t prompt_len,
+    uint32_t max_tokens,
+    float temperature,
+    uint32_t wait_timeout_ms
+);
+
+/**
  * @brief Generate text with streaming output
  * @param engine Valid engine pointer
  * @param prompt Input prompt (null-terminated)
@@ -133,6 +198,9 @@ char* loci_generate(
  * @param callback Function called for each generated token
  * @param user_data User data passed to callback
  * @return 0 on success, -1 on error
+ *
+ * If the same engine is currently executing another call, returns -1 and sets
+ * last error to busy.
  *
  * @example
  * bool my_callback(const char* token, void* data) {
@@ -149,6 +217,71 @@ int loci_generate_stream(
     float temperature,
     LociStreamCallback callback,
     void* user_data
+);
+
+/**
+ * @brief Stream generate from explicit UTF-8 bytes
+ * @param engine Valid engine pointer
+ * @param prompt UTF-8 byte buffer
+ * @param prompt_len Prompt byte length
+ * @param max_tokens Maximum tokens to generate
+ * @param temperature Sampling temperature
+ * @param callback Function called for each generated token
+ * @param user_data User data passed to callback
+ * @return 0 on success, -1 on error
+ */
+int loci_generate_stream_with_len(
+    LociEngine* engine,
+    const char* prompt,
+    uint32_t prompt_len,
+    uint32_t max_tokens,
+    float temperature,
+    LociStreamCallback callback,
+    void* user_data
+);
+
+/**
+ * @brief Generate text with streaming output and wait for engine lock if busy
+ * @param engine Valid engine pointer
+ * @param prompt Input prompt (null-terminated)
+ * @param max_tokens Maximum tokens to generate
+ * @param temperature Sampling temperature
+ * @param callback Function called for each generated token
+ * @param user_data User data passed to callback
+ * @param wait_timeout_ms Lock wait timeout in milliseconds (0 = no wait)
+ * @return 0 on success, -1 on error
+ */
+int loci_generate_stream_wait(
+    LociEngine* engine,
+    const char* prompt,
+    uint32_t max_tokens,
+    float temperature,
+    LociStreamCallback callback,
+    void* user_data,
+    uint32_t wait_timeout_ms
+);
+
+/**
+ * @brief Stream generate from explicit UTF-8 bytes and wait for engine lock if busy
+ * @param engine Valid engine pointer
+ * @param prompt UTF-8 byte buffer
+ * @param prompt_len Prompt byte length
+ * @param max_tokens Maximum tokens to generate
+ * @param temperature Sampling temperature
+ * @param callback Function called for each generated token
+ * @param user_data User data passed to callback
+ * @param wait_timeout_ms Lock wait timeout in milliseconds (0 = no wait)
+ * @return 0 on success, -1 on error
+ */
+int loci_generate_stream_wait_with_len(
+    LociEngine* engine,
+    const char* prompt,
+    uint32_t prompt_len,
+    uint32_t max_tokens,
+    float temperature,
+    LociStreamCallback callback,
+    void* user_data,
+    uint32_t wait_timeout_ms
 );
 
 /**
@@ -174,8 +307,26 @@ uint32_t loci_get_context_size(const LociEngine* engine);
 /**
  * @brief Destroy an inference engine and free resources
  * @param engine Engine pointer (can be NULL)
+ *
+ * This call waits for in-flight engine work to finish (up to an internal
+ * timeout). If timeout happens, the engine is not freed and
+ * `loci_get_last_error()` reports lock-timeout.
  */
 void loci_engine_free(LociEngine* engine);
+
+/**
+ * @brief Destroy an inference engine, then set caller pointer to NULL
+ * @param engine_ptr Address of engine pointer (LociEngine**)
+ *
+ * This helper reduces use-after-free/double-free risks in host applications.
+ * Pointer is set to NULL only when free succeeds.
+ *
+ * @example
+ * LociEngine* engine = loci_engine_new("model.gguf", 2048, 0);
+ * loci_engine_free_safe(&engine);
+ * // engine is now NULL
+ */
+void loci_engine_free_safe(LociEngine** engine_ptr);
 
 // ============================================================================
 // Plugin Registry API
@@ -190,15 +341,37 @@ void loci_engine_free(LociEngine* engine);
 LociPluginRegistry* loci_registry_new(void);
 
 /**
- * @brief Load a dynamic plugin from a shared library
+ * @brief Load a plugin from a file path
  * @param registry Valid registry pointer
- * @param plugin_path Path to plugin (.dll/.so/.dylib)
+ * @param plugin_path Path to plugin (.dll/.so/.dylib/.wasm)
  * @return 0 on success, -1 on error
+ *
+ * `.wasm` extension is loaded via WASM sandbox path; others use dynamic loader.
  *
  * @example
  * loci_registry_load_plugin(registry, "plugins/filter.dll");
  */
 int loci_registry_load_plugin(LociPluginRegistry* registry, const char* plugin_path);
+
+/**
+ * @brief Unload a hot-swappable plugin by name
+ * @param registry Valid registry pointer
+ * @param plugin_name Plugin name (null-terminated)
+ * @return 0 on success, -1 on error
+ *
+ * Dynamic/WASM plugins are unloadable. Static plugins cannot be unloaded.
+ */
+int loci_registry_unload_plugin(LociPluginRegistry* registry, const char* plugin_name);
+
+/**
+ * @brief Reload a hot-swappable plugin by name
+ * @param registry Valid registry pointer
+ * @param plugin_name Plugin name (null-terminated)
+ * @return 0 on success, -1 on error
+ *
+ * Dynamic/WASM plugins are reloadable. Static plugins cannot be reloaded.
+ */
+int loci_registry_reload_plugin(LociPluginRegistry* registry, const char* plugin_name);
 
 /**
  * @brief Enable a plugin by name
@@ -222,6 +395,25 @@ int loci_registry_disable_plugin(LociPluginRegistry* registry, const char* plugi
  * @return Plugin count, or -1 on error
  */
 int loci_registry_count(const LociPluginRegistry* registry);
+
+/**
+ * @brief Get detailed plugin list as JSON
+ * @param registry Valid registry pointer
+ * @return JSON string (must be freed with loci_free_string), or NULL on error
+ *
+ * JSON shape:
+ * [
+ *   {
+ *     "name":"...",
+ *     "version":"...",
+ *     "enabled":true,
+ *     "plugin_type":"dynamic|wasm|static",
+ *     "source":"path-or-null",
+ *     "hot_reloadable":true
+ *   }
+ * ]
+ */
+char* loci_registry_list_json(const LociPluginRegistry* registry);
 
 /**
  * @brief Save plugin configuration to TOML file
