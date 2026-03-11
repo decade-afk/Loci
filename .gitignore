@@ -39,4 +39,5 @@ dist/
 .tmp_pip/
 .pip_cache/
 .hf_cache/
-examples/
+outputs/
+examples/**/target/

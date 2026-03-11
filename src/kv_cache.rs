@@ -295,9 +295,13 @@ impl SessionKVCache {
     }
 
     /// Acquire shared blocks from another session
-    pub fn acquire_prefix(&mut self, shared_blocks: &[u64], pool: &PagedKVCache) {
-        // Clear existing blocks first
+    pub fn acquire_prefix(&mut self, shared_blocks: &[u64], pool: &mut PagedKVCache) {
+        // Release existing blocks before replacing with shared blocks.
+        for block_id in &self.block_table {
+            pool.free(*block_id);
+        }
         self.block_table.clear();
+        self.num_tokens = 0;
 
         // Acquire references to shared blocks
         for &block_id in shared_blocks {
@@ -418,7 +422,7 @@ mod tests {
 
         // Session 2 acquires the shared prefix
         let mut cache2 = SessionKVCache::new();
-        cache2.acquire_prefix(&shared, &pool);
+        cache2.acquire_prefix(&shared, &mut pool);
         assert_eq!(cache2.num_tokens(), 64);
         assert_eq!(cache2.num_blocks(), 2);
     }

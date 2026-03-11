@@ -4,7 +4,7 @@
 //! inference sessions, enabling multi-agent collaboration.
 
 use crate::session::SessionId;
-use crossbeam::channel::{bounded, Receiver, Sender, TryRecvError};
+use crossbeam::channel::{bounded, Receiver, Sender, TryRecvError, TrySendError};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -139,8 +139,11 @@ impl SessionBus {
 
         target_channel
             .sender
-            .send((from, message))
-            .map_err(|_| BusError::ChannelClosed)?;
+            .try_send((from, message))
+            .map_err(|err| match err {
+                TrySendError::Full(_) => BusError::QueueFull,
+                TrySendError::Disconnected(_) => BusError::ChannelClosed,
+            })?;
 
         Ok(())
     }
@@ -157,7 +160,7 @@ impl SessionBus {
         for (&session_id, channel) in channels.iter() {
             if session_id != from {
                 // Ignore send errors (session may have been closed)
-                let _ = channel.sender.send((from, message.clone()));
+                let _ = channel.sender.try_send((from, message.clone()));
             }
         }
     }
@@ -248,6 +251,8 @@ pub enum BusError {
 
     /// Message send failed
     SendFailed,
+    /// Destination queue is full.
+    QueueFull,
 }
 
 impl std::fmt::Display for BusError {
@@ -256,6 +261,7 @@ impl std::fmt::Display for BusError {
             BusError::SessionNotFound(id) => write!(f, "Session {} not found in bus", id),
             BusError::ChannelClosed => write!(f, "Channel has been closed"),
             BusError::SendFailed => write!(f, "Failed to send message"),
+            BusError::QueueFull => write!(f, "Destination session queue is full"),
         }
     }
 }

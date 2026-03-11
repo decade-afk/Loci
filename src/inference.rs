@@ -14,16 +14,29 @@
 use crate::backend::{BackendParams, BackendRegistry, InferenceParams, Model};
 use crate::concurrency_manager::{ConcurrencyConfig, ConcurrencyManager};
 use crate::error::{LociError, Result};
+use crate::function_calling::{
+    FunctionCall, FunctionCallingManager, FunctionDefinition, FunctionHandler,
+};
 use crate::inference_cache::{CacheConfig, InferenceCache};
+use crate::mcp::{
+    connect_and_register_stdio_server, register_mcp_client_tools, McpClient, McpRegistrationReport,
+    McpStdioServerConfig, McpToolRegistrationOptions,
+};
 use crate::model::ModelConfig;
 use crate::plugin::PluginManager;
 use crate::rag::{InMemoryRagPlugin, RagDocument, RagPlugin};
 use crate::resource_manager::{ResourceLimits, ResourceManager};
-use crate::timeout_controller::{TimeoutConfig, TimeoutController, TimeoutGuard};
-use std::collections::HashMap;
+use crate::skills::{Skill, SkillRegistry};
+use crate::timeout_controller::{TimeoutConfig, TimeoutContext, TimeoutController};
+use crate::tool_plugin::{
+    load_dynamic_tool_plugin as load_dynamic_tool_plugin_impl, LoadedToolPlugin,
+};
+use parking_lot::Mutex;
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Parameters for text generation (legacy compatibility)
 ///
@@ -72,6 +85,186 @@ impl From<GenerationParams> for InferenceParams {
     }
 }
 
+fn format_function_definitions_for_prompt(functions: &[&FunctionDefinition]) -> String {
+    let mut prompt = String::from("Available functions:\n\n");
+
+    for func in functions {
+        prompt.push_str(&format!("Function: {}\n", func.name));
+        prompt.push_str(&format!("Description: {}\n", func.description));
+        prompt.push_str("Parameters:\n");
+
+        let mut params = func.parameters.iter().collect::<Vec<_>>();
+        params.sort_by(|(a, _), (b, _)| a.cmp(b));
+        for (param_name, param) in params {
+            let required = if func.required.contains(param_name) {
+                " (required)"
+            } else {
+                ""
+            };
+            prompt.push_str(&format!(
+                "  - {}: {}{}\n",
+                param_name, param.param_type, required
+            ));
+            if let Some(desc) = &param.description {
+                prompt.push_str(&format!("    {}\n", desc));
+            }
+        }
+        prompt.push('\n');
+    }
+
+    prompt.push_str("To call a function, respond with JSON in this format:\n");
+    prompt.push_str("{\n");
+    prompt.push_str("  \"function\": \"function_name\",\n");
+    prompt.push_str("  \"arguments\": {\n");
+    prompt.push_str("    \"param1\": \"value1\",\n");
+    prompt.push_str("    \"param2\": \"value2\"\n");
+    prompt.push_str("  }\n");
+    prompt.push_str("}\n");
+
+    prompt
+}
+
+fn build_allow_set(allowlist: Option<&[String]>) -> Option<HashSet<String>> {
+    allowlist.map(|items| items.iter().map(|s| s.to_string()).collect())
+}
+
+fn build_block_set(blocklist: Option<&[String]>) -> HashSet<String> {
+    blocklist
+        .map(|items| items.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_default()
+}
+
+fn tool_allowed(
+    name: &str,
+    allow_set: &Option<HashSet<String>>,
+    block_set: &HashSet<String>,
+) -> bool {
+    if block_set.contains(name) {
+        return false;
+    }
+    match allow_set {
+        Some(allowed) => allowed.contains(name),
+        None => true,
+    }
+}
+
+/// Pluggable execution policy for inference calls.
+///
+/// Host applications can replace this to customize scheduling, timeout handling,
+/// and resource enforcement around model execution.
+pub trait ExecutionPolicy: Send + Sync {
+    /// Policy identifier for diagnostics.
+    fn name(&self) -> &str;
+
+    /// Execute one non-streaming inference call.
+    fn generate_text(
+        &self,
+        engine: &mut InferenceEngine,
+        prompt: &str,
+        params: &InferenceParams,
+        timeout_override: Option<Duration>,
+    ) -> Result<String>;
+
+    /// Execute one streaming inference call.
+    fn generate_stream(
+        &self,
+        engine: &mut InferenceEngine,
+        prompt: &str,
+        params: &InferenceParams,
+        timeout_override: Option<Duration>,
+        callback: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<()>;
+}
+
+/// Built-in default execution policy.
+pub struct DefaultExecutionPolicy;
+
+impl DefaultExecutionPolicy {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for DefaultExecutionPolicy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ExecutionPolicy for DefaultExecutionPolicy {
+    fn name(&self) -> &str {
+        "default.execution.policy"
+    }
+
+    fn generate_text(
+        &self,
+        engine: &mut InferenceEngine,
+        prompt: &str,
+        params: &InferenceParams,
+        timeout_override: Option<Duration>,
+    ) -> Result<String> {
+        if engine.cache_enabled {
+            let cache_key = engine.cache.generate_key(prompt, params);
+            if let Some(cached) = engine.cache.get(cache_key) {
+                return Ok(cached);
+            }
+        }
+
+        let _concurrency_guard = engine.concurrency_manager.acquire()?;
+        let _resource_guard = engine.resource_manager.acquire()?;
+        let timeout_context = engine.resolve_timeout_context(timeout_override)?;
+        let timeout_started = timeout_context.as_ref().map(|_| Instant::now());
+
+        let result = match timeout_context.as_ref() {
+            Some(context) => engine.generate_with_params_internal(prompt, params, context),
+            None => engine.generate_text_pipeline(prompt, params),
+        };
+        if timeout_context.is_some() {
+            if let Some(started) = timeout_started {
+                engine.record_timeout_completion(started);
+            }
+            engine.record_timeout_outcome(&result);
+        }
+
+        let final_response = result?;
+        if engine.cache_enabled {
+            let cache_key = engine.cache.generate_key(prompt, params);
+            engine.cache.insert(cache_key, final_response.clone());
+        }
+        Ok(final_response)
+    }
+
+    fn generate_stream(
+        &self,
+        engine: &mut InferenceEngine,
+        prompt: &str,
+        params: &InferenceParams,
+        timeout_override: Option<Duration>,
+        callback: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<()> {
+        if !engine.model.supports_streaming() {
+            return Err(LociError::UnsupportedOperation(
+                "Streaming not supported by current backend".to_string(),
+            ));
+        }
+
+        let _concurrency_guard = engine.concurrency_manager.acquire()?;
+        let _resource_guard = engine.resource_manager.acquire()?;
+        let timeout_context = engine.resolve_timeout_context(timeout_override)?;
+        let timeout_started = timeout_context.as_ref().map(|_| Instant::now());
+
+        let result =
+            engine.generate_stream_pipeline(prompt, params, callback, timeout_context.as_ref());
+        if timeout_context.is_some() {
+            if let Some(started) = timeout_started {
+                engine.record_timeout_completion(started);
+            }
+            engine.record_timeout_outcome(&result);
+        }
+        result
+    }
+}
+
 /// Main inference engine
 ///
 /// Orchestrates backend, model, plugin, and RAG plugin management.
@@ -81,6 +274,9 @@ pub struct InferenceEngine {
     backend_registry: BackendRegistry,
     backend_name: String,
     plugin_manager: PluginManager,
+    function_calling_manager: FunctionCallingManager,
+    tool_plugins: Vec<LoadedToolPlugin>,
+    skill_registry: SkillRegistry,
     rag_plugins: HashMap<String, Box<dyn RagPlugin>>,
     active_rag_plugin: Option<String>,
     // New features
@@ -90,6 +286,7 @@ pub struct InferenceEngine {
     concurrency_manager: Arc<ConcurrencyManager>,
     cache_enabled: bool,
     timeout_enabled: bool,
+    execution_policy: Arc<dyn ExecutionPolicy>,
     default_inference_params: InferenceParams,
 }
 
@@ -101,7 +298,11 @@ impl InferenceEngine {
 
     /// Create a new inference engine with explicit backend name.
     pub fn new_with_backend(config: ModelConfig, backend_name: &str) -> Result<Self> {
-        Self::new_with_registry(config, backend_name, BackendRegistry::with_builtin_backends())
+        Self::new_with_registry(
+            config,
+            backend_name,
+            BackendRegistry::with_builtin_backends(),
+        )
     }
 
     /// Create a new inference engine with custom backend registry.
@@ -126,13 +327,17 @@ impl InferenceEngine {
                 .push(("n_threads".to_string(), n_threads.to_string()));
         }
 
-        let model = backend_registry.load_model(backend_name, &config.model_path, backend_params)?;
+        let model =
+            backend_registry.load_model(backend_name, &config.model_path, backend_params)?;
 
         Ok(Self {
             model,
             backend_registry,
             backend_name: backend_name.to_string(),
             plugin_manager: PluginManager::new(),
+            function_calling_manager: FunctionCallingManager::with_builtin_tools(),
+            tool_plugins: Vec::new(),
+            skill_registry: SkillRegistry::with_builtin_skills(),
             rag_plugins: HashMap::new(),
             active_rag_plugin: None,
             // Initialize new features
@@ -142,6 +347,7 @@ impl InferenceEngine {
             concurrency_manager: Arc::new(ConcurrencyManager::new()),
             cache_enabled: true,
             timeout_enabled: true,
+            execution_policy: Arc::new(DefaultExecutionPolicy::new()),
             default_inference_params: InferenceParams {
                 n_ctx: config.n_ctx,
                 n_batch: config.n_batch,
@@ -177,11 +383,7 @@ impl InferenceEngine {
     }
 
     /// Switch backend and reload model.
-    pub fn switch_backend(
-        &mut self,
-        backend_name: &str,
-        config: ModelConfig,
-    ) -> Result<()> {
+    pub fn switch_backend(&mut self, backend_name: &str, config: ModelConfig) -> Result<()> {
         config.validate()?;
         let mut backend_params = BackendParams {
             n_gpu_layers: config.n_gpu_layers,
@@ -197,9 +399,9 @@ impl InferenceEngine {
                 .push(("n_threads".to_string(), n_threads.to_string()));
         }
 
-        let model = self
-            .backend_registry
-            .load_model(backend_name, &config.model_path, backend_params)?;
+        let model =
+            self.backend_registry
+                .load_model(backend_name, &config.model_path, backend_params)?;
 
         self.model = model;
         self.backend_name = backend_name.to_string();
@@ -217,6 +419,214 @@ impl InferenceEngine {
     /// Get plugin manager (immutable).
     pub fn plugin_manager(&self) -> &PluginManager {
         &self.plugin_manager
+    }
+
+    /// Get function/tool manager (mutable).
+    pub fn function_calling_manager_mut(&mut self) -> &mut FunctionCallingManager {
+        &mut self.function_calling_manager
+    }
+
+    /// Get function/tool manager (immutable).
+    pub fn function_calling_manager(&self) -> &FunctionCallingManager {
+        &self.function_calling_manager
+    }
+
+    /// Register a callable tool (function schema + runtime handler).
+    pub fn register_tool<H>(&mut self, definition: FunctionDefinition, handler: H) -> Result<()>
+    where
+        H: FunctionHandler + 'static,
+    {
+        self.function_calling_manager
+            .register_function_with_handler(definition, handler)
+    }
+
+    /// Execute a parsed function call against registered tool handlers.
+    pub fn execute_function_call(&self, call: &FunctionCall) -> Result<Value> {
+        self.function_calling_manager.execute_function_call(call)
+    }
+
+    /// Dynamically load one tool plugin (.dll/.so/.dylib) and register its tools.
+    pub fn load_dynamic_tool_plugin<P: AsRef<Path>>(
+        &mut self,
+        library_path: P,
+    ) -> Result<(String, Vec<String>)> {
+        let loaded =
+            load_dynamic_tool_plugin_impl(library_path, &mut self.function_calling_manager)?;
+        let name = loaded.name.clone();
+        let functions = loaded.function_names.clone();
+        self.tool_plugins.push(loaded);
+        Ok((name, functions))
+    }
+
+    /// Register an MCP client and expose all remote MCP tools to function calling.
+    pub fn register_mcp_client(
+        &mut self,
+        client: Box<dyn McpClient>,
+        options: McpToolRegistrationOptions,
+    ) -> Result<McpRegistrationReport> {
+        register_mcp_client_tools(
+            &mut self.function_calling_manager,
+            Arc::new(Mutex::new(client)),
+            options,
+        )
+    }
+
+    /// Connect to an MCP stdio server and register all discovered tools.
+    pub fn connect_mcp_stdio_server(
+        &mut self,
+        config: McpStdioServerConfig,
+    ) -> Result<McpRegistrationReport> {
+        connect_and_register_stdio_server(&mut self.function_calling_manager, config)
+    }
+
+    /// Get skill registry (immutable).
+    pub fn skill_registry(&self) -> &SkillRegistry {
+        &self.skill_registry
+    }
+
+    /// Get skill registry (mutable).
+    pub fn skill_registry_mut(&mut self) -> &mut SkillRegistry {
+        &mut self.skill_registry
+    }
+
+    /// Register one skill definition.
+    pub fn register_skill(&mut self, skill: Skill) -> Result<()> {
+        self.skill_registry.register_skill(skill)
+    }
+
+    /// Generate with tool-calling loop enabled.
+    ///
+    /// The model can emit a function-call JSON payload. The engine executes the
+    /// tool and feeds result back into the next round until a final answer is produced.
+    pub fn generate_with_tools(
+        &mut self,
+        prompt: &str,
+        params: &InferenceParams,
+        max_rounds: usize,
+    ) -> Result<String> {
+        self.generate_with_tools_policy(prompt, params, max_rounds, None, None)
+    }
+
+    /// Generate with tool-calling + allowlist policy.
+    pub fn generate_with_tools_filtered(
+        &mut self,
+        prompt: &str,
+        params: &InferenceParams,
+        max_rounds: usize,
+        allowed_tools: Option<&[String]>,
+    ) -> Result<String> {
+        self.generate_with_tools_policy(prompt, params, max_rounds, allowed_tools, None)
+    }
+
+    /// Generate with tool-calling + allow/deny policy.
+    pub fn generate_with_tools_policy(
+        &mut self,
+        prompt: &str,
+        params: &InferenceParams,
+        max_rounds: usize,
+        allowed_tools: Option<&[String]>,
+        blocked_tools: Option<&[String]>,
+    ) -> Result<String> {
+        let rounds = max_rounds.max(1);
+        let allow_set = build_allow_set(allowed_tools);
+        let block_set = build_block_set(blocked_tools);
+        let selected_functions = self
+            .function_calling_manager
+            .list_functions()
+            .into_iter()
+            .filter(|f| tool_allowed(&f.name, &allow_set, &block_set))
+            .collect::<Vec<_>>();
+
+        if selected_functions.is_empty() {
+            return self.generate_with_params(prompt, params);
+        }
+
+        let tools_prompt = format_function_definitions_for_prompt(&selected_functions);
+        let mut interaction_log = String::new();
+        let mut current_prompt = format!(
+            "{tools_prompt}\nUser request:\n{prompt}\n\nIf a tool is needed, output ONLY JSON function call. Otherwise answer directly."
+        );
+
+        for round_idx in 0..rounds {
+            let response = self.generate_with_params(&current_prompt, params)?;
+            let parsed_call = self
+                .function_calling_manager
+                .parse_function_call(&response)?;
+            if let Some(call) = parsed_call {
+                let exec_result = if !tool_allowed(&call.name, &allow_set, &block_set) {
+                    json!({
+                        "ok": false,
+                        "tool": call.name,
+                        "error": "Tool is not allowed by active policy"
+                    })
+                } else {
+                    match self.function_calling_manager.execute_function_call(&call) {
+                        Ok(value) => json!({
+                            "ok": true,
+                            "tool": call.name,
+                            "result": value
+                        }),
+                        Err(err) => json!({
+                            "ok": false,
+                            "tool": call.name,
+                            "error": err.to_string()
+                        }),
+                    }
+                };
+
+                interaction_log.push_str(&format!(
+                    "Round {}:\nFunction call: {}\nExecution: {}\n\n",
+                    round_idx + 1,
+                    serde_json::to_string(&call).unwrap_or_else(|_| "{}".to_string()),
+                    serde_json::to_string(&exec_result).unwrap_or_else(|_| "{}".to_string())
+                ));
+
+                current_prompt = format!(
+                    "{tools_prompt}\nUser request:\n{prompt}\n\nTool interaction history:\n{interaction_log}\nProvide final answer. If another tool is still needed, output JSON function call."
+                );
+                continue;
+            }
+
+            return Ok(response);
+        }
+
+        Err(LociError::ResourceExhausted(format!(
+            "Tool-calling exceeded max rounds ({rounds}) without final answer"
+        )))
+    }
+
+    /// Generate using a named skill (prompt + tool policy + optional rounds override).
+    pub fn generate_with_skill(
+        &mut self,
+        prompt: &str,
+        params: &InferenceParams,
+        skill_name: &str,
+        max_rounds: usize,
+    ) -> Result<String> {
+        let skill = self
+            .skill_registry
+            .get(skill_name)
+            .cloned()
+            .ok_or_else(|| LociError::InvalidArgument(format!("Unknown skill: {skill_name}")))?;
+        let composed_prompt = skill.compose_prompt(prompt);
+        let rounds = skill.max_tool_rounds.unwrap_or(max_rounds).max(1);
+        let allowed = if skill.tool_policy.allowed.is_empty() {
+            None
+        } else {
+            Some(skill.tool_policy.allowed.clone())
+        };
+        let blocked = if skill.tool_policy.blocked.is_empty() {
+            None
+        } else {
+            Some(skill.tool_policy.blocked.clone())
+        };
+        self.generate_with_tools_policy(
+            &composed_prompt,
+            params,
+            rounds,
+            allowed.as_deref(),
+            blocked.as_deref(),
+        )
     }
 
     /// Register a hot-swappable RAG plugin.
@@ -254,9 +664,10 @@ impl InferenceEngine {
         name: &str,
         documents: Vec<RagDocument>,
     ) -> Result<usize> {
-        let plugin = self.rag_plugins.get_mut(name).ok_or_else(|| {
-            LociError::InvalidArgument(format!("RAG plugin not found: {name}"))
-        })?;
+        let plugin = self
+            .rag_plugins
+            .get_mut(name)
+            .ok_or_else(|| LociError::InvalidArgument(format!("RAG plugin not found: {name}")))?;
 
         if let Some(in_memory) = plugin.as_any_mut().downcast_mut::<InMemoryRagPlugin>() {
             in_memory.ingest_documents(documents)
@@ -320,9 +731,7 @@ impl InferenceEngine {
     fn apply_rag_if_active(&self, prompt: &str) -> Result<String> {
         if let Some(active_name) = self.active_rag_plugin.as_deref() {
             let plugin = self.rag_plugins.get(active_name).ok_or_else(|| {
-                LociError::InvalidArgument(format!(
-                    "Active RAG plugin not found: {active_name}"
-                ))
+                LociError::InvalidArgument(format!("Active RAG plugin not found: {active_name}"))
             })?;
             plugin.augment_prompt(prompt)
         } else {
@@ -342,30 +751,8 @@ impl InferenceEngine {
         prompt: &str,
         params: &InferenceParams,
     ) -> Result<String> {
-        // Check cache first
-        if self.cache_enabled {
-            let cache_key = self.cache.generate_key(prompt, params);
-            if let Some(cached) = self.cache.get(cache_key) {
-                return Ok(cached);
-            }
-        }
-
-        // Acquire resources
-        let _resource_guard = self.resource_manager.acquire()?;
-
-        let rag_prompt = self.apply_rag_if_active(prompt)?;
-        let processed_prompt = self.plugin_manager.apply_pre_generate(&rag_prompt)?;
-
-        let response = self.model.infer_text(&processed_prompt, params)?;
-        let final_response = self.plugin_manager.apply_post_generate(&response)?;
-
-        // Cache the result
-        if self.cache_enabled {
-            let cache_key = self.cache.generate_key(prompt, params);
-            self.cache.insert(cache_key, final_response.clone());
-        }
-
-        Ok(final_response)
+        let policy = Arc::clone(&self.execution_policy);
+        policy.generate_text(self, prompt, params, None)
     }
 
     /// Generate text with streaming output (legacy API).
@@ -392,17 +779,34 @@ impl InferenceEngine {
     where
         F: FnMut(&str) -> bool,
     {
-        if !self.model.supports_streaming() {
-            return Err(LociError::UnsupportedOperation(
-                "Streaming not supported by current backend".to_string(),
-            ));
-        }
+        let policy = Arc::clone(&self.execution_policy);
+        policy.generate_stream(self, prompt, params, None, &mut callback)
+    }
 
+    fn generate_text_pipeline(&mut self, prompt: &str, params: &InferenceParams) -> Result<String> {
+        let rag_prompt = self.apply_rag_if_active(prompt)?;
+        let processed_prompt = self.plugin_manager.apply_pre_generate(&rag_prompt)?;
+        let response = self.model.infer_text(&processed_prompt, params)?;
+        self.plugin_manager.apply_post_generate(&response)
+    }
+
+    fn generate_stream_pipeline(
+        &mut self,
+        prompt: &str,
+        params: &InferenceParams,
+        callback: &mut dyn FnMut(&str) -> bool,
+        timeout_context: Option<&TimeoutContext>,
+    ) -> Result<()> {
         let rag_prompt = self.apply_rag_if_active(prompt)?;
         let processed_prompt = self.plugin_manager.apply_pre_generate(&rag_prompt)?;
 
         let plugin_manager = &self.plugin_manager;
         let mut wrapped_callback = |token: &str| -> bool {
+            if let Some(ctx) = timeout_context {
+                if ctx.is_timeout() || ctx.is_cancelled() {
+                    return false;
+                }
+            }
             let processed_token = match plugin_manager.apply_on_token(token) {
                 Ok(t) => t,
                 Err(_) => return false,
@@ -413,7 +817,38 @@ impl InferenceEngine {
         self.model
             .infer_stream(&processed_prompt, params, &mut wrapped_callback)?;
 
+        if let Some(ctx) = timeout_context {
+            ctx.check()?;
+        }
         Ok(())
+    }
+
+    fn resolve_timeout_context(
+        &self,
+        timeout_override: Option<Duration>,
+    ) -> Result<Option<TimeoutContext>> {
+        if timeout_override.is_some() || self.timeout_enabled {
+            Ok(Some(
+                self.timeout_controller.create_context(timeout_override)?,
+            ))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn record_timeout_outcome<T>(&self, result: &Result<T>) {
+        if let Err(LociError::Timeout(message)) = result {
+            if message.to_ascii_lowercase().contains("cancelled") {
+                self.timeout_controller.record_cancellation();
+            } else {
+                self.timeout_controller.record_timeout();
+            }
+        }
+    }
+
+    fn record_timeout_completion(&self, started_at: Instant) {
+        let elapsed_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        self.timeout_controller.record_completion(elapsed_ms);
     }
 
     /// Get model information.
@@ -485,6 +920,24 @@ impl InferenceEngine {
         self.timeout_controller.stats()
     }
 
+    /// Replace execution policy with a custom implementation.
+    pub fn set_execution_policy<P>(&mut self, policy: P)
+    where
+        P: ExecutionPolicy + 'static,
+    {
+        self.execution_policy = Arc::new(policy);
+    }
+
+    /// Replace execution policy with an Arc policy object.
+    pub fn set_execution_policy_arc(&mut self, policy: Arc<dyn ExecutionPolicy>) {
+        self.execution_policy = policy;
+    }
+
+    /// Current execution policy name.
+    pub fn execution_policy_name(&self) -> &str {
+        self.execution_policy.name()
+    }
+
     // ==================== Resource Management ====================
 
     /// Get resource manager
@@ -527,7 +980,11 @@ impl InferenceEngine {
     // ==================== Batch Inference ====================
 
     /// Generate text for multiple prompts (batch inference)
-    pub fn generate_batch(&mut self, prompts: &[String], params: &InferenceParams) -> Result<Vec<Result<String>>> {
+    pub fn generate_batch(
+        &mut self,
+        prompts: &[String],
+        params: &InferenceParams,
+    ) -> Result<Vec<Result<String>>> {
         let mut results = Vec::with_capacity(prompts.len());
 
         for prompt in prompts {
@@ -539,29 +996,21 @@ impl InferenceEngine {
     }
 
     /// Generate text for multiple prompts with concurrent execution
-    pub fn generate_batch_concurrent(&mut self, prompts: Vec<String>, params: InferenceParams) -> Result<Vec<Result<String>>> {
-        // Use concurrency manager to limit parallel execution
+    pub fn generate_batch_concurrent(
+        &mut self,
+        prompts: Vec<String>,
+        params: InferenceParams,
+    ) -> Result<Vec<Result<String>>> {
+        // Sequential implementation; each call enforces shared concurrency policy.
         let results = Arc::new(parking_lot::Mutex::new(Vec::with_capacity(prompts.len())));
         let params = Arc::new(params);
 
-        // Spawn tasks with concurrency control
         for prompt in prompts {
-            // Try to acquire concurrency slot
-            match self.concurrency_manager.acquire() {
-                Ok(_guard) => {
-                    let prompt = prompt.clone();
-                    let params = params.clone();
-                    let results = results.clone();
-
-                    // In a real async implementation, we'd spawn a task here
-                    // For now, we'll do sequential execution with concurrency checks
-                    let result = self.generate_with_params(&prompt, &params);
-                    results.lock().push(result);
-                }
-                Err(e) => {
-                    results.lock().push(Err(e));
-                }
-            }
+            let prompt = prompt.clone();
+            let params = params.clone();
+            let results = results.clone();
+            let result = self.generate_with_params(&prompt, &params);
+            results.lock().push(result);
         }
 
         let results = Arc::try_unwrap(results).unwrap().into_inner();
@@ -580,35 +1029,8 @@ impl InferenceEngine {
         if !self.timeout_enabled {
             return self.generate_with_params(prompt, params);
         }
-
-        let timeout_context = self.timeout_controller.create_context(Some(timeout))?;
-        let timeout_controller = self.timeout_controller.clone();
-        let _guard = TimeoutGuard::new(&timeout_controller);
-
-        // Check cache first
-        if self.cache_enabled {
-            let cache_key = self.cache.generate_key(prompt, params);
-            if let Some(cached) = self.cache.get(cache_key) {
-                return Ok(cached);
-            }
-        }
-
-        // Acquire resources
-        let _resource_guard = self.resource_manager.acquire()?;
-
-        // Check timeout before starting
-        timeout_context.check()?;
-
-        // Perform inference
-        let result = self.generate_with_params_internal(prompt, params, &timeout_context)?;
-
-        // Cache the result
-        if self.cache_enabled {
-            let cache_key = self.cache.generate_key(prompt, params);
-            self.cache.insert(cache_key, result.clone());
-        }
-
-        Ok(result)
+        let policy = Arc::clone(&self.execution_policy);
+        policy.generate_text(self, prompt, params, Some(timeout))
     }
 
     /// Internal generate method with timeout context
@@ -616,7 +1038,7 @@ impl InferenceEngine {
         &mut self,
         prompt: &str,
         params: &InferenceParams,
-        timeout_context: &crate::timeout_controller::TimeoutContext,
+        timeout_context: &TimeoutContext,
     ) -> Result<String> {
         // Check timeout periodically (simplified)
         timeout_context.check()?;
@@ -657,46 +1079,11 @@ impl InferenceEngine {
     where
         F: FnMut(&str) -> bool,
     {
-        if !self.model.supports_streaming() {
-            return Err(LociError::UnsupportedOperation(
-                "Streaming not supported by current backend".to_string(),
-            ));
-        }
-
         if !self.timeout_enabled {
             return self.generate_stream_with_params(prompt, params, callback);
         }
-
-        let timeout_context = self.timeout_controller.create_context(Some(timeout))?;
-        let timeout_controller = self.timeout_controller.clone();
-        let _guard = TimeoutGuard::new(&timeout_controller);
-
-        // Acquire resources
-        let _resource_guard = self.resource_manager.acquire()?;
-
-        let rag_prompt = self.apply_rag_if_active(prompt)?;
-        let processed_prompt = self.plugin_manager.apply_pre_generate(&rag_prompt)?;
-
-        let plugin_manager = &self.plugin_manager;
-        let timeout_context = &timeout_context;
-
-        let mut wrapped_callback = |token: &str| -> bool {
-            // Check timeout
-            if timeout_context.is_timeout() || timeout_context.is_cancelled() {
-                return false;
-            }
-
-            let processed_token = match plugin_manager.apply_on_token(token) {
-                Ok(t) => t,
-                Err(_) => return false,
-            };
-            callback(&processed_token)
-        };
-
-        self.model
-            .infer_stream(&processed_prompt, params, &mut wrapped_callback)?;
-
-        Ok(())
+        let policy = Arc::clone(&self.execution_policy);
+        policy.generate_stream(self, prompt, params, Some(timeout), &mut callback)
     }
 }
 
@@ -729,6 +1116,7 @@ pub struct InferenceEngineBuilder {
     timeout_enabled: bool,
     resource_limits: Option<ResourceLimits>,
     concurrency_config: Option<ConcurrencyConfig>,
+    execution_policy: Option<Arc<dyn ExecutionPolicy>>,
 }
 
 impl InferenceEngineBuilder {
@@ -749,6 +1137,7 @@ impl InferenceEngineBuilder {
             timeout_enabled: true,
             resource_limits: None,
             concurrency_config: None,
+            execution_policy: None,
         }
     }
 
@@ -848,6 +1237,21 @@ impl InferenceEngineBuilder {
         self
     }
 
+    /// Replace default execution policy.
+    pub fn with_execution_policy<P>(mut self, policy: P) -> Self
+    where
+        P: ExecutionPolicy + 'static,
+    {
+        self.execution_policy = Some(Arc::new(policy));
+        self
+    }
+
+    /// Replace default execution policy using Arc.
+    pub fn with_execution_policy_arc(mut self, policy: Arc<dyn ExecutionPolicy>) -> Self {
+        self.execution_policy = Some(policy);
+        self
+    }
+
     /// Build the inference engine.
     pub fn build(self) -> Result<InferenceEngine> {
         let model_path = self
@@ -897,7 +1301,10 @@ impl InferenceEngineBuilder {
             Arc::make_mut(&mut engine.concurrency_manager).set_config(concurrency_config);
         }
 
+        if let Some(execution_policy) = self.execution_policy {
+            engine.execution_policy = execution_policy;
+        }
+
         Ok(engine)
     }
 }
-

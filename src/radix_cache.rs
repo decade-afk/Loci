@@ -110,7 +110,9 @@ impl RadixNode {
     pub fn set_block(&mut self, block_id: BlockId, block_hash: BlockHash) {
         self.block_id = Some(block_id);
         self.block_hash = Some(block_hash);
-        self.ref_count.store(1, Ordering::SeqCst);
+        if self.ref_count() == 0 {
+            self.ref_count.store(1, Ordering::SeqCst);
+        }
     }
 
     /// Increment reference count
@@ -120,11 +122,19 @@ impl RadixNode {
 
     /// Decrement reference count and return new count
     pub fn release(&self) -> usize {
-        let prev = self.ref_count.fetch_sub(1, Ordering::SeqCst);
-        if prev == 0 {
-            return 0; // Already at zero
+        loop {
+            let prev = self.ref_count.load(Ordering::SeqCst);
+            if prev == 0 {
+                return 0;
+            }
+            if self
+                .ref_count
+                .compare_exchange(prev, prev - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return prev - 1;
+            }
         }
-        prev - 1
     }
 
     /// Get current reference count
@@ -225,6 +235,7 @@ impl RadixTree {
         for (idx, &token) in tokens.iter().enumerate() {
             let next_node = {
                 let mut node = current.write();
+                let created_new = !node.children.contains_key(&token);
                 let child = node.get_or_create_child(token);
 
                 // Check if this is a block boundary (after inserting this token)
@@ -240,7 +251,9 @@ impl RadixTree {
                     }
                 }
 
-                nodes_created += 1;
+                if created_new {
+                    nodes_created += 1;
+                }
                 child
             };
 
@@ -361,7 +374,7 @@ impl RadixTree {
         let mut current = Arc::clone(&self.root);
         let mut released_count = 0;
 
-        for &token in tokens {
+        for (idx, &token) in tokens.iter().enumerate() {
             let next_node = {
                 let node = current.read();
                 match node.get_child(token) {
@@ -371,7 +384,7 @@ impl RadixTree {
             };
 
             // Check if this is a block boundary
-            let token_count = tokens.iter().take_while(|&&t| t != token).count() + 1;
+            let token_count = idx + 1;
             if token_count % crate::kv_cache::BLOCK_SIZE == 0 {
                 let node = next_node.read();
                 if let Some(block_id) = node.block_id {

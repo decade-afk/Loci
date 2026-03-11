@@ -92,9 +92,9 @@ fn test_capability_4_session_communication() {
 
     // Create mock session IDs for testing
     // In real usage, these would come from SessionManager
-    let s1 = unsafe { std::mem::transmute(1u64) };
-    let s2 = unsafe { std::mem::transmute(2u64) };
-    let s3 = unsafe { std::mem::transmute(3u64) };
+    let s1 = SessionId::from(1u64);
+    let s2 = SessionId::from(2u64);
+    let s3 = SessionId::from(3u64);
 
     // Register sessions
     bus.register_session(s1);
@@ -234,7 +234,7 @@ fn test_capability_5_paged_kv_cache() {
     println!("  ✓ 共享前64个tokens (2 blocks)");
 
     let mut session_cache2 = SessionKVCache::new();
-    session_cache2.acquire_prefix(&shared, &pool);
+    session_cache2.acquire_prefix(&shared, &mut pool);
     assert_eq!(session_cache2.num_tokens(), 64);
     assert_eq!(session_cache2.num_blocks(), 2);
     println!("  ✓ Session2获取共享prefix");
@@ -305,9 +305,9 @@ fn test_integration_multi_agent_scenario() {
     println!("  Agent C (Critic): 评审验证");
 
     // Create mock sessions for 3 agents
-    let agent_a = unsafe { std::mem::transmute(1u64) };
-    let agent_b = unsafe { std::mem::transmute(2u64) };
-    let agent_c = unsafe { std::mem::transmute(3u64) };
+    let agent_a = SessionId::from(1u64);
+    let agent_b = SessionId::from(2u64);
+    let agent_c = SessionId::from(3u64);
 
     // Register agents
     bus.register_session(agent_a);
@@ -379,7 +379,7 @@ fn test_integration_multi_agent_scenario() {
     println!("  Agent A 共享 64-token prefix");
 
     let mut cache_b = SessionKVCache::new();
-    cache_b.acquire_prefix(&shared_blocks, &kv_pool);
+    cache_b.acquire_prefix(&shared_blocks, &mut kv_pool);
     println!("  Agent B 获取共享 prefix (节省内存)");
     assert_eq!(cache_b.num_tokens(), 64);
 

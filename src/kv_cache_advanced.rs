@@ -584,8 +584,8 @@ impl BlockTable {
         shared_blocks: &[BlockId],
         pool: &mut PhysicalBlockPool,
     ) -> Result<()> {
-        // Clear existing blocks
-        self.table.clear();
+        // Release existing references before replacing with shared prefix.
+        self.clear(pool)?;
 
         // Acquire references to shared blocks
         for &block_id in shared_blocks {

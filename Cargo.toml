@@ -26,6 +26,8 @@ opencl = []        # OpenCL support (fallback GPU)
 
 # Runtime device auto-detection
 auto-detect = []
+# Optional remote session-store backend
+redis-store = ["dep:redis"]
 
 # Combined features
 gpu = ["cuda", "metal", "vulkan", "rocm"]
@@ -57,6 +59,11 @@ libloading = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
+# HTTP client for built-in model pull (local/remote source)
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+# SQLite-backed persistence for session snapshots
+rusqlite = { version = "0.32", features = ["bundled"] }
+redis = { version = "0.27", optional = true }
 # High-performance synchronization primitives
 parking_lot = "0.12"
 # Concurrency utilities
@@ -68,6 +75,8 @@ wasmtime = { version = "27.0", default-features = false, features = ["cranelift"
 wasmtime-wasi = "27.0"
 # Fast hashing for KV cache block fingerprinting
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
+# Cryptographic checksum for model integrity verification
+sha2 = "0.10"
 # CPU core count detection
 num_cpus = "1.0"
 
