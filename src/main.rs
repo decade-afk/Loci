@@ -17,6 +17,7 @@ use loci::serve_dispatch::{
 };
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -470,6 +471,24 @@ struct ServeCmd {
     /// Protected request path prefix, repeatable; used when --management-auth-scope=custom
     #[arg(long = "management-auth-prefix")]
     management_auth_prefixes: Vec<String>,
+    /// MCP stdio server spec(s), format: NAME=COMMAND [ARGS...]
+    #[arg(long = "mcp-stdio")]
+    mcp_stdio: Vec<String>,
+    /// MCP registry file path for loading saved servers
+    #[arg(long = "mcp-registry")]
+    mcp_registry: Option<PathBuf>,
+    /// MCP server name(s) from registry to load; empty means all enabled
+    #[arg(long = "mcp-server")]
+    mcp_servers: Vec<String>,
+    /// Dynamic tool plugin library (.dll/.so/.dylib), repeatable
+    #[arg(long = "tool-plugin")]
+    tool_plugins: Vec<PathBuf>,
+    /// Tool plugin registry file
+    #[arg(
+        long = "tool-plugin-registry",
+        default_value = "loci_tool_plugins.toml"
+    )]
+    tool_plugin_registry: PathBuf,
     /// Session store plugin kind (builtin: memory/sqlite[/redis])
     #[arg(long = "session-store-kind", default_value = "sqlite")]
     session_store_kind: String,
@@ -1318,6 +1337,52 @@ struct SessionGenerateResponse {
     state: String,
 }
 
+#[derive(Debug, Serialize)]
+struct ToolListResponse {
+    tools: Vec<loci::function_calling::FunctionDefinition>,
+}
+
+#[derive(Debug, Serialize)]
+struct ToolInvokeResponse {
+    tool: String,
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolInvokeRequest {
+    #[serde(alias = "tool")]
+    name: String,
+    #[serde(default)]
+    arguments: HashMap<String, Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct ToolPluginRegistryEntryResponse {
+    name: String,
+    version: String,
+    dynamic: bool,
+    source: Option<String>,
+    functions: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ToolPluginRegistryListResponse {
+    plugins: Vec<ToolPluginRegistryEntryResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct ToolPluginRegistryMutationResponse {
+    name: String,
+    version: String,
+    dynamic: bool,
+    source: Option<String>,
+    functions: Vec<String>,
+}
+
 enum SessionApiRoute {
     Collection,
     Item { session_id: SessionId },
@@ -1365,6 +1430,18 @@ enum PolicyApiRoute {
     Activate { name: String },
     Reload { name: String },
     Unload { name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToolApiRoute {
+    Collection,
+    Item { name: String },
+    Invoke,
+    PluginCollection,
+    PluginItem { name: String },
+    PluginLoad,
+    PluginReload { name: String },
+    PluginUnload { name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1758,6 +1835,46 @@ fn parse_auth_policy_api_route(path: &str) -> Option<PolicyApiRoute> {
     parse_policy_api_route(path, "/auth-policies")
 }
 
+fn parse_tool_api_route(path: &str) -> Option<ToolApiRoute> {
+    let path = path.split('?').next().unwrap_or(path);
+    let normalized = path.strip_prefix("/v1").unwrap_or(path);
+    if normalized == "/tools/plugins" {
+        return Some(ToolApiRoute::PluginCollection);
+    }
+    if normalized == "/tools/plugins/load" {
+        return Some(ToolApiRoute::PluginLoad);
+    }
+    if let Some(rest) = normalized.strip_prefix("/tools/plugins/") {
+        let parts = rest.split('/').collect::<Vec<_>>();
+        if parts.is_empty() || parts[0].is_empty() {
+            return None;
+        }
+        let name = parts[0].to_string();
+        return match parts.len() {
+            1 => Some(ToolApiRoute::PluginItem { name }),
+            2 => match parts[1] {
+                "reload" => Some(ToolApiRoute::PluginReload { name }),
+                "unload" => Some(ToolApiRoute::PluginUnload { name }),
+                _ => None,
+            },
+            _ => None,
+        };
+    }
+    if normalized == "/tools" {
+        return Some(ToolApiRoute::Collection);
+    }
+    if normalized == "/tools/invoke" {
+        return Some(ToolApiRoute::Invoke);
+    }
+    let name = normalized.strip_prefix("/tools/")?;
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    Some(ToolApiRoute::Item {
+        name: name.to_string(),
+    })
+}
+
 fn request_path_for_matching(path: &str) -> &str {
     path.split('?').next().unwrap_or(path)
 }
@@ -1968,6 +2085,18 @@ fn auth_descriptor_to_response(
         dynamic: descriptor.dynamic,
         source: descriptor.source.map(|path| path.display().to_string()),
         active,
+    }
+}
+
+fn tool_plugin_descriptor_to_response(
+    descriptor: loci::LoadedToolPluginDescriptor,
+) -> ToolPluginRegistryEntryResponse {
+    ToolPluginRegistryEntryResponse {
+        name: descriptor.name,
+        version: descriptor.version,
+        dynamic: descriptor.dynamic,
+        source: descriptor.source.map(|path| path.display().to_string()),
+        functions: descriptor.function_names,
     }
 }
 
@@ -3919,9 +4048,77 @@ fn run_serve_command(cmd: ServeCmd) -> anyhow::Result<()> {
     }
 
     let plugins = Arc::new(Mutex::new(load_plugins(&cmd.plugins)?));
-    let (engine_instance, execution_policy_registry, selected_execution_policy_name) =
+    let (mut engine_instance, execution_policy_registry, selected_execution_policy_name) =
         build_engine_with_execution_registry(&model, &cmd.engine)?;
+
+    let tool_plugin_store_loaded = load_dynamic_policy_registry(&cmd.tool_plugin_registry)?;
+    let merged_tool_plugins =
+        merge_plugin_paths(tool_plugin_store_loaded.plugins(), &cmd.tool_plugins);
+
+    for tool_plugin in &merged_tool_plugins {
+        let (name, functions) = engine_instance.load_dynamic_tool_plugin(tool_plugin)?;
+        println!("Loaded tool plugin: {} ({})", name, tool_plugin.display());
+        if !functions.is_empty() {
+            println!("Plugin tools: {}", functions.join(", "));
+        }
+    }
+
+    if let Some(registry_path) = &cmd.mcp_registry {
+        let registry = load_mcp_registry(registry_path)?;
+        let mut selected = Vec::new();
+        if cmd.mcp_servers.is_empty() {
+            selected.extend(registry.list_enabled().into_iter().cloned());
+        } else {
+            for name in &cmd.mcp_servers {
+                let server = registry.get(name).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "MCP server '{}' not found in {}",
+                        name,
+                        registry_path.display()
+                    )
+                })?;
+                if !server.enabled {
+                    return Err(anyhow::anyhow!(
+                        "MCP server '{}' is disabled in {}",
+                        name,
+                        registry_path.display()
+                    ));
+                }
+                selected.push(server.clone());
+            }
+        }
+
+        for server in selected {
+            let report = engine_instance.connect_mcp_stdio_server(server.to_stdio_config())?;
+            println!(
+                "Connected MCP server '{}' from registry; registered {} tool(s)",
+                report.server_name,
+                report.registered_tools.len()
+            );
+            if !report.registered_tools.is_empty() {
+                println!("MCP tools: {}", report.registered_tools.join(", "));
+            }
+        }
+    }
+
+    for spec in &cmd.mcp_stdio {
+        let config = parse_mcp_stdio_spec(spec)
+            .map_err(|e| anyhow::anyhow!("invalid --mcp-stdio '{}': {}", spec, e))?;
+        let command = config.command.clone();
+        let report = engine_instance.connect_mcp_stdio_server(config)?;
+        println!(
+            "Connected MCP server '{}' via '{}'; registered {} tool(s)",
+            report.server_name,
+            command,
+            report.registered_tools.len()
+        );
+        if !report.registered_tools.is_empty() {
+            println!("MCP tools: {}", report.registered_tools.join(", "));
+        }
+    }
+
     let engine = Arc::new(Mutex::new(engine_instance));
+    let tool_plugin_store = Arc::new(Mutex::new(tool_plugin_store_loaded));
     let session_manager = Arc::new(build_session_manager_from_options(
         &cmd.session_store_kind,
         &cmd.session_store_options,
@@ -4015,7 +4212,7 @@ fn run_serve_command(cmd: ServeCmd) -> anyhow::Result<()> {
 
     println!("Loci REST server listening on http://{addr}");
     println!(
-        "Endpoints: GET /health,/info,/metrics,/sessions,/sessions/{{id}},/dispatch-policies,/execution-policies,/auth-policies; POST /generate,/sessions,/sessions/{{id}}/generate,/suspend,/resume,/save,/restore,/clear,/destroy,/dispatch-policies/load,/dispatch-policies/{{name}}/(activate|reload|unload),/execution-policies/load,/execution-policies/{{name}}/(activate|reload|unload),/auth-policies/load,/auth-policies/{{name}}/(activate|reload|unload) (+ /v1/* aliases)"
+        "Endpoints: GET /health,/info,/metrics,/tools,/tools/{{name}},/tools/plugins,/tools/plugins/{{name}},/sessions,/sessions/{{id}},/dispatch-policies,/execution-policies,/auth-policies; POST /generate,/tools/invoke,/tools/plugins/load,/tools/plugins/{{name}}/(reload|unload),/sessions,/sessions/{{id}}/generate,/suspend,/resume,/save,/restore,/clear,/destroy,/dispatch-policies/load,/dispatch-policies/{{name}}/(activate|reload|unload),/execution-policies/load,/execution-policies/{{name}}/(activate|reload|unload),/auth-policies/load,/auth-policies/{{name}}/(activate|reload|unload) (+ /v1/* aliases)"
     );
     println!(
         "Request handling: worker_pool={} queue_size={} dispatch_policy={} execution_policy={} management_auth={} management_auth_scope={}",
@@ -4040,6 +4237,7 @@ fn run_serve_command(cmd: ServeCmd) -> anyhow::Result<()> {
         let dispatch_policy_store = Arc::clone(&dispatch_policy_store);
         let execution_policy_registry = Arc::clone(&execution_policy_registry);
         let execution_policy_store = Arc::clone(&execution_policy_store);
+        let tool_plugin_store = Arc::clone(&tool_plugin_store);
         let management_auth_registry = Arc::clone(&management_auth_registry);
         let active_management_auth_policy = Arc::clone(&active_management_auth_policy);
         let management_auth_store = Arc::clone(&management_auth_store);
@@ -4063,6 +4261,7 @@ fn run_serve_command(cmd: ServeCmd) -> anyhow::Result<()> {
                 dispatch_policy_store.as_ref(),
                 execution_policy_registry.as_ref(),
                 execution_policy_store.as_ref(),
+                tool_plugin_store.as_ref(),
                 management_auth_registry.as_ref(),
                 management_auth_store.as_ref(),
                 management_auth_scope.as_ref(),
@@ -4235,6 +4434,7 @@ fn handle_connection(
     dispatch_policy_store: &Mutex<DynamicPolicyRegistry>,
     execution_policy_registry: &ExecutionPolicyRegistry,
     execution_policy_store: &Mutex<DynamicPolicyRegistry>,
+    tool_plugin_store: &Mutex<DynamicPolicyRegistry>,
     management_auth_registry: &ManagementAuthPolicyRegistry,
     management_auth_store: &Mutex<DynamicPolicyRegistry>,
     management_auth_scope: &ManagementAuthScopeConfig,
@@ -4320,6 +4520,421 @@ fn handle_connection(
             request_started.elapsed(),
         );
         return Ok(());
+    }
+
+    if let Some(route) = parse_tool_api_route(&request.path) {
+        let endpoint = "tools";
+        match (request.method.as_str(), route) {
+            ("GET", ToolApiRoute::PluginCollection) => {
+                let plugins = {
+                    let guard = engine
+                        .lock()
+                        .expect("inference engine mutex should not be poisoned");
+                    guard
+                        .list_tool_plugins()
+                        .into_iter()
+                        .map(tool_plugin_descriptor_to_response)
+                        .collect::<Vec<_>>()
+                };
+                let status = "200 OK";
+                write_json_response(stream, status, &ToolPluginRegistryListResponse { plugins })?;
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            ("GET", ToolApiRoute::PluginItem { name }) => {
+                let plugin = {
+                    let guard = engine
+                        .lock()
+                        .expect("inference engine mutex should not be poisoned");
+                    guard
+                        .list_tool_plugins()
+                        .into_iter()
+                        .find(|plugin| plugin.name == name)
+                };
+                let plugin = match plugin {
+                    Some(plugin) => plugin,
+                    None => {
+                        let status = "404 Not Found";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: format!("tool plugin '{}' not found", name),
+                            },
+                        )?;
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                };
+                let status = "200 OK";
+                write_json_response(stream, status, &tool_plugin_descriptor_to_response(plugin))?;
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            ("POST", ToolApiRoute::PluginLoad) => {
+                let payload: RuntimePluginLoadRequest = match serde_json::from_slice(&request.body)
+                {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        let status = "400 Bad Request";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: format!(
+                                    "invalid JSON payload for /tools/plugins/load: {err}"
+                                ),
+                            },
+                        )?;
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                };
+
+                let descriptor = {
+                    let mut guard = engine
+                        .lock()
+                        .expect("inference engine mutex should not be poisoned");
+                    match guard.load_dynamic_tool_plugin(PathBuf::from(&payload.path)) {
+                        Ok((name, _functions)) => guard
+                            .list_tool_plugins()
+                            .into_iter()
+                            .find(|plugin| plugin.name == name)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("tool plugin '{}' missing after load", name)
+                            })?,
+                        Err(err) => {
+                            let status = "400 Bad Request";
+                            write_json_response(
+                                stream,
+                                status,
+                                &ErrorResponse {
+                                    error: err.to_string(),
+                                },
+                            )?;
+                            metrics.record(
+                                endpoint,
+                                status_code_value(status),
+                                request_started.elapsed(),
+                            );
+                            return Ok(());
+                        }
+                    }
+                };
+
+                {
+                    let mut store = tool_plugin_store
+                        .lock()
+                        .expect("tool plugin registry mutex should not be poisoned");
+                    store.add_plugin_path(PathBuf::from(&payload.path));
+                    store.persist().map_err(|e| {
+                        anyhow::anyhow!("failed persisting tool plugin registry: {}", e)
+                    })?;
+                }
+
+                let status = "200 OK";
+                write_json_response(
+                    stream,
+                    status,
+                    &ToolPluginRegistryMutationResponse {
+                        name: descriptor.name,
+                        version: descriptor.version,
+                        dynamic: descriptor.dynamic,
+                        source: descriptor.source.map(|path| path.display().to_string()),
+                        functions: descriptor.function_names,
+                    },
+                )?;
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            ("GET", ToolApiRoute::Collection) => {
+                let tools = {
+                    let guard = engine
+                        .lock()
+                        .expect("inference engine mutex should not be poisoned");
+                    guard
+                        .function_calling_manager()
+                        .list_functions()
+                        .into_iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                };
+                let status = "200 OK";
+                write_json_response(stream, status, &ToolListResponse { tools })?;
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            ("GET", ToolApiRoute::Item { name }) => {
+                let tool = {
+                    let guard = engine
+                        .lock()
+                        .expect("inference engine mutex should not be poisoned");
+                    guard
+                        .function_calling_manager()
+                        .get_function(&name)
+                        .cloned()
+                };
+                let tool = match tool {
+                    Some(tool) => tool,
+                    None => {
+                        let status = "404 Not Found";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: format!("tool '{}' not found", name),
+                            },
+                        )?;
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                };
+                let status = "200 OK";
+                write_json_response(stream, status, &tool)?;
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            ("POST", ToolApiRoute::Invoke) => {
+                let payload: ToolInvokeRequest = match serde_json::from_slice(&request.body) {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        let status = "400 Bad Request";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: format!("invalid JSON payload for /tools/invoke: {err}"),
+                            },
+                        )?;
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                };
+                let call = loci::function_calling::FunctionCall {
+                    name: payload.name.clone(),
+                    arguments: payload.arguments,
+                };
+                let result = {
+                    let guard = engine
+                        .lock()
+                        .expect("inference engine mutex should not be poisoned");
+                    guard.execute_function_call(&call)
+                };
+                match result {
+                    Ok(value) => {
+                        let status = "200 OK";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ToolInvokeResponse {
+                                tool: call.name,
+                                ok: true,
+                                result: Some(value),
+                                error: None,
+                            },
+                        )?;
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        let status = "400 Bad Request";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ToolInvokeResponse {
+                                tool: call.name,
+                                ok: false,
+                                result: None,
+                                error: Some(err.to_string()),
+                            },
+                        )?;
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+            ("POST", ToolApiRoute::PluginReload { name }) => {
+                let descriptor = {
+                    let mut guard = engine
+                        .lock()
+                        .expect("inference engine mutex should not be poisoned");
+                    match guard.reload_dynamic_tool_plugin(&name) {
+                        Ok((reloaded_name, _functions)) => guard
+                            .list_tool_plugins()
+                            .into_iter()
+                            .find(|plugin| plugin.name == reloaded_name)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "tool plugin '{}' missing after reload",
+                                    reloaded_name
+                                )
+                            })?,
+                        Err(err) => {
+                            let status = "400 Bad Request";
+                            write_json_response(
+                                stream,
+                                status,
+                                &ErrorResponse {
+                                    error: err.to_string(),
+                                },
+                            )?;
+                            metrics.record(
+                                endpoint,
+                                status_code_value(status),
+                                request_started.elapsed(),
+                            );
+                            return Ok(());
+                        }
+                    }
+                };
+
+                let status = "200 OK";
+                write_json_response(
+                    stream,
+                    status,
+                    &ToolPluginRegistryMutationResponse {
+                        name: descriptor.name,
+                        version: descriptor.version,
+                        dynamic: descriptor.dynamic,
+                        source: descriptor.source.map(|path| path.display().to_string()),
+                        functions: descriptor.function_names,
+                    },
+                )?;
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            ("POST", ToolApiRoute::PluginUnload { name }) => {
+                let descriptor = {
+                    let guard = engine
+                        .lock()
+                        .expect("inference engine mutex should not be poisoned");
+                    guard
+                        .list_tool_plugins()
+                        .into_iter()
+                        .find(|plugin| plugin.name == name)
+                };
+
+                let descriptor = match descriptor {
+                    Some(descriptor) => descriptor,
+                    None => {
+                        let status = "404 Not Found";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: format!("tool plugin '{}' not found", name),
+                            },
+                        )?;
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                };
+
+                {
+                    let mut guard = engine
+                        .lock()
+                        .expect("inference engine mutex should not be poisoned");
+                    if let Err(err) = guard.unload_dynamic_tool_plugin(&name) {
+                        let status = "400 Bad Request";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: err.to_string(),
+                            },
+                        )?;
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                }
+
+                if let Some(source) = descriptor.source.as_ref() {
+                    let mut store = tool_plugin_store
+                        .lock()
+                        .expect("tool plugin registry mutex should not be poisoned");
+                    store.remove_plugin_path(source);
+                    store.persist().map_err(|e| {
+                        anyhow::anyhow!("failed persisting tool plugin registry: {}", e)
+                    })?;
+                }
+
+                let status = "200 OK";
+                write_json_response(
+                    stream,
+                    status,
+                    &ToolPluginRegistryMutationResponse {
+                        name: descriptor.name,
+                        version: descriptor.version,
+                        dynamic: descriptor.dynamic,
+                        source: descriptor.source.map(|path| path.display().to_string()),
+                        functions: descriptor.function_names,
+                    },
+                )?;
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
     }
 
     if let Some(route) = parse_dispatch_policy_api_route(&request.path) {
@@ -6892,6 +7507,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_tool_api_routes() {
+        assert!(matches!(
+            parse_tool_api_route("/tools"),
+            Some(ToolApiRoute::Collection)
+        ));
+        assert!(matches!(
+            parse_tool_api_route("/v1/tools/invoke"),
+            Some(ToolApiRoute::Invoke)
+        ));
+        assert!(matches!(
+            parse_tool_api_route("/tools/browser_open_session"),
+            Some(ToolApiRoute::Item { ref name }) if name == "browser_open_session"
+        ));
+        assert!(matches!(
+            parse_tool_api_route("/tools/plugins"),
+            Some(ToolApiRoute::PluginCollection)
+        ));
+        assert!(matches!(
+            parse_tool_api_route("/v1/tools/plugins/load"),
+            Some(ToolApiRoute::PluginLoad)
+        ));
+        assert!(matches!(
+            parse_tool_api_route("/tools/plugins/browser_tool_plugin/unload"),
+            Some(ToolApiRoute::PluginUnload { ref name }) if name == "browser_tool_plugin"
+        ));
+    }
+
+    #[test]
     fn parse_dispatch_policy_command() {
         let cli = Cli::try_parse_from([
             "loci",
@@ -7032,6 +7675,55 @@ mod tests {
                     cmd.management_auth_prefixes,
                     vec!["/tools".to_string(), "/browser".to_string()]
                 );
+            }
+            _ => panic!("expected serve command"),
+        }
+    }
+
+    #[test]
+    fn parse_serve_tool_and_mcp_args() {
+        let cli = Cli::try_parse_from([
+            "loci",
+            "serve",
+            "--model",
+            "model.gguf",
+            "--tool-plugin-registry",
+            "tool-plugins.toml",
+            "--tool-plugin",
+            "browser_tool_plugin.dll",
+            "--mcp-stdio",
+            "fs=npx -y @modelcontextprotocol/server-filesystem C:/tmp",
+            "--mcp-registry",
+            "mcp.toml",
+            "--mcp-server",
+            "fs",
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Commands::Serve(cmd)) => {
+                assert_eq!(
+                    cmd.tool_plugins
+                        .iter()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .collect::<Vec<_>>(),
+                    vec!["browser_tool_plugin.dll".to_string()]
+                );
+                assert_eq!(
+                    cmd.tool_plugin_registry.to_string_lossy().to_string(),
+                    "tool-plugins.toml"
+                );
+                assert_eq!(
+                    cmd.mcp_stdio,
+                    vec!["fs=npx -y @modelcontextprotocol/server-filesystem C:/tmp".to_string()]
+                );
+                assert_eq!(
+                    cmd.mcp_registry
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string()),
+                    Some("mcp.toml".to_string())
+                );
+                assert_eq!(cmd.mcp_servers, vec!["fs".to_string()]);
             }
             _ => panic!("expected serve command"),
         }

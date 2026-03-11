@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::ffi::c_void;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Tool plugin trait.
@@ -125,6 +125,8 @@ pub struct LoadedToolPlugin {
     pub name: String,
     pub version: String,
     pub function_names: Vec<String>,
+    pub dynamic: bool,
+    pub source: Option<PathBuf>,
     runtime: Arc<ToolPluginRuntime>,
 }
 
@@ -134,9 +136,32 @@ impl LoadedToolPlugin {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedToolPluginDescriptor {
+    pub name: String,
+    pub version: String,
+    pub function_names: Vec<String>,
+    pub dynamic: bool,
+    pub source: Option<PathBuf>,
+}
+
+impl LoadedToolPlugin {
+    pub fn descriptor(&self) -> LoadedToolPluginDescriptor {
+        LoadedToolPluginDescriptor {
+            name: self.name.clone(),
+            version: self.version.clone(),
+            function_names: self.function_names.clone(),
+            dynamic: self.dynamic,
+            source: self.source.clone(),
+        }
+    }
+}
+
 fn register_tool_plugin_runtime(
     manager: &mut FunctionCallingManager,
     runtime: Arc<ToolPluginRuntime>,
+    dynamic: bool,
+    source: Option<PathBuf>,
 ) -> Result<LoadedToolPlugin> {
     let (name, version, functions) = {
         let plugin = runtime.plugin.lock();
@@ -198,6 +223,8 @@ fn register_tool_plugin_runtime(
         name,
         version,
         function_names,
+        dynamic,
+        source,
         runtime,
     })
 }
@@ -212,7 +239,7 @@ pub fn register_tool_plugin(
         plugin: Mutex::new(plugin),
         library: None,
     });
-    register_tool_plugin_runtime(manager, runtime)
+    register_tool_plugin_runtime(manager, runtime, false, None)
 }
 
 /// Load a dynamic tool plugin from shared library and register its tools.
@@ -240,8 +267,7 @@ pub fn load_dynamic_tool_plugin<P: AsRef<Path>>(
     let library = Arc::new(library);
 
     let mut plugin: Box<dyn ToolPlugin> = unsafe {
-        if let Ok(constructor_v1) = library.get::<ToolPluginConstructor>(b"create_tool_plugin_v1")
-        {
+        if let Ok(constructor_v1) = library.get::<ToolPluginConstructor>(b"create_tool_plugin_v1") {
             let opaque = constructor_v1();
             dynamic_tool_plugin_from_opaque(opaque).ok_or_else(|| {
                 LociError::PluginError(
@@ -271,7 +297,7 @@ pub fn load_dynamic_tool_plugin<P: AsRef<Path>>(
         plugin: Mutex::new(plugin),
         library: Some(library),
     });
-    register_tool_plugin_runtime(manager, runtime)
+    register_tool_plugin_runtime(manager, runtime, true, Some(path.to_path_buf()))
 }
 
 #[cfg(test)]

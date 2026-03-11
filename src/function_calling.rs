@@ -144,23 +144,25 @@ fn parse_required_string(call: &FunctionCall, key: &str) -> Result<String> {
 }
 
 fn builtin_echo_definition() -> FunctionDefinition {
-    FunctionDefinition::new("echo", "Echo back the input text")
-        .add_parameter("text", "string", "Text to return unchanged", true)
+    FunctionDefinition::new("echo", "Echo back the input text").add_parameter(
+        "text",
+        "string",
+        "Text to return unchanged",
+        true,
+    )
 }
 
 fn builtin_calculator_definition() -> FunctionDefinition {
-    let mut definition = FunctionDefinition::new(
-        "calculator",
-        "Perform arithmetic operation on two numbers",
-    )
-    .add_parameter("a", "number", "First operand", true)
-    .add_parameter("b", "number", "Second operand", true)
-    .add_parameter(
-        "operation",
-        "string",
-        "One of add/sub/mul/div/pow/mod",
-        true,
-    );
+    let mut definition =
+        FunctionDefinition::new("calculator", "Perform arithmetic operation on two numbers")
+            .add_parameter("a", "number", "First operand", true)
+            .add_parameter("b", "number", "Second operand", true)
+            .add_parameter(
+                "operation",
+                "string",
+                "One of add/sub/mul/div/pow/mod",
+                true,
+            );
 
     if let Some(param) = definition.parameters.get_mut("operation") {
         param.enum_values = Some(vec![
@@ -180,8 +182,12 @@ fn builtin_timestamp_definition() -> FunctionDefinition {
 }
 
 fn builtin_text_stats_definition() -> FunctionDefinition {
-    FunctionDefinition::new("text_stats", "Compute simple text statistics")
-        .add_parameter("text", "string", "Input text", true)
+    FunctionDefinition::new("text_stats", "Compute simple text statistics").add_parameter(
+        "text",
+        "string",
+        "Input text",
+        true,
+    )
 }
 
 fn builtin_read_text_file_definition() -> FunctionDefinition {
@@ -196,8 +202,12 @@ fn builtin_read_text_file_definition() -> FunctionDefinition {
 }
 
 fn builtin_list_directory_definition() -> FunctionDefinition {
-    FunctionDefinition::new("list_directory", "List files/directories under a path")
-        .add_parameter("path", "string", "Directory path", true)
+    FunctionDefinition::new("list_directory", "List files/directories under a path").add_parameter(
+        "path",
+        "string",
+        "Directory path",
+        true,
+    )
 }
 
 /// Function calling manager
@@ -295,18 +305,14 @@ impl FunctionCallingManager {
                 "mul" => a * b,
                 "div" => {
                     if b == 0.0 {
-                        return Err(LociError::InvalidArgument(
-                            "Division by zero".to_string(),
-                        ));
+                        return Err(LociError::InvalidArgument("Division by zero".to_string()));
                     }
                     a / b
                 }
                 "pow" => a.powf(b),
                 "mod" => {
                     if b == 0.0 {
-                        return Err(LociError::InvalidArgument(
-                            "Modulo by zero".to_string(),
-                        ));
+                        return Err(LociError::InvalidArgument("Modulo by zero".to_string()));
                     }
                     a % b
                 }
@@ -352,17 +358,15 @@ impl FunctionCallingManager {
                 .map(|v| v.max(1.0).min(4_194_304.0) as usize)
                 .unwrap_or(65_536);
 
-            let bytes = std::fs::read(&path)
-                .map_err(|e| LociError::IoError(e))?;
+            let bytes = std::fs::read(&path).map_err(|e| LociError::IoError(e))?;
             let bytes = if bytes.len() > max_bytes {
                 bytes[..max_bytes].to_vec()
             } else {
                 bytes
             };
 
-            let text = String::from_utf8(bytes).map_err(|e| {
-                LociError::InvalidArgument(format!("File is not valid UTF-8: {e}"))
-            })?;
+            let text = String::from_utf8(bytes)
+                .map_err(|e| LociError::InvalidArgument(format!("File is not valid UTF-8: {e}")))?;
             Ok(json!({
                 "path": path,
                 "content": text
@@ -397,6 +401,11 @@ impl FunctionCallingManager {
         self.functions.get(name)
     }
 
+    pub fn unregister_function(&mut self, name: &str) -> Option<FunctionDefinition> {
+        self.handlers.remove(name);
+        self.functions.remove(name)
+    }
+
     pub fn list_functions(&self) -> Vec<&FunctionDefinition> {
         let mut list: Vec<&FunctionDefinition> = self.functions.values().collect();
         list.sort_by(|a, b| a.name.cmp(&b.name));
@@ -405,12 +414,12 @@ impl FunctionCallingManager {
 
     pub fn format_functions_for_prompt(&self) -> String {
         let mut prompt = String::from("Available functions:\n\n");
-        
+
         for func in self.list_functions() {
             prompt.push_str(&format!("Function: {}\n", func.name));
             prompt.push_str(&format!("Description: {}\n", func.description));
             prompt.push_str("Parameters:\n");
-            
+
             for (param_name, param) in &func.parameters {
                 let required = if func.required.contains(param_name) {
                     " (required)"
@@ -419,9 +428,7 @@ impl FunctionCallingManager {
                 };
                 prompt.push_str(&format!(
                     "  - {}: {}{}\n",
-                    param_name,
-                    param.param_type,
-                    required
+                    param_name, param.param_type, required
                 ));
                 if let Some(desc) = &param.description {
                     prompt.push_str(&format!("    {}\n", desc));
@@ -444,7 +451,7 @@ impl FunctionCallingManager {
 
     pub fn parse_function_call(&self, response: &str) -> Result<Option<FunctionCall>> {
         let trimmed = response.trim();
-        
+
         if !trimmed.starts_with('{') {
             if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
                 if start < end {
@@ -481,10 +488,9 @@ impl FunctionCallingManager {
     }
 
     pub fn validate_function_call(&self, call: &FunctionCall) -> Result<()> {
-        let func = self
-            .functions
-            .get(&call.name)
-            .ok_or_else(|| LociError::InvalidArgument(format!("Unknown function: {}", call.name)))?;
+        let func = self.functions.get(&call.name).ok_or_else(|| {
+            LociError::InvalidArgument(format!("Unknown function: {}", call.name))
+        })?;
 
         for required_param in &func.required {
             if !call.arguments.contains_key(required_param) {
@@ -546,12 +552,16 @@ mod tests {
     #[test]
     fn test_function_calling_manager() {
         let mut manager = FunctionCallingManager::new();
-        
-        let func = FunctionDefinition::new("test_func", "Test function")
-            .add_parameter("param1", "string", "Test param", true);
-        
+
+        let func = FunctionDefinition::new("test_func", "Test function").add_parameter(
+            "param1",
+            "string",
+            "Test param",
+            true,
+        );
+
         manager.register_function(func);
-        
+
         assert!(manager.get_function("test_func").is_some());
         assert_eq!(manager.list_functions().len(), 1);
     }
@@ -590,7 +600,7 @@ mod tests {
 
         let json = r#"{"function": "test", "arguments": {"arg": "value"}}"#;
         let call = manager.parse_function_call(json).unwrap();
-        
+
         assert!(call.is_some());
         let call = call.unwrap();
         assert_eq!(call.name, "test");

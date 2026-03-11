@@ -162,7 +162,8 @@ pub use timeout_controller::{
 };
 pub use tool_plugin::{
     dynamic_tool_plugin_from_opaque, dynamic_tool_plugin_into_opaque, load_dynamic_tool_plugin,
-    register_tool_plugin, DynamicToolPluginOpaque, LoadedToolPlugin, ToolPlugin,
+    register_tool_plugin, DynamicToolPluginOpaque, LoadedToolPlugin, LoadedToolPluginDescriptor,
+    ToolPlugin,
 };
 
 /// Prelude module for convenient imports
@@ -312,7 +313,8 @@ pub mod prelude {
     };
     pub use crate::tool_plugin::{
         dynamic_tool_plugin_from_opaque, dynamic_tool_plugin_into_opaque, load_dynamic_tool_plugin,
-        register_tool_plugin, DynamicToolPluginOpaque, LoadedToolPlugin, ToolPlugin,
+        register_tool_plugin, DynamicToolPluginOpaque, LoadedToolPlugin,
+        LoadedToolPluginDescriptor, ToolPlugin,
     };
     pub use crate::vision_clip::{
         BatchCLIPEncoder, CLIPViTL14Config, CLIPViTL14Encoder, ImageEmbedding,

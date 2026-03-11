@@ -30,6 +30,7 @@ use crate::skills::{Skill, SkillRegistry};
 use crate::timeout_controller::{TimeoutConfig, TimeoutContext, TimeoutController};
 use crate::tool_plugin::{
     load_dynamic_tool_plugin as load_dynamic_tool_plugin_impl, LoadedToolPlugin,
+    LoadedToolPluginDescriptor,
 };
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -456,6 +457,67 @@ impl InferenceEngine {
         let functions = loaded.function_names.clone();
         self.tool_plugins.push(loaded);
         Ok((name, functions))
+    }
+
+    pub fn list_tool_plugins(&self) -> Vec<LoadedToolPluginDescriptor> {
+        let mut plugins = self
+            .tool_plugins
+            .iter()
+            .map(|plugin| plugin.descriptor())
+            .collect::<Vec<_>>();
+        plugins.sort_by(|a, b| a.name.cmp(&b.name));
+        plugins
+    }
+
+    pub fn unload_dynamic_tool_plugin(&mut self, name: &str) -> Result<()> {
+        let index = self
+            .tool_plugins
+            .iter()
+            .position(|plugin| plugin.name == name)
+            .ok_or_else(|| {
+                crate::error::LociError::PluginError(format!("Tool plugin '{}' not found", name))
+            })?;
+        if !self.tool_plugins[index].dynamic {
+            return Err(crate::error::LociError::PluginError(format!(
+                "Static tool plugin '{}' cannot be unloaded at runtime",
+                name
+            )));
+        }
+
+        let plugin = self.tool_plugins.remove(index);
+        for function_name in &plugin.function_names {
+            self.function_calling_manager
+                .unregister_function(function_name);
+        }
+        Ok(())
+    }
+
+    pub fn reload_dynamic_tool_plugin(&mut self, name: &str) -> Result<(String, Vec<String>)> {
+        let source = self
+            .tool_plugins
+            .iter()
+            .find(|plugin| plugin.name == name)
+            .ok_or_else(|| {
+                crate::error::LociError::PluginError(format!("Tool plugin '{}' not found", name))
+            })?
+            .source
+            .clone()
+            .ok_or_else(|| {
+                crate::error::LociError::PluginError(format!(
+                    "Static tool plugin '{}' cannot be reloaded at runtime",
+                    name
+                ))
+            })?;
+
+        self.unload_dynamic_tool_plugin(name)?;
+        let (loaded_name, functions) = self.load_dynamic_tool_plugin(&source)?;
+        if loaded_name != name {
+            return Err(crate::error::LociError::PluginError(format!(
+                "Reloaded tool plugin name mismatch: expected '{}', got '{}'",
+                name, loaded_name
+            )));
+        }
+        Ok((loaded_name, functions))
     }
 
     /// Register an MCP client and expose all remote MCP tools to function calling.
