@@ -6013,6 +6013,8 @@ fn handle_connection(
                 }
                 let (verifier_name, verifier) = active_model_pull_verifier.snapshot();
 
+                let pull_subject = payload.id.clone().or_else(|| Some(payload.source.clone()));
+                let pull_source = payload.source.clone();
                 let pull_job_request = ModelPullJobRequest {
                     source: payload.source,
                     mirrors: payload.mirrors,
@@ -6074,9 +6076,9 @@ fn handle_connection(
                             Some(endpoint),
                             Some(&request),
                             Some(status_code_value(status)),
-                            payload.id.clone().or_else(|| Some(payload.source.clone())),
+                            pull_subject,
                             Some(serde_json::json!({
-                                "source": payload.source,
+                                "source": pull_source,
                                 "error": err.to_string(),
                             })),
                         );
@@ -6550,6 +6552,9 @@ fn handle_connection(
                     .remove(&id, delete_file)
                 {
                     Ok(model) => {
+                        let model_id = model.id.clone();
+                        let model_managed = model.managed;
+                        let model_path = model.path.clone();
                         let status = "200 OK";
                         write_json_response(
                             stream,
@@ -6567,11 +6572,11 @@ fn handle_connection(
                             Some(endpoint),
                             Some(&request),
                             Some(status_code_value(status)),
-                            Some(model.id.clone()),
+                            Some(model_id),
                             Some(serde_json::json!({
                                 "deleted_file": delete_file,
-                                "managed": model.managed,
-                                "path": model.path,
+                                "managed": model_managed,
+                                "path": model_path,
                             })),
                         );
                         metrics.record(
@@ -10267,6 +10272,7 @@ fn handle_connection(
                 let handle = session_manager
                     .get_session(session_id)
                     .ok_or_else(|| anyhow::anyhow!("session {} not found", session_id.as_u64()))?;
+                let external_data_chars = payload.external_data.chars().count();
                 handle
                     .resume(payload.external_data)
                     .map_err(|e| anyhow::anyhow!("failed resuming session: {}", e))?;
@@ -10299,7 +10305,7 @@ fn handle_connection(
                     Some(serde_json::json!({
                         "persisted": response.persisted,
                         "state": response.state,
-                        "external_data_chars": payload.external_data.chars().count(),
+                        "external_data_chars": external_data_chars,
                     })),
                 );
                 metrics.record(
