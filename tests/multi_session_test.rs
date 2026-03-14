@@ -63,6 +63,7 @@ fn test_capability_3_per_session_different_models() {
     println!("\n=== 测试3: 每个会话使用不同模型 ===");
 
     let manager = SessionManager::new();
+    assert_eq!(manager.model_count(), 0);
 
     // Verify: ModelRegistry supports multiple models
     // In real usage:
@@ -296,6 +297,7 @@ fn test_integration_multi_agent_scenario() {
 
     // Setup
     let manager = SessionManager::new();
+    assert_eq!(manager.session_count(), 0);
     let bus = SessionBus::new();
     let mut kv_pool = PagedKVCache::new(32, 4096, 50);
 

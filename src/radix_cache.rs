@@ -79,6 +79,7 @@ pub type BlockHash = u64;
 #[derive(Clone)]
 pub struct RadixNode {
     /// Token ID at this node
+    #[allow(dead_code)]
     token: TokenId,
 
     /// Physical block ID (if this node represents a complete block)
@@ -434,7 +435,10 @@ impl ShardedRadixCache {
     ///
     /// * `num_shards` - Number of shards (default: 16, must be power of 2)
     pub fn new_with_shards(num_shards: usize) -> Self {
-        assert!(num_shards.is_power_of_two(), "num_shards must be power of 2");
+        assert!(
+            num_shards.is_power_of_two(),
+            "num_shards must be power of 2"
+        );
 
         let shards = (0..num_shards)
             .map(|_| RwLock::new(RadixTree::new()))

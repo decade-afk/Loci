@@ -7,6 +7,9 @@
 
 use crate::error::{LociError, Result};
 use crate::plugin::{dynamic_plugin_from_opaque, DynamicPluginOpaque, Plugin};
+use crate::plugin_contract::{
+    load_and_validate_plugin_contract, validate_runtime_plugin_identity, PluginContractKind,
+};
 use crate::sampler::LogitsView;
 use crate::wasm_plugin::{WasmPlugin, WasmPluginConfig};
 use libloading::{Library, Symbol};
@@ -141,13 +144,11 @@ impl PluginRegistry {
     /// Load registry configuration from TOML file
     pub fn load_from_file<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
         let path = path.as_ref();
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            LociError::ConfigError(format!("Failed to read config file: {}", e))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| LociError::ConfigError(format!("Failed to read config file: {}", e)))?;
 
-        let config: RegistryConfig = toml::from_str(&content).map_err(|e| {
-            LociError::ConfigError(format!("Failed to parse TOML: {}", e))
-        })?;
+        let config: RegistryConfig = toml::from_str(&content)
+            .map_err(|e| LociError::ConfigError(format!("Failed to parse TOML: {}", e)))?;
 
         // Load each plugin from the configuration
         for plugin_config in config.plugins {
@@ -213,13 +214,11 @@ impl PluginRegistry {
 
         let registry_config = RegistryConfig { plugins: configs };
 
-        let toml_string = toml::to_string_pretty(&registry_config).map_err(|e| {
-            LociError::ConfigError(format!("Failed to serialize config: {}", e))
-        })?;
+        let toml_string = toml::to_string_pretty(&registry_config)
+            .map_err(|e| LociError::ConfigError(format!("Failed to serialize config: {}", e)))?;
 
-        std::fs::write(path.as_ref(), toml_string).map_err(|e| {
-            LociError::ConfigError(format!("Failed to write config file: {}", e))
-        })?;
+        std::fs::write(path.as_ref(), toml_string)
+            .map_err(|e| LociError::ConfigError(format!("Failed to write config file: {}", e)))?;
 
         Ok(())
     }
@@ -268,6 +267,7 @@ impl PluginRegistry {
         mut config: PluginConfig,
     ) -> Result<()> {
         let lib_path = library_path.as_ref();
+        let manifest = load_and_validate_plugin_contract(lib_path, PluginContractKind::TextPlugin)?;
 
         // Load the shared library with error handling
         if !lib_path.exists() {
@@ -306,9 +306,7 @@ impl PluginRegistry {
         // Create plugin instance and validate opaque payload.
         let plugin_opaque = unsafe { constructor() };
         let mut plugin = unsafe { dynamic_plugin_from_opaque(plugin_opaque) }.ok_or_else(|| {
-            LociError::PluginError(
-                "Plugin constructor returned invalid plugin payload".to_string(),
-            )
+            LociError::PluginError("Plugin constructor returned invalid plugin payload".to_string())
         })?;
 
         if plugin.name().is_empty() {
@@ -323,6 +321,7 @@ impl PluginRegistry {
         // Update config with plugin metadata
         let name = plugin.name().to_string();
         let version = plugin.version().to_string();
+        validate_runtime_plugin_identity(manifest.as_ref(), &name, &version)?;
 
         if config.name.is_empty() {
             config.name = name.clone();
@@ -418,10 +417,7 @@ impl PluginRegistry {
         let wasm_path = wasm_path.as_ref();
 
         // Build WASM plugin configuration
-        let mut wasm_config = plugin_config
-            .wasm_config
-            .clone()
-            .unwrap_or_default();
+        let mut wasm_config = plugin_config.wasm_config.clone().unwrap_or_default();
 
         // Set WASM path if not already set
         if wasm_config.wasm_path.as_os_str().is_empty() {
@@ -960,7 +956,9 @@ mod tests {
     #[test]
     fn test_registry_detailed_info_and_unified_controls_for_static() {
         let mut registry = PluginRegistry::new();
-        registry.register_static(TestPlugin::new("test_static")).unwrap();
+        registry
+            .register_static(TestPlugin::new("test_static"))
+            .unwrap();
 
         let info = registry.get_info("test_static").expect("info should exist");
         assert_eq!(info.plugin_type, "static");

@@ -1,5 +1,7 @@
 # Loci
-A cross-platform, plugin-based local LLM inference framework built in Rust.
+Loci is an embeddable AI inference engine and control plane built in Rust.
+
+It is designed for teams that need to integrate local model execution into their own software, not for shipping yet another end-user chat shell. Loci focuses on runtime execution, host integration, plugin-based upgrades, model asset governance, and tool/session control surfaces that can sit behind desktop apps, IDE copilots, local automation products, and custom agents.
 
 ## Plugin System - Highly Extensible
 
@@ -9,6 +11,12 @@ Loci features a **highly plugin-capable architecture** that allows you to extend
 - **Static Plugins**: Compiled into the binary for maximum performance
 - **Dynamic Plugins**: Load/unload at runtime via shared libraries
 - **WASM Plugins**: Sandboxed execution for security and cross-language support
+
+### Plugin Contract Manifest
+- Dynamic plugins can ship a sidecar manifest such as `my_plugin.loci-plugin.json`
+- Manifest validation checks plugin kind, ABI version, and optional host-version bounds before load
+- Runtime plugin identity is cross-checked against the loaded implementation when version metadata is available
+- Policy-oriented plugin kinds include execution, management-auth, serve-dispatch, model-pull policy, and model-pull verifier plugins
 
 ### Plugin Hooks
 - `pre_generate`: Modify prompts before inference
@@ -38,7 +46,7 @@ let explainer = CodeExplainerPlugin::detailed("explainer");
 engine.plugin_manager_mut().register(explainer)?;
 ```
 
-See [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) for complete plugin development documentation.
+See [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) for plugin family overview and development entry points.
 API docs for integrators:
 - [docs/API_REFERENCE.md](docs/API_REFERENCE.md)
 - [docs/openapi/loci-rest-v1.yaml](docs/openapi/loci-rest-v1.yaml)
@@ -67,6 +75,19 @@ API docs for integrators:
 - **Centralized Registry**: Unified management for all plugins
 - **Text Processing Hooks**: pre_generate, post_generate, on_token
 - **Third-Party Integration**: Easy plugin development API
+- **Manifest Validation**: Optional sidecar contract for safer plugin upgrades
+
+### Compatibility APIs
+- **OpenAI-compatible routes**: `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/embeddings`
+- **Ollama-compatible routes**: `GET /api/tags`, `POST /api/generate`
+- **Same core runtime**: Compatibility routes reuse the same engine, plugin hooks, auth, and metrics path as native REST endpoints
+- **Streaming compatibility**: `stream=true` is supported for OpenAI chat and Ollama generate; Loci uses native token streaming when available and falls back to buffered chunk streaming when required for compatibility
+- **Control-plane introspection**: `GET /info` exposes engine/runtime capabilities, `GET /metrics` exposes runtime request metrics, and `POST /models/plan` exposes remote placement planning for integrators
+- **Runtime audit stream**: `GET /events` and `GET /events/stream` expose a structured control-plane event spine for hosts that need supervision, logging, or activity feeds
+- **Model inventory control plane**: `GET/POST/DELETE /models/assets...` lets host software manage registered and imported model assets over REST
+- **Model source governance**: `GET/POST /model-pull-policies...` lets hosts activate builtin or plugin-provided policies for model source admission and checksum enforcement
+- **Model trust verification governance**: `GET/POST /model-pull-verifiers...` lets hosts activate builtin or plugin-provided post-download verifiers for sidecar, signature, or certificate-style checks before import is committed
+- **Live OpenAPI discovery**: `GET /openapi.yaml` and `GET /openapi.json` serve the embedded machine-readable API spec from the running process
 
 ### Language Integration
 - **Rust API**: Type-safe, zero-cost abstractions
@@ -116,6 +137,7 @@ Generate (single prompt):
 ```bash
 cargo run --release -- generate \
   --model path/to/model.gguf \
+  --auto-resource-plan \
   --prompt "What is Rust programming language?"
 ```
 
@@ -139,8 +161,99 @@ Agent mode:
 ```bash
 cargo run --release -- agent \
   --model path/to/model.gguf \
-  --tool web_search \
-  --prompt "Summarize latest Rust ecosystem trends"
+  --auto-resource-plan \
+  --tool calculator \
+  --prompt "Use the calculator tool to add 144 and 256."
+```
+
+OpenAI-compatible chat:
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions ^
+  -H "Content-Type: application/json" ^
+  -d "{\"model\":\"loci-local\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}"
+```
+
+Ollama-compatible generate:
+
+```bash
+curl http://127.0.0.1:8080/api/generate ^
+  -H "Content-Type: application/json" ^
+  -d "{\"model\":\"loci-local\",\"prompt\":\"hello\",\"stream\":false}"
+```
+
+Control-plane model planning:
+
+```bash
+curl http://127.0.0.1:8080/models/plan ^
+  -H "Content-Type: application/json" ^
+  -d "{\"context_size\":8192}"
+```
+
+Register an existing model asset in the managed inventory:
+
+```bash
+curl http://127.0.0.1:8080/models/assets ^
+  -H "Content-Type: application/json" ^
+  -d "{\"path\":\"D:/models/qwen.gguf\",\"id\":\"qwen-local\",\"tags\":[\"reasoning\"]}"
+```
+
+Stream model import progress as NDJSON:
+
+```bash
+curl http://127.0.0.1:8080/models/assets/pull?stream=true ^
+  -H "Content-Type: application/json" ^
+  -d "{\"source\":\"D:/downloads/qwen.gguf\",\"id\":\"qwen-managed\"}"
+```
+
+The NDJSON stream emits `progress`, `complete`, and `error` events so hosts can surface asset import state in real time.
+
+Start the same import as a background control-plane job:
+
+```bash
+curl http://127.0.0.1:8080/models/assets/pulls ^
+  -H "Content-Type: application/json" ^
+  -d "{\"source\":\"https://example.com/qwen.gguf\",\"id\":\"qwen-managed\"}"
+```
+
+Subscribe to one background pull job:
+
+```bash
+curl http://127.0.0.1:8080/models/assets/pulls/pull-1730937600000-1/events
+```
+
+Activate a stricter remote model pull policy:
+
+```bash
+curl http://127.0.0.1:8080/model-pull-policies/checksum-required-remote.model.pull/activate -X POST
+```
+
+Activate a post-download model pull verifier:
+
+```bash
+curl http://127.0.0.1:8080/model-pull-verifiers/sidecar-sha256.model.verify/activate -X POST
+```
+
+Live OpenAPI spec:
+
+```bash
+curl http://127.0.0.1:8080/openapi.yaml
+```
+
+```bash
+curl http://127.0.0.1:8080/openapi.json
+```
+
+Read the recent runtime audit buffer:
+
+```bash
+curl http://127.0.0.1:8080/events?limit=20
+```
+
+Follow the live runtime audit stream:
+
+```bash
+curl http://127.0.0.1:8080/events/stream?replay=20
 ```
 
 Image generation (plugin kernel):
@@ -284,6 +397,9 @@ Key generate/agent/serve options:
       --threads <THREADS>           Number of threads
       --cpu-only                    Disable GPU acceleration
       --gpu-layers <LAYERS>         GPU layers to offload (-1 = all)
+      --auto-gpu-fallback          Retry with fewer GPU layers if requested placement fails
+      --gpu-fallback-step <STEP>   GPU layer decrement for auto fallback
+      --auto-resource-plan         Auto-plan GPU/CPU/mmap placement from model size + hardware
       --lora-path <PATH>            LoRA path argument (validated; merge support backend-dependent)
       --plugin <PATH>               Load runtime plugin (.wasm or dynamic library)
   -s, --stream                      Enable streaming output
@@ -352,7 +468,23 @@ let config = ModelConfig::new("model.gguf")
     .with_threads(8)               // Number of CPU threads
     .with_batch_size(512)          // Batch size for prompt processing
     .with_gpu_layers(-1)           // GPU layers (-1 = all)
+    .with_auto_gpu_layer_fallback(8) // Retry with lower GPU residency if needed
     .cpu_only();                   // Disable GPU
+```
+
+Automatic resource planning from Rust:
+
+```rust
+let mut engine = InferenceEngine::builder()
+    .model_path("model.gguf")
+    .with_auto_resource_plan(true)
+    .build()?;
+```
+
+Inspect placement before loading the model:
+
+```bash
+cargo run --release -- model plan --model model.gguf --context-length 8192 --json
 ```
 
 ### Generation Parameters
@@ -431,6 +563,9 @@ cargo build --release --lib
 # Run tests
 cargo test
 
+# Recommended local full validation on Windows
+powershell -ExecutionPolicy Bypass -File scripts/full_test.ps1
+
 # Run benchmarks
 cargo bench
 ```
@@ -471,6 +606,8 @@ Detailed status with evidence:
 
 ## Documentation
 
+- **[Architecture](docs/ARCHITECTURE.md)** - System layers, diagrams, flows, and recommended next capabilities
+- **[Architecture ADRs](docs/architecture/README.md)** - Decision records for positioning, adapters, and governance layering
 - **[Integration Guide](docs/INTEGRATION_GUIDE.md)** - Rust/C/Python/Go/HTTP integration
 - **[Phase Status](docs/PHASE_STATUS.md)** - Stage-goal audit with implementation evidence
 - **[Product Strategy 2026](docs/PRODUCT_STRATEGY_2026.md)** - Positioning, milestones, and KPI roadmap

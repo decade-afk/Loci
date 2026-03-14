@@ -63,12 +63,10 @@
 //! let embeddings = encoder.encode(image)?;
 //! ```
 
-use crate::error::{LociError, Result};
-use crate::multimodal::{Audio, Image, FusionStrategy};
-use crate::plugin::Plugin;
+use crate::error::Result;
+use crate::multimodal::{Audio, Image};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 /// Plugin ID for multimodal processors
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -272,10 +270,7 @@ impl MultimodalPluginRegistry {
     }
 
     /// Get vision encoder by ID
-    pub fn get_vision_encoder(
-        &self,
-        id: &ModalPluginId,
-    ) -> Option<&dyn VisionEncoderPlugin> {
+    pub fn get_vision_encoder(&self, id: &ModalPluginId) -> Option<&dyn VisionEncoderPlugin> {
         self.vision_encoders.get(id).map(|b| b.as_ref())
     }
 
@@ -285,10 +280,7 @@ impl MultimodalPluginRegistry {
     }
 
     /// Get fusion strategy by ID
-    pub fn get_fusion_strategy(
-        &self,
-        id: &ModalPluginId,
-    ) -> Option<&dyn FusionStrategyPlugin> {
+    pub fn get_fusion_strategy(&self, id: &ModalPluginId) -> Option<&dyn FusionStrategyPlugin> {
         self.fusion_strategies.get(id).map(|b| b.as_ref())
     }
 
@@ -439,6 +431,7 @@ struct CLIPVisionEncoder {
     version: String,
     embedding_dim: usize,
     image_size: usize,
+    #[allow(dead_code)]
     patch_size: usize,
 }
 
@@ -451,7 +444,7 @@ impl VisionEncoderPlugin for CLIPVisionEncoder {
         &self.version
     }
 
-    fn encode(&self, image: &Image) -> Result<Vec<f32>> {
+    fn encode(&self, _image: &Image) -> Result<Vec<f32>> {
         // Placeholder: Real CLIP encoding
         Ok(vec![0.0; self.embedding_dim])
     }
@@ -585,6 +578,7 @@ impl FusionStrategyPlugin for ConcatenateFusion {
 /// Attention-based fusion
 struct AttentionFusion {
     name: String,
+    #[allow(dead_code)]
     num_heads: usize,
 }
 

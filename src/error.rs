@@ -126,7 +126,7 @@ impl LociError {
     pub fn model_load_with_context(msg: String, path: String) -> LociErrorWithContext {
         let mut context_data = std::collections::HashMap::new();
         context_data.insert("model_path".to_string(), path);
-        
+
         let context = ErrorContext {
             operation: "model_loading".to_string(),
             component: "backend".to_string(),
@@ -135,7 +135,7 @@ impl LociError {
                 alternative: "Try a different model format or check file permissions".to_string(),
             }),
         };
-        
+
         LociError::ModelLoadError(msg).with_context(context)
     }
 
@@ -145,7 +145,7 @@ impl LociError {
         if let Some(id) = session_id {
             context_data.insert("session_id".to_string(), id);
         }
-        
+
         let context = ErrorContext {
             operation: "inference".to_string(),
             component: "engine".to_string(),
@@ -155,7 +155,7 @@ impl LociError {
                 delay_ms: 100,
             }),
         };
-        
+
         LociError::InferenceError(msg).with_context(context)
     }
 
@@ -233,19 +233,20 @@ pub struct LociErrorWithContext {
 
 impl std::fmt::Display for LociErrorWithContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} (in {} operation on {})", 
-               self.error, 
-               self.context.operation, 
-               self.context.component)?;
-        
+        write!(
+            f,
+            "{} (in {} operation on {})",
+            self.error, self.context.operation, self.context.component
+        )?;
+
         if !self.context.context.is_empty() {
             write!(f, " - Context: {:?}", self.context.context)?;
         }
-        
+
         if let Some(ref recovery) = self.context.recovery {
             write!(f, " - Suggested recovery: {:?}", recovery)?;
         }
-        
+
         Ok(())
     }
 }

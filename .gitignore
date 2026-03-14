@@ -41,3 +41,4 @@ dist/
 .hf_cache/
 outputs/
 examples/**/target/
+target-ninja/

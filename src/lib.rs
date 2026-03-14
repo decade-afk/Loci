@@ -44,6 +44,7 @@ pub mod error;
 pub mod execution_policy_plugin;
 pub mod function_calling;
 pub mod hooks;
+pub mod http_compat;
 pub mod image_kernel;
 pub mod inference;
 pub mod inference_cache;
@@ -54,6 +55,9 @@ pub mod mcp;
 pub mod mcp_registry;
 pub mod model;
 pub mod model_hot_swap;
+pub mod model_pull_jobs;
+pub mod model_pull_policy;
+pub mod model_pull_verifier;
 pub mod model_registry;
 pub mod model_store;
 pub mod multimodal;
@@ -61,12 +65,15 @@ pub mod multimodal_fusion;
 pub mod multimodal_io;
 pub mod multimodal_plugin;
 pub mod plugin;
+pub mod plugin_contract;
 pub mod plugin_registry;
 pub mod policy_registry;
 pub mod quantization;
 pub mod radix_cache;
 pub mod rag;
 pub mod resource_manager;
+pub mod resource_planner;
+pub mod runtime_events;
 pub mod sampler;
 pub mod serve_dispatch;
 pub mod session;
@@ -98,6 +105,14 @@ pub use execution_policy_plugin::{
 pub use function_calling::{
     FunctionCall, FunctionCallingManager, FunctionDefinition, FunctionHandler, FunctionParameter,
 };
+pub use http_compat::{
+    compatibility_created_at, estimate_token_count, normalize_openai_embedding_input,
+    openai_chat_messages_to_prompt, OllamaGenerateOptions, OllamaGenerateRequest,
+    OllamaGenerateResponse, OllamaModelTag, OllamaTagsResponse, OpenAiChatChoice,
+    OpenAiChatCompletionsRequest, OpenAiChatCompletionsResponse, OpenAiChatMessage,
+    OpenAiEmbeddingData, OpenAiEmbeddingInput, OpenAiEmbeddingsRequest, OpenAiEmbeddingsResponse,
+    OpenAiModelDescriptor, OpenAiModelListResponse, OpenAiUsage,
+};
 pub use image_kernel::{
     dynamic_image_plugin_from_opaque, dynamic_image_plugin_into_opaque, load_dynamic_image_plugin,
     DynamicImageKernel, DynamicImagePluginOpaque, ImageGenerationPlugin, ImageGenerationRequest,
@@ -119,16 +134,41 @@ pub use mcp::{
 };
 pub use mcp_registry::{McpServerConfig, McpServerRegistry};
 pub use model::{ModelConfig, ModelLoader};
+pub use model_pull_jobs::{
+    ModelPullJobEvent, ModelPullJobManager, ModelPullJobRequest, ModelPullJobSnapshot,
+    ModelPullJobState,
+};
+pub use model_pull_policy::{
+    authorize_model_pull_request, dynamic_model_pull_policy_from_opaque,
+    dynamic_model_pull_policy_into_opaque, load_dynamic_model_pull_policy, AllowAllModelPullPolicy,
+    DynamicModelPullPolicyOpaque, LoadedModelPullPolicy, LocalOnlyModelPullPolicy,
+    ModelPullPolicyContext, ModelPullPolicyDecision, ModelPullPolicyDescriptor,
+    ModelPullPolicyPlugin, ModelPullPolicyRegistry, RequireChecksumForRemoteModelPullPolicy,
+};
+pub use model_pull_verifier::{
+    dynamic_model_pull_verifier_from_opaque, dynamic_model_pull_verifier_into_opaque,
+    load_dynamic_model_pull_verifier, verify_model_pull, AllowAllModelPullVerifier,
+    DynamicModelPullVerifierOpaque, LoadedModelPullVerifier, ModelPullVerificationContext,
+    ModelPullVerifierDecision, ModelPullVerifierDescriptor, ModelPullVerifierPlugin,
+    ModelPullVerifierRegistry, SidecarSha256ModelPullVerifier,
+};
 pub use model_registry::{
     EnsembleCandidateResponse, EnsembleGeneration, EnsembleMergeStrategy, ModelBenchmark, ModelId,
     ModelInfo as RegistryModelInfo, ModelRegistry, ModelRoutingStrategy, RoutedGeneration,
     RoutingAttempt,
 };
-pub use model_store::{ModelPullOptions, ModelStore, StoredModel};
+pub use model_store::{
+    ModelPullOptions, ModelPullPhase, ModelPullProgress, ModelStore, StoredModel,
+};
 pub use multimodal_io::{
     dynamic_multimodal_io_plugin_from_opaque, dynamic_multimodal_io_plugin_into_opaque,
     DescriptorMultimodalIoPlugin, DynamicMultimodalIoPluginOpaque, MultimodalIoPlugin,
     MultimodalIoRegistry, MultimodalOutputPlan, MultimodalRequest, OutputModality,
+};
+pub use plugin_contract::{
+    load_and_validate_plugin_contract, load_plugin_contract_manifest,
+    validate_plugin_contract_manifest, validate_runtime_plugin_identity, PluginContractKind,
+    PluginContractManifest, LOCI_PLUGIN_ABI_VERSION,
 };
 pub use policy_registry::{DynamicPolicyRegistry, DynamicPolicyRegistryFile};
 pub use quantization::{
@@ -140,6 +180,10 @@ pub use rag::{
 };
 pub use resource_manager::{
     MonitorConfig, ResourceGuard, ResourceLimits, ResourceManager, ResourceStats,
+};
+pub use resource_planner::{ModelResourceEstimate, ResourcePlan, ResourcePlanner};
+pub use runtime_events::{
+    RuntimeEvent, RuntimeEventBus, RuntimeEventCategory, RuntimeEventOutcome,
 };
 pub use serve_dispatch::{
     dynamic_serve_dispatch_policy_from_opaque, dynamic_serve_dispatch_policy_into_opaque,
@@ -174,8 +218,8 @@ pub mod prelude {
         SimpleQLoRAAdapter,
     };
     pub use crate::backend::{
-        BackendCapabilities, BackendParams, BackendRegistry, InferenceBackend, InferenceParams,
-        Model, ModelMetadata,
+        BackendCapabilities, BackendParams, BackendRegistry, GpuSplitMode, InferenceBackend,
+        InferenceParams, Model, ModelMetadata,
     };
     pub use crate::backends::{
         CandleBackend, CandleModel, DynamicBackend, LlamaCppBackend, LlamaCppModel,
@@ -210,6 +254,14 @@ pub mod prelude {
         HookManager, HookPriority, InferenceHooks, LifecycleHooks, MemoryHooks, ModelHooks,
         SessionHooks, SpecialTokenType, TokenHooks,
     };
+    pub use crate::http_compat::{
+        compatibility_created_at, estimate_token_count, normalize_openai_embedding_input,
+        openai_chat_messages_to_prompt, OllamaGenerateOptions, OllamaGenerateRequest,
+        OllamaGenerateResponse, OllamaModelTag, OllamaTagsResponse, OpenAiChatChoice,
+        OpenAiChatCompletionsRequest, OpenAiChatCompletionsResponse, OpenAiChatMessage,
+        OpenAiEmbeddingData, OpenAiEmbeddingInput, OpenAiEmbeddingsRequest,
+        OpenAiEmbeddingsResponse, OpenAiModelDescriptor, OpenAiModelListResponse, OpenAiUsage,
+    };
     pub use crate::image_kernel::{
         dynamic_image_plugin_from_opaque, dynamic_image_plugin_into_opaque,
         load_dynamic_image_plugin, DynamicImageKernel, DynamicImagePluginOpaque,
@@ -241,11 +293,28 @@ pub mod prelude {
     pub use crate::model_hot_swap::{
         HotSwapModelRegistry, LoRAConfig, LoadedModel, ModelInfo as HotSwapModelInfo,
     };
+    pub use crate::model_pull_policy::{
+        authorize_model_pull_request, dynamic_model_pull_policy_from_opaque,
+        dynamic_model_pull_policy_into_opaque, load_dynamic_model_pull_policy,
+        AllowAllModelPullPolicy, DynamicModelPullPolicyOpaque, LoadedModelPullPolicy,
+        LocalOnlyModelPullPolicy, ModelPullPolicyContext, ModelPullPolicyDecision,
+        ModelPullPolicyDescriptor, ModelPullPolicyPlugin, ModelPullPolicyRegistry,
+        RequireChecksumForRemoteModelPullPolicy,
+    };
+    pub use crate::model_pull_verifier::{
+        dynamic_model_pull_verifier_from_opaque, dynamic_model_pull_verifier_into_opaque,
+        load_dynamic_model_pull_verifier, verify_model_pull, AllowAllModelPullVerifier,
+        DynamicModelPullVerifierOpaque, LoadedModelPullVerifier, ModelPullVerificationContext,
+        ModelPullVerifierDecision, ModelPullVerifierDescriptor, ModelPullVerifierPlugin,
+        ModelPullVerifierRegistry, SidecarSha256ModelPullVerifier,
+    };
     pub use crate::model_registry::{
         EnsembleCandidateResponse, EnsembleGeneration, EnsembleMergeStrategy, ModelBenchmark,
         ModelId, ModelInfo, ModelRegistry, ModelRoutingStrategy, RoutedGeneration, RoutingAttempt,
     };
-    pub use crate::model_store::{ModelPullOptions, ModelStore, StoredModel};
+    pub use crate::model_store::{
+        ModelPullOptions, ModelPullPhase, ModelPullProgress, ModelStore, StoredModel,
+    };
     pub use crate::multimodal::{
         Audio, AudioEncoderConfig, AudioEncoderType, Image, ImageFormat, ImagePatch, Modality,
         ModalityToken, MultimodalInput, MultimodalModelAdapter, MultimodalProcessor,
@@ -265,6 +334,11 @@ pub mod prelude {
         PreprocessingPlugin, VisionEncoderPlugin,
     };
     pub use crate::plugin::{Plugin, PluginManager};
+    pub use crate::plugin_contract::{
+        load_and_validate_plugin_contract, load_plugin_contract_manifest,
+        validate_plugin_contract_manifest, validate_runtime_plugin_identity, PluginContractKind,
+        PluginContractManifest, LOCI_PLUGIN_ABI_VERSION,
+    };
     pub use crate::plugin_registry::{
         create_shared_registry, PluginConfig, PluginRegistry, PluginType, RegistryConfig,
         SharedRegistry,
@@ -282,6 +356,10 @@ pub mod prelude {
     };
     pub use crate::resource_manager::{
         MonitorConfig, ResourceGuard, ResourceLimits, ResourceManager, ResourceStats,
+    };
+    pub use crate::resource_planner::{ModelResourceEstimate, ResourcePlan, ResourcePlanner};
+    pub use crate::runtime_events::{
+        RuntimeEvent, RuntimeEventBus, RuntimeEventCategory, RuntimeEventOutcome,
     };
     pub use crate::sampler::{
         sample_token, DefaultSampler, GreedySampler, LogitsView, MirostatSampler, Sampler,

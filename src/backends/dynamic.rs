@@ -1,5 +1,8 @@
 use crate::backend::{BackendCapabilities, BackendParams, InferenceBackend, Model};
 use crate::error::{LociError, Result};
+use crate::plugin_contract::{
+    load_and_validate_plugin_contract, validate_runtime_plugin_identity, PluginContractKind,
+};
 use libloading::{Library, Symbol};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
@@ -59,6 +62,8 @@ pub struct DynamicBackend {
 impl DynamicBackend {
     pub fn load<P: AsRef<Path>>(library_path: P) -> Result<Self> {
         let source_path = library_path.as_ref().to_path_buf();
+        let manifest =
+            load_and_validate_plugin_contract(&source_path, PluginContractKind::Backend)?;
 
         let library = unsafe { Library::new(&source_path) }.map_err(|e| {
             LociError::BackendError(format!(
@@ -70,8 +75,7 @@ impl DynamicBackend {
 
         let library = Arc::new(library);
         let backend = unsafe {
-            if let Ok(constructor_v1) = library.get::<BackendConstructorV1>(b"create_backend_v1")
-            {
+            if let Ok(constructor_v1) = library.get::<BackendConstructorV1>(b"create_backend_v1") {
                 let backend_opaque = constructor_v1();
                 dynamic_backend_from_opaque(backend_opaque).ok_or_else(|| {
                     LociError::BackendError(format!(
@@ -100,6 +104,13 @@ impl DynamicBackend {
                 Box::from_raw(backend_ptr)
             }
         };
+
+        let capabilities = backend.capabilities();
+        validate_runtime_plugin_identity(
+            manifest.as_ref(),
+            &capabilities.name,
+            &capabilities.version,
+        )?;
 
         Ok(Self {
             backend,

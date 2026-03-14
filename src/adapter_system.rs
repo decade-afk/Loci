@@ -141,12 +141,12 @@ impl Adapter for SimpleLoRAAdapter {
         // Simplified LoRA application
         let scaling = self.config.alpha / self.config.rank as f32;
         let mut output = input.to_vec();
-        
+
         // Placeholder: add small delta
         for val in &mut output {
             *val += scaling * 0.01;
         }
-        
+
         output
     }
 
@@ -154,11 +154,11 @@ impl Adapter for SimpleLoRAAdapter {
         // Simplified merge
         let scaling = self.config.alpha / self.config.rank as f32;
         let mut merged = base_weights.to_vec();
-        
+
         for val in &mut merged {
             *val += scaling * 0.01;
         }
-        
+
         merged
     }
 
@@ -201,22 +201,22 @@ impl Adapter for SimpleQLoRAAdapter {
         // Simplified QLoRA application
         let scaling = self.config.alpha / self.config.rank as f32;
         let mut output = input.to_vec();
-        
+
         for val in &mut output {
             *val += scaling * 0.005; // Smaller delta for quantized
         }
-        
+
         output
     }
 
     fn merge(&self, base_weights: &[f32]) -> Vec<f32> {
         let scaling = self.config.alpha / self.config.rank as f32;
         let mut merged = base_weights.to_vec();
-        
+
         for val in &mut merged {
             *val += scaling * 0.005;
         }
-        
+
         merged
     }
 
@@ -284,14 +284,20 @@ impl AdapterRegistry {
     pub fn apply_adapter(&self, id: AdapterId, input: &[f32]) -> Result<Vec<f32>> {
         match self.adapters.get(&id) {
             Some(adapter) => Ok(adapter.apply(input)),
-            None => Err(LociError::InvalidArgument(format!("Adapter {} not found", id.0))),
+            None => Err(LociError::InvalidArgument(format!(
+                "Adapter {} not found",
+                id.0
+            ))),
         }
     }
 
     pub fn merge_adapter(&self, id: AdapterId, base_weights: &[f32]) -> Result<Vec<f32>> {
         match self.adapters.get(&id) {
             Some(adapter) => Ok(adapter.merge(base_weights)),
-            None => Err(LociError::InvalidArgument(format!("Adapter {} not found", id.0))),
+            None => Err(LociError::InvalidArgument(format!(
+                "Adapter {} not found",
+                id.0
+            ))),
         }
     }
 
@@ -302,7 +308,10 @@ impl AdapterRegistry {
     pub fn save_adapter(&self, id: AdapterId, path: &PathBuf) -> Result<()> {
         match self.adapters.get(&id) {
             Some(adapter) => adapter.save(path),
-            None => Err(LociError::InvalidArgument(format!("Adapter {} not found", id.0))),
+            None => Err(LociError::InvalidArgument(format!(
+                "Adapter {} not found",
+                id.0
+            ))),
         }
     }
 }
@@ -314,10 +323,10 @@ mod tests {
     #[test]
     fn test_adapter_registry() {
         let mut registry = AdapterRegistry::new();
-        
+
         let lora_config = LoRAAdapterConfig::default();
         let lora_id = registry.register_lora(lora_config).unwrap();
-        
+
         assert!(registry.get_adapter(lora_id).is_some());
         assert_eq!(registry.list_adapters().len(), 1);
     }
@@ -326,10 +335,10 @@ mod tests {
     fn test_lora_adapter() {
         let config = LoRAAdapterConfig::default();
         let adapter = SimpleLoRAAdapter::new(AdapterId::new(1), config);
-        
+
         let input = vec![1.0; 128];
         let output = adapter.apply(&input);
-        
+
         assert_eq!(output.len(), 128);
         assert_eq!(adapter.adapter_type(), AdapterType::LoRA);
     }
@@ -338,10 +347,10 @@ mod tests {
     fn test_qlora_adapter() {
         let config = QLoRAAdapterConfig::default();
         let adapter = SimpleQLoRAAdapter::new(AdapterId::new(2), config);
-        
+
         let input = vec![1.0; 128];
         let output = adapter.apply(&input);
-        
+
         assert_eq!(output.len(), 128);
         assert_eq!(adapter.adapter_type(), AdapterType::QLoRA);
     }

@@ -109,7 +109,9 @@ pub struct InMemoryVectorStore {
 
 impl InMemoryVectorStore {
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -221,12 +223,7 @@ where
         self.store.search(&query_embedding, top_k)
     }
 
-    pub fn augment_prompt(
-        &self,
-        query: &str,
-        top_k: usize,
-        instruction: Option<&str>,
-    ) -> String {
+    pub fn augment_prompt(&self, query: &str, top_k: usize, instruction: Option<&str>) -> String {
         let context = self.retrieve(query, top_k);
         let mut output = String::new();
 

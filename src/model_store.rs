@@ -6,6 +6,13 @@
 //! - Listing/querying/removing model records
 
 use crate::error::{LociError, Result};
+use crate::model_pull_policy::{
+    authorize_model_pull_request, ModelPullPolicyContext, ModelPullPolicyPlugin,
+};
+use crate::model_pull_verifier::{
+    verify_model_pull, ModelPullVerificationContext, ModelPullVerifierPlugin,
+};
+use crate::timeout_controller::CancellationHandle;
 use reqwest::blocking::Client;
 use reqwest::header::RANGE;
 use reqwest::StatusCode;
@@ -55,6 +62,30 @@ impl Default for ModelPullOptions {
             resume: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelPullPhase {
+    Resolving,
+    Fetching,
+    Verifying,
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelPullProgress {
+    pub phase: ModelPullPhase,
+    pub source: Option<String>,
+    pub model_id: Option<String>,
+    pub destination: Option<PathBuf>,
+    pub bytes_transferred: u64,
+    pub total_bytes: Option<u64>,
+    pub resumed_bytes: u64,
+    pub done: bool,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +196,67 @@ impl ModelStore {
         tags: Vec<String>,
         options: ModelPullOptions,
     ) -> Result<StoredModel> {
+        self.pull_from_source_with_options_and_progress_and_policy_and_verifier_and_cancellation(
+            source,
+            id,
+            name,
+            tags,
+            options,
+            None,
+            None,
+            None,
+            &mut |_| {},
+        )
+    }
+
+    pub fn pull_from_source_with_options_and_progress<F>(
+        &self,
+        source: &str,
+        id: Option<String>,
+        name: Option<String>,
+        tags: Vec<String>,
+        options: ModelPullOptions,
+        on_progress: &mut F,
+    ) -> Result<StoredModel>
+    where
+        F: FnMut(ModelPullProgress),
+    {
+        self.pull_from_source_with_options_and_progress_and_policy_and_verifier_and_cancellation(
+            source,
+            id,
+            name,
+            tags,
+            options,
+            None,
+            None,
+            None,
+            on_progress,
+        )
+    }
+
+    pub fn pull_from_source_with_options_and_progress_and_policy_and_verifier_and_cancellation<F>(
+        &self,
+        source: &str,
+        id: Option<String>,
+        name: Option<String>,
+        tags: Vec<String>,
+        options: ModelPullOptions,
+        policy: Option<&dyn ModelPullPolicyPlugin>,
+        verifier: Option<&dyn ModelPullVerifierPlugin>,
+        cancellation: Option<&CancellationHandle>,
+        on_progress: &mut F,
+    ) -> Result<StoredModel>
+    where
+        F: FnMut(ModelPullProgress),
+    {
+        authorize_model_pull_policy(
+            policy,
+            source,
+            &options,
+            id.as_deref(),
+            name.as_deref(),
+            &tags,
+        )?;
         self.ensure_layout()?;
         let mut store = self.load_store_file()?;
         let default_name = source_default_name(source, is_url_source(source));
@@ -181,7 +273,49 @@ impl ModelStore {
         let mut errors = Vec::new();
 
         for candidate in &candidate_sources {
-            if let Err(e) = fetch_source_to_path(candidate, &dest_abs, options.resume) {
+            check_pull_cancellation(cancellation, Some(&dest_abs))?;
+            emit_model_pull_progress(
+                on_progress,
+                ModelPullProgress {
+                    phase: ModelPullPhase::Resolving,
+                    source: Some(candidate.clone()),
+                    model_id: Some(model_id.clone()),
+                    destination: Some(dest_abs.clone()),
+                    bytes_transferred: 0,
+                    total_bytes: None,
+                    resumed_bytes: 0,
+                    done: false,
+                    message: format!("trying source '{}'", candidate),
+                    error: None,
+                },
+            );
+
+            if let Err(e) = fetch_source_to_path_with_progress(
+                candidate,
+                &dest_abs,
+                options.resume,
+                Some(model_id.as_str()),
+                cancellation,
+                on_progress,
+            ) {
+                if is_cancelled_error(&e) {
+                    return Err(e);
+                }
+                emit_model_pull_progress(
+                    on_progress,
+                    ModelPullProgress {
+                        phase: ModelPullPhase::Fetching,
+                        source: Some(candidate.clone()),
+                        model_id: Some(model_id.clone()),
+                        destination: Some(dest_abs.clone()),
+                        bytes_transferred: 0,
+                        total_bytes: None,
+                        resumed_bytes: 0,
+                        done: false,
+                        message: format!("source '{}' failed", candidate),
+                        error: Some(e.to_string()),
+                    },
+                );
                 errors.push(format!("{}: {}", candidate, e));
                 if dest_abs.exists() {
                     let _ = fs::remove_file(&dest_abs);
@@ -203,7 +337,24 @@ impl ModelStore {
         };
 
         let normalized_dest = normalize_path(&dest_abs)?;
+        check_pull_cancellation(cancellation, Some(&normalized_dest))?;
         let size_bytes = file_size(&normalized_dest)?;
+        emit_model_pull_progress(
+            on_progress,
+            ModelPullProgress {
+                phase: ModelPullPhase::Verifying,
+                source: Some(selected_source.clone()),
+                model_id: Some(model_id.clone()),
+                destination: Some(normalized_dest.clone()),
+                bytes_transferred: size_bytes,
+                total_bytes: Some(size_bytes),
+                resumed_bytes: 0,
+                done: false,
+                message: "verifying checksums".to_string(),
+                error: None,
+            },
+        );
+        check_pull_cancellation(cancellation, Some(&normalized_dest))?;
         let checksum_xxh64 = compute_file_xxh64(&normalized_dest)?;
         let checksum_sha256 = compute_file_sha256(&normalized_dest)?;
         if let Some(expected_sha256) = options.expected_sha256.as_deref() {
@@ -216,12 +367,24 @@ impl ModelStore {
                 )));
             }
         }
+        verify_model_pull_verifier(
+            verifier,
+            source,
+            &selected_source,
+            &options,
+            id.as_deref(),
+            Some(base_name.as_str()),
+            &tags,
+            &normalized_dest,
+            size_bytes,
+            &checksum_sha256,
+        )?;
 
         let model = StoredModel {
             id: model_id,
             name: base_name,
             path: normalized_dest.clone(),
-            source: selected_source,
+            source: selected_source.clone(),
             size_bytes,
             checksum_xxh64,
             checksum_sha256: Some(checksum_sha256),
@@ -229,9 +392,78 @@ impl ModelStore {
             tags,
             managed: true,
         };
+        check_pull_cancellation(cancellation, Some(&model.path))?;
         store.models.push(model.clone());
         self.save_store_file(&store)?;
+        emit_model_pull_progress(
+            on_progress,
+            ModelPullProgress {
+                phase: ModelPullPhase::Completed,
+                source: Some(selected_source),
+                model_id: Some(model.id.clone()),
+                destination: Some(model.path.clone()),
+                bytes_transferred: model.size_bytes,
+                total_bytes: Some(model.size_bytes),
+                resumed_bytes: 0,
+                done: true,
+                message: "model import completed".to_string(),
+                error: None,
+            },
+        );
         Ok(model)
+    }
+
+    pub fn pull_from_source_with_options_and_progress_and_cancellation<F>(
+        &self,
+        source: &str,
+        id: Option<String>,
+        name: Option<String>,
+        tags: Vec<String>,
+        options: ModelPullOptions,
+        cancellation: Option<&CancellationHandle>,
+        on_progress: &mut F,
+    ) -> Result<StoredModel>
+    where
+        F: FnMut(ModelPullProgress),
+    {
+        self.pull_from_source_with_options_and_progress_and_policy_and_verifier_and_cancellation(
+            source,
+            id,
+            name,
+            tags,
+            options,
+            None,
+            None,
+            cancellation,
+            on_progress,
+        )
+    }
+
+    pub fn pull_from_source_with_options_and_progress_and_policy_and_cancellation<F>(
+        &self,
+        source: &str,
+        id: Option<String>,
+        name: Option<String>,
+        tags: Vec<String>,
+        options: ModelPullOptions,
+        policy: Option<&dyn ModelPullPolicyPlugin>,
+        cancellation: Option<&CancellationHandle>,
+        on_progress: &mut F,
+    ) -> Result<StoredModel>
+    where
+        F: FnMut(ModelPullProgress),
+    {
+        self.pull_from_source_with_options_and_progress_and_policy_and_verifier_and_cancellation(
+            source,
+            id,
+            name,
+            tags,
+            options,
+            policy,
+            None,
+            cancellation,
+            on_progress,
+        )
     }
 
     pub fn list(&self) -> Result<Vec<StoredModel>> {
@@ -414,9 +646,120 @@ fn build_candidate_sources(primary: &str, mirrors: &[String]) -> Vec<String> {
     out
 }
 
-fn fetch_source_to_path(source: &str, destination: &Path, resume: bool) -> Result<()> {
+fn emit_model_pull_progress<F>(on_progress: &mut F, progress: ModelPullProgress)
+where
+    F: FnMut(ModelPullProgress),
+{
+    on_progress(progress);
+}
+
+fn authorize_model_pull_policy(
+    policy: Option<&dyn ModelPullPolicyPlugin>,
+    source: &str,
+    options: &ModelPullOptions,
+    requested_id: Option<&str>,
+    requested_name: Option<&str>,
+    tags: &[String],
+) -> Result<()> {
+    let Some(policy) = policy else {
+        return Ok(());
+    };
+    let context = ModelPullPolicyContext::new(
+        source,
+        options.mirrors.clone(),
+        requested_id.map(str::to_string),
+        requested_name.map(str::to_string),
+        options.expected_sha256.clone(),
+        options.resume,
+        tags.to_vec(),
+    );
+    authorize_model_pull_request(policy, &context).map_err(|reason| {
+        LociError::ConfigError(format!(
+            "model pull denied by policy '{}': {}",
+            policy.name(),
+            reason
+        ))
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_model_pull_verifier(
+    verifier: Option<&dyn ModelPullVerifierPlugin>,
+    requested_source: &str,
+    selected_source: &str,
+    options: &ModelPullOptions,
+    requested_id: Option<&str>,
+    requested_name: Option<&str>,
+    tags: &[String],
+    path: &Path,
+    size_bytes: u64,
+    checksum_sha256: &str,
+) -> Result<()> {
+    let Some(verifier) = verifier else {
+        return Ok(());
+    };
+    let context = ModelPullVerificationContext::new(
+        requested_source,
+        selected_source,
+        options.mirrors.clone(),
+        requested_id.map(str::to_string),
+        requested_name.map(str::to_string),
+        options.expected_sha256.clone(),
+        tags.to_vec(),
+        path.to_path_buf(),
+        size_bytes,
+        checksum_sha256.to_string(),
+    );
+    verify_model_pull(verifier, &context).map_err(|reason| {
+        let _ = fs::remove_file(path);
+        LociError::ConfigError(format!(
+            "model pull verifier '{}' rejected asset: {}",
+            verifier.name(),
+            reason
+        ))
+    })
+}
+
+fn is_cancelled_error(err: &LociError) -> bool {
+    matches!(err, LociError::Timeout(message) if message.to_ascii_lowercase().contains("cancel"))
+}
+
+fn check_pull_cancellation(
+    cancellation: Option<&CancellationHandle>,
+    cleanup_path: Option<&Path>,
+) -> Result<()> {
+    if cancellation
+        .map(CancellationHandle::is_cancelled)
+        .unwrap_or(false)
+    {
+        if let Some(path) = cleanup_path {
+            let _ = fs::remove_file(path);
+        }
+        return Err(LociError::Timeout("Operation cancelled".to_string()));
+    }
+    Ok(())
+}
+
+fn fetch_source_to_path_with_progress<F>(
+    source: &str,
+    destination: &Path,
+    resume: bool,
+    model_id: Option<&str>,
+    cancellation: Option<&CancellationHandle>,
+    on_progress: &mut F,
+) -> Result<()>
+where
+    F: FnMut(ModelPullProgress),
+{
     if is_url_source(source) {
-        download_url_to_file(source, destination, resume)
+        download_url_to_file_with_progress(
+            source,
+            destination,
+            resume,
+            model_id,
+            cancellation,
+            on_progress,
+        )
     } else {
         let source_path = PathBuf::from(source);
         if !source_path.exists() {
@@ -425,17 +768,13 @@ fn fetch_source_to_path(source: &str, destination: &Path, resume: bool) -> Resul
                 source_path.display()
             )));
         }
-        fs::copy(&source_path, destination).map_err(|e| {
-            LociError::IoError(std::io::Error::new(
-                e.kind(),
-                format!(
-                    "failed to import model from '{}' to '{}': {}",
-                    source_path.display(),
-                    destination.display(),
-                    e
-                ),
-            ))
-        })?;
+        copy_file_with_progress(
+            &source_path,
+            destination,
+            model_id,
+            cancellation,
+            on_progress,
+        )?;
         Ok(())
     }
 }
@@ -454,7 +793,22 @@ fn normalize_sha256(raw: &str) -> Result<String> {
     Ok(normalized)
 }
 
+#[cfg(test)]
 fn download_url_to_file(url: &str, destination: &Path, resume: bool) -> Result<()> {
+    download_url_to_file_with_progress(url, destination, resume, None, None, &mut |_| {})
+}
+
+fn download_url_to_file_with_progress<F>(
+    url: &str,
+    destination: &Path,
+    resume: bool,
+    model_id: Option<&str>,
+    cancellation: Option<&CancellationHandle>,
+    on_progress: &mut F,
+) -> Result<()>
+where
+    F: FnMut(ModelPullProgress),
+{
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()
@@ -476,8 +830,24 @@ fn download_url_to_file(url: &str, destination: &Path, resume: bool) -> Result<(
         .map_err(|e| LociError::NetworkError(format!("failed downloading '{url}': {e}")))?;
 
     if response.status() == StatusCode::RANGE_NOT_SATISFIABLE && existing_bytes > 0 {
+        emit_model_pull_progress(
+            on_progress,
+            ModelPullProgress {
+                phase: ModelPullPhase::Fetching,
+                source: Some(url.to_string()),
+                model_id: model_id.map(|id| id.to_string()),
+                destination: Some(destination.to_path_buf()),
+                bytes_transferred: existing_bytes,
+                total_bytes: Some(existing_bytes),
+                resumed_bytes: existing_bytes,
+                done: false,
+                message: "range request already satisfied".to_string(),
+                error: None,
+            },
+        );
         return Ok(());
     }
+    check_pull_cancellation(cancellation, Some(destination))?;
     if existing_bytes > 0
         && response.status() != StatusCode::PARTIAL_CONTENT
         && response.status() == StatusCode::OK
@@ -520,16 +890,161 @@ fn download_url_to_file(url: &str, destination: &Path, resume: bool) -> Result<(
         })?
     };
 
-    std::io::copy(&mut response, &mut output).map_err(|e| {
+    let total_bytes = if append_mode {
+        response
+            .content_length()
+            .map(|remaining| remaining.saturating_add(existing_bytes))
+    } else {
+        response.content_length()
+    };
+    let mut transferred = existing_bytes;
+    emit_model_pull_progress(
+        on_progress,
+        ModelPullProgress {
+            phase: ModelPullPhase::Fetching,
+            source: Some(url.to_string()),
+            model_id: model_id.map(|id| id.to_string()),
+            destination: Some(destination.to_path_buf()),
+            bytes_transferred: transferred,
+            total_bytes,
+            resumed_bytes: existing_bytes,
+            done: false,
+            message: if append_mode {
+                "resuming download".to_string()
+            } else {
+                "starting download".to_string()
+            },
+            error: None,
+        },
+    );
+
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        check_pull_cancellation(cancellation, Some(destination))?;
+        let bytes = response.read(&mut buffer).map_err(|e| {
+            LociError::IoError(std::io::Error::new(
+                e.kind(),
+                format!("failed reading response body from '{url}': {}", e),
+            ))
+        })?;
+        if bytes == 0 {
+            break;
+        }
+        output.write_all(&buffer[..bytes]).map_err(|e| {
+            LociError::IoError(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "failed writing downloaded bytes to '{}': {}",
+                    destination.display(),
+                    e
+                ),
+            ))
+        })?;
+        transferred = transferred.saturating_add(bytes as u64);
+        emit_model_pull_progress(
+            on_progress,
+            ModelPullProgress {
+                phase: ModelPullPhase::Fetching,
+                source: Some(url.to_string()),
+                model_id: model_id.map(|id| id.to_string()),
+                destination: Some(destination.to_path_buf()),
+                bytes_transferred: transferred,
+                total_bytes,
+                resumed_bytes: existing_bytes,
+                done: false,
+                message: "downloading model bytes".to_string(),
+                error: None,
+            },
+        );
+    }
+    output.flush()?;
+    Ok(())
+}
+
+fn copy_file_with_progress<F>(
+    source: &Path,
+    destination: &Path,
+    model_id: Option<&str>,
+    cancellation: Option<&CancellationHandle>,
+    on_progress: &mut F,
+) -> Result<()>
+where
+    F: FnMut(ModelPullProgress),
+{
+    let total_bytes = fs::metadata(source).map(|metadata| metadata.len()).ok();
+    let mut input = fs::File::open(source).map_err(|e| {
+        LociError::IoError(std::io::Error::new(
+            e.kind(),
+            format!("failed opening source model '{}': {}", source.display(), e),
+        ))
+    })?;
+    let mut output = fs::File::create(destination).map_err(|e| {
         LociError::IoError(std::io::Error::new(
             e.kind(),
             format!(
-                "failed writing downloaded bytes to '{}': {}",
+                "failed creating destination file '{}': {}",
                 destination.display(),
                 e
             ),
         ))
     })?;
+
+    let mut transferred = 0u64;
+    emit_model_pull_progress(
+        on_progress,
+        ModelPullProgress {
+            phase: ModelPullPhase::Fetching,
+            source: Some(source.display().to_string()),
+            model_id: model_id.map(|id| id.to_string()),
+            destination: Some(destination.to_path_buf()),
+            bytes_transferred: 0,
+            total_bytes,
+            resumed_bytes: 0,
+            done: false,
+            message: "starting local model import".to_string(),
+            error: None,
+        },
+    );
+
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        check_pull_cancellation(cancellation, Some(destination))?;
+        let bytes = input.read(&mut buffer).map_err(|e| {
+            LociError::IoError(std::io::Error::new(
+                e.kind(),
+                format!("failed reading source model '{}': {}", source.display(), e),
+            ))
+        })?;
+        if bytes == 0 {
+            break;
+        }
+        output.write_all(&buffer[..bytes]).map_err(|e| {
+            LociError::IoError(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "failed writing imported model to '{}': {}",
+                    destination.display(),
+                    e
+                ),
+            ))
+        })?;
+        transferred = transferred.saturating_add(bytes as u64);
+        emit_model_pull_progress(
+            on_progress,
+            ModelPullProgress {
+                phase: ModelPullPhase::Fetching,
+                source: Some(source.display().to_string()),
+                model_id: model_id.map(|id| id.to_string()),
+                destination: Some(destination.to_path_buf()),
+                bytes_transferred: transferred,
+                total_bytes,
+                resumed_bytes: 0,
+                done: false,
+                message: "importing local model bytes".to_string(),
+                error: None,
+            },
+        );
+    }
     output.flush()?;
     Ok(())
 }
@@ -582,6 +1097,8 @@ fn unix_ms_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_pull_policy::LocalOnlyModelPullPolicy;
+    use crate::timeout_controller::TimeoutContext;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
@@ -682,6 +1199,94 @@ mod tests {
         assert_eq!(pulled.id, "remote-model");
         assert_eq!(pulled.source, url);
         assert_eq!(fs::read(&pulled.path).unwrap(), body);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pull_reports_progress_for_local_file() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("progress.gguf");
+        fs::write(&source, b"progress bytes for local import").unwrap();
+
+        let store = ModelStore::new(root.join("store"));
+        let mut events = Vec::new();
+        let pulled = store
+            .pull_from_source_with_options_and_progress(
+                &source.to_string_lossy(),
+                Some("progress-local".to_string()),
+                None,
+                vec![],
+                ModelPullOptions::default(),
+                &mut |event| events.push(event),
+            )
+            .unwrap();
+
+        assert_eq!(pulled.id, "progress-local");
+        assert!(!events.is_empty());
+        assert!(events
+            .iter()
+            .any(|event| event.phase == ModelPullPhase::Fetching));
+        assert!(events
+            .iter()
+            .any(|event| event.phase == ModelPullPhase::Verifying));
+        assert_eq!(events.last().map(|event| event.done), Some(true));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pull_can_be_cancelled_before_copy_starts() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("cancel.gguf");
+        fs::write(&source, b"cancel bytes for local import").unwrap();
+
+        let store = ModelStore::new(root.join("store"));
+        let cancellation = TimeoutContext::disabled().cancellation_handle();
+        cancellation.cancel();
+
+        let result = store.pull_from_source_with_options_and_progress_and_cancellation(
+            &source.to_string_lossy(),
+            Some("cancel-local".to_string()),
+            None,
+            vec![],
+            ModelPullOptions::default(),
+            Some(&cancellation),
+            &mut |_| {},
+        );
+
+        assert!(
+            matches!(result, Err(LociError::Timeout(message)) if message.contains("cancelled"))
+        );
+        assert!(store.list().unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pull_policy_can_deny_remote_source_before_fetch() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).unwrap();
+        let store = ModelStore::new(root.join("store"));
+        let policy = LocalOnlyModelPullPolicy;
+
+        let result = store.pull_from_source_with_options_and_progress_and_policy_and_cancellation(
+            "https://example.com/model.gguf",
+            Some("remote-blocked".to_string()),
+            None,
+            vec!["managed".to_string()],
+            ModelPullOptions::default(),
+            Some(&policy),
+            None,
+            &mut |_| {},
+        );
+
+        assert!(
+            matches!(result, Err(LociError::ConfigError(message)) if message.contains("model pull denied by policy"))
+        );
+        assert!(store.list().unwrap_or_default().is_empty());
 
         let _ = fs::remove_dir_all(root);
     }

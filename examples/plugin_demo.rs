@@ -4,8 +4,8 @@
 // Run with: cargo run --example plugin_demo --features plugin-examples
 
 use loci::error::Result;
+#[cfg(feature = "plugin-examples")]
 use loci::plugin::Plugin;
-use loci::prelude::*;
 
 #[cfg(feature = "plugin-examples")]
 use loci::examples::plugins::*;

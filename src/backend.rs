@@ -20,6 +20,7 @@
 
 use crate::backends::{CandleBackend, DynamicBackend, LlamaCppBackend};
 use crate::error::{LociError, Result};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Image data for multimodal inference
@@ -49,6 +50,18 @@ pub enum ImageFormat {
     Webp,
 }
 
+/// Strategy for splitting model tensors across multiple GPUs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum GpuSplitMode {
+    /// Keep the model on a single selected GPU.
+    None,
+    /// Split layers (and KV) across multiple GPUs.
+    #[default]
+    Layer,
+    /// Split rows/tensors across multiple GPUs when backend supports tensor parallelism.
+    Row,
+}
+
 /// Parameters for backend initialization
 #[derive(Debug, Clone)]
 pub struct BackendParams {
@@ -56,6 +69,20 @@ pub struct BackendParams {
     pub n_gpu_layers: i32,
     /// Use GPU acceleration
     pub use_gpu: bool,
+    /// Use memory-mapped model loading when available
+    pub use_mmap: bool,
+    /// Lock model pages into RAM when available
+    pub use_mlock: bool,
+    /// Offload K/Q/V ops and KV cache to device
+    pub kv_offload: bool,
+    /// Offload host tensor ops to device
+    pub op_offload: bool,
+    /// Multi-GPU split strategy
+    pub split_mode: GpuSplitMode,
+    /// Primary GPU index used for single-GPU placement
+    pub main_gpu: u32,
+    /// Relative split weights for each GPU
+    pub tensor_split: Option<Vec<f32>>,
     /// Additional backend-specific options
     pub options: Vec<(String, String)>,
 }
@@ -65,6 +92,13 @@ impl Default for BackendParams {
         Self {
             n_gpu_layers: -1,
             use_gpu: true,
+            use_mmap: true,
+            use_mlock: false,
+            kv_offload: true,
+            op_offload: true,
+            split_mode: GpuSplitMode::Layer,
+            main_gpu: 0,
+            tensor_split: None,
             options: Vec::new(),
         }
     }
@@ -377,10 +411,7 @@ impl BackendRegistry {
 
     /// List all registered backends
     pub fn list(&self) -> Vec<BackendCapabilities> {
-        self.backends
-            .values()
-            .map(|b| b.capabilities())
-            .collect()
+        self.backends.values().map(|b| b.capabilities()).collect()
     }
 }
 

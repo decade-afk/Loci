@@ -114,10 +114,15 @@ impl McpServerRegistry {
     pub fn load_from_file<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
         let path = path.as_ref();
         let content = std::fs::read_to_string(path).map_err(|e| {
-            LociError::ConfigError(format!("Failed to read MCP registry '{}': {}", path.display(), e))
+            LociError::ConfigError(format!(
+                "Failed to read MCP registry '{}': {}",
+                path.display(),
+                e
+            ))
         })?;
-        let file: McpRegistryFile = toml::from_str(&content)
-            .map_err(|e| LociError::ConfigError(format!("Failed to parse MCP registry TOML: {e}")))?;
+        let file: McpRegistryFile = toml::from_str(&content).map_err(|e| {
+            LociError::ConfigError(format!("Failed to parse MCP registry TOML: {e}"))
+        })?;
 
         self.servers.clear();
         for server in file.servers {
@@ -146,9 +151,10 @@ impl McpServerRegistry {
     }
 
     pub fn persist(&self) -> Result<()> {
-        let path = self.config_path.as_ref().ok_or_else(|| {
-            LociError::ConfigError("No MCP registry path configured".to_string())
-        })?;
+        let path = self
+            .config_path
+            .as_ref()
+            .ok_or_else(|| LociError::ConfigError("No MCP registry path configured".to_string()))?;
         self.save_to_file(path)
     }
 
@@ -170,17 +176,19 @@ impl McpServerRegistry {
     }
 
     pub fn enable(&mut self, name: &str) -> Result<()> {
-        let entry = self.servers.get_mut(name).ok_or_else(|| {
-            LociError::PluginError(format!("MCP server '{}' not found", name))
-        })?;
+        let entry = self
+            .servers
+            .get_mut(name)
+            .ok_or_else(|| LociError::PluginError(format!("MCP server '{}' not found", name)))?;
         entry.enabled = true;
         Ok(())
     }
 
     pub fn disable(&mut self, name: &str) -> Result<()> {
-        let entry = self.servers.get_mut(name).ok_or_else(|| {
-            LociError::PluginError(format!("MCP server '{}' not found", name))
-        })?;
+        let entry = self
+            .servers
+            .get_mut(name)
+            .ok_or_else(|| LociError::PluginError(format!("MCP server '{}' not found", name)))?;
         entry.enabled = false;
         Ok(())
     }
@@ -223,7 +231,10 @@ mod tests {
             .upsert(McpServerConfig {
                 name: "fs".to_string(),
                 command: "npx".to_string(),
-                args: vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()],
+                args: vec![
+                    "-y".to_string(),
+                    "@modelcontextprotocol/server-filesystem".to_string(),
+                ],
                 enabled: true,
                 working_directory: None,
                 env: HashMap::new(),

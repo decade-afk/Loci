@@ -133,9 +133,7 @@ impl SessionBus {
     ) -> Result<(), BusError> {
         let channels = self.channels.read();
 
-        let target_channel = channels
-            .get(&to)
-            .ok_or(BusError::SessionNotFound(to))?;
+        let target_channel = channels.get(&to).ok_or(BusError::SessionNotFound(to))?;
 
         target_channel
             .sender
@@ -194,7 +192,10 @@ impl SessionBus {
     /// # Returns
     ///
     /// Vector of (from_session, message) tuples
-    pub fn recv_all(&self, session_id: SessionId) -> Result<Vec<(SessionId, SessionMessage)>, BusError> {
+    pub fn recv_all(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<(SessionId, SessionMessage)>, BusError> {
         let mut messages = Vec::new();
 
         loop {

@@ -134,6 +134,7 @@ fn test_concurrency_manager() {
 
     drop(guard1);
     assert_eq!(manager.active_operations(), 1);
+    drop(guard2);
 }
 
 #[test]

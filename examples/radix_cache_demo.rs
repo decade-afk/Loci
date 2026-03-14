@@ -80,12 +80,12 @@ fn main() {
     println!("Inserted Prompt B: 64 tokens → 2 blocks");
 
     // Query with Prompt A
-    if let Some((matched_tokens, matched_blocks)) = cache.match_prefix(&tokens_a) {
+    if let Some((_matched_tokens, matched_blocks)) = cache.match_prefix(&tokens_a) {
         println!("Query Prompt A → Matched {} blocks", matched_blocks.len());
     }
 
     // Query with Prompt B
-    if let Some((matched_tokens, matched_blocks)) = cache.match_prefix(&tokens_b) {
+    if let Some((_matched_tokens, matched_blocks)) = cache.match_prefix(&tokens_b) {
         println!("Query Prompt B → Matched {} blocks", matched_blocks.len());
     }
     println!();

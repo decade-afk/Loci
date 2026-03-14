@@ -24,12 +24,7 @@ unsafe extern "C" {
         model: *mut llama_model,
         params: *const llama_context_params,
     ) -> *mut llama_context;
-    fn loci_llama_batch_init(
-        n_tokens: i32,
-        embd: i32,
-        n_seq_max: i32,
-        out_batch: *mut llama_batch,
-    );
+    fn loci_llama_batch_init(n_tokens: i32, embd: i32, n_seq_max: i32, out_batch: *mut llama_batch);
     fn loci_llama_batch_free(batch: *const llama_batch);
     fn loci_llama_encode(ctx: *mut llama_context, batch: *const llama_batch) -> i32;
     fn loci_llama_decode(ctx: *mut llama_context, batch: *const llama_batch) -> i32;
@@ -157,8 +152,8 @@ impl LlamaModel {
                     1,
                     buffer.as_mut_ptr() as *mut i8,
                     buffer.len() as i32,
-                    false,  // remove_special
-                    false,  // unparse_special
+                    false, // remove_special
+                    false, // unparse_special
                 )
             };
 
@@ -241,7 +236,10 @@ impl LlamaContext {
         unsafe {
             let embd_ptr = llama_get_embeddings(self.ptr);
             if embd_ptr.is_null() {
-                return Err("Embeddings not available. Make sure embeddings are enabled in model params.".to_string());
+                return Err(
+                    "Embeddings not available. Make sure embeddings are enabled in model params."
+                        .to_string(),
+                );
             }
 
             let embeddings = std::slice::from_raw_parts(embd_ptr, self.n_embd).to_vec();

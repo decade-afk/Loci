@@ -178,11 +178,7 @@ impl SamplingParams {
 }
 
 /// Sample a token from logits view
-pub fn sample_token(
-    logits: &LogitsView,
-    params: &SamplingParams,
-    context_tokens: &[i32],
-) -> i32 {
+pub fn sample_token(logits: &LogitsView, params: &SamplingParams, context_tokens: &[i32]) -> i32 {
     if params.temperature == 0.0 {
         return logits.argmax() as i32;
     }
@@ -225,11 +221,8 @@ fn sample_from_probs(probs: &LogitsView, params: &SamplingParams) -> i32 {
 
 /// Apply Top-K filtering: keep only top k tokens
 fn apply_top_k(probs: &[f32], k: usize) -> Vec<f32> {
-    let mut indexed_probs: Vec<(usize, f32)> = probs
-        .iter()
-        .enumerate()
-        .map(|(i, &p)| (i, p))
-        .collect();
+    let mut indexed_probs: Vec<(usize, f32)> =
+        probs.iter().enumerate().map(|(i, &p)| (i, p)).collect();
 
     // Sort by probability descending
     indexed_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -280,11 +273,7 @@ fn apply_top_p(probs: &mut LogitsView, top_p: f32) {
 
 /// Apply Min-P filtering: keep tokens with p >= min_p * max_p
 fn apply_min_p(probs: &mut LogitsView, min_p: f32) {
-    let max_prob = probs
-        .as_slice()
-        .iter()
-        .copied()
-        .fold(0.0f32, f32::max);
+    let max_prob = probs.as_slice().iter().copied().fold(0.0f32, f32::max);
     if max_prob <= 0.0 {
         return;
     }
@@ -309,7 +298,9 @@ fn sample_from_distribution(probs: &LogitsView, seed: u64) -> i32 {
 
     // Simple pseudo-random number generator
     let mut rng = || {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         state
     };
 
@@ -333,12 +324,7 @@ fn sample_from_distribution(probs: &LogitsView, seed: u64) -> i32 {
 
 /// Trait for stateless sampling strategies
 pub trait Sampler: Send + Sync {
-    fn sample(
-        &self,
-        logits: &LogitsView,
-        params: &SamplingParams,
-        context: &[i32],
-    ) -> i32;
+    fn sample(&self, logits: &LogitsView, params: &SamplingParams, context: &[i32]) -> i32;
 
     fn name(&self) -> &str;
 }
@@ -347,12 +333,7 @@ pub trait Sampler: Send + Sync {
 pub struct DefaultSampler;
 
 impl Sampler for DefaultSampler {
-    fn sample(
-        &self,
-        logits: &LogitsView,
-        params: &SamplingParams,
-        context: &[i32],
-    ) -> i32 {
+    fn sample(&self, logits: &LogitsView, params: &SamplingParams, context: &[i32]) -> i32 {
         sample_token(logits, params, context)
     }
 
@@ -426,6 +407,7 @@ impl Sampler for TopPSampler {
 /// Mirostat sampler (adaptive sampling to control perplexity)
 pub struct MirostatSampler {
     target_perplexity: f32,
+    #[allow(dead_code)]
     learning_rate: f32,
 }
 
@@ -532,7 +514,7 @@ mod tests {
     fn test_logits_view_creation() {
         let mut logits = vec![0.1, 0.5, 0.3, 0.1];
         let view = LogitsView::new(&mut logits);
-        
+
         assert_eq!(view.vocab_size(), 4);
         assert_eq!(view.get(1), Some(0.5));
     }
@@ -541,9 +523,9 @@ mod tests {
     fn test_temperature_scaling() {
         let mut logits = vec![1.0, 2.0, 3.0, 4.0];
         let mut view = LogitsView::new(&mut logits);
-        
+
         view.apply_temperature(2.0);
-        
+
         assert_eq!(view.get(0), Some(0.5));
         assert_eq!(view.get(1), Some(1.0));
         assert_eq!(view.get(2), Some(1.5));
@@ -554,9 +536,9 @@ mod tests {
     fn test_greedy_temperature() {
         let mut logits = vec![1.0, 3.0, 2.0, 1.5];
         let mut view = LogitsView::new(&mut logits);
-        
+
         view.apply_temperature(0.0);
-        
+
         assert_eq!(view.get(1), Some(f32::INFINITY));
         assert_eq!(view.get(0), Some(f32::NEG_INFINITY));
         assert_eq!(view.get(2), Some(f32::NEG_INFINITY));
@@ -568,9 +550,9 @@ mod tests {
         let mut logits = vec![1.0, 2.0, -1.0, 0.5];
         let mut view = LogitsView::new(&mut logits);
         let context = vec![1, 3];
-        
+
         view.apply_repetition_penalty(&context, 1.2);
-        
+
         assert!((view.get(1).unwrap() - (2.0 / 1.2)).abs() < 0.001);
         assert!((view.get(3).unwrap() - (0.5 / 1.2)).abs() < 0.001);
         assert_eq!(view.get(0), Some(1.0));
@@ -581,7 +563,7 @@ mod tests {
     fn test_argmax() {
         let mut logits = vec![1.0, 3.0, 2.0, 1.5];
         let view = LogitsView::new(&mut logits);
-        
+
         assert_eq!(view.argmax(), 1);
     }
 
@@ -589,12 +571,12 @@ mod tests {
     fn test_softmax() {
         let mut logits = vec![1.0, 2.0, 3.0];
         let mut view = LogitsView::new(&mut logits);
-        
+
         view.softmax();
-        
+
         let sum: f32 = view.as_slice().iter().sum();
         assert!((sum - 1.0).abs() < 0.001);
-        
+
         for &prob in view.as_slice() {
             assert!(prob > 0.0);
         }
@@ -605,11 +587,11 @@ mod tests {
         let greedy = SamplingParams::greedy();
         assert_eq!(greedy.temperature, 0.0);
         assert_eq!(greedy.top_k, 1);
-        
+
         let creative = SamplingParams::creative();
         assert_eq!(creative.temperature, 1.2);
         assert_eq!(creative.top_k, 0);
-        
+
         let balanced = SamplingParams::balanced();
         assert_eq!(balanced.temperature, 0.8);
         assert_eq!(balanced.top_k, 40);
@@ -621,7 +603,7 @@ mod tests {
         let view = LogitsView::new(&mut logits);
         let sampler = GreedySampler;
         let params = SamplingParams::default();
-        
+
         let token = sampler.sample(&view, &params, &[]);
         assert_eq!(token, 1);
     }

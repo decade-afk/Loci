@@ -177,11 +177,7 @@ pub trait ModelHooks: Send + Sync {
     }
 
     /// Called after model is loaded successfully
-    fn on_model_loaded(
-        &mut self,
-        _ctx: &HookContext,
-        _metadata: &ModelMetadata,
-    ) -> Result<()> {
+    fn on_model_loaded(&mut self, _ctx: &HookContext, _metadata: &ModelMetadata) -> Result<()> {
         Ok(())
     }
 

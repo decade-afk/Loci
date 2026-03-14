@@ -105,12 +105,15 @@ struct LoRAAdapter {
     path: PathBuf,
 
     /// Scaling factor
+    #[allow(dead_code)]
     scale: f32,
 
     /// Adapter metadata (rank, alpha, etc.)
+    #[allow(dead_code)]
     metadata: LoRAMetadata,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct LoRAMetadata {
     /// LoRA rank
@@ -124,6 +127,7 @@ struct LoRAMetadata {
 }
 
 /// Model state for hot-swap coordination
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 enum ModelState {
     /// Model is ready for use
@@ -183,7 +187,7 @@ impl LoadedModel {
     }
 
     /// Get current state
-    pub fn state(&self) -> ModelState {
+    fn state(&self) -> ModelState {
         self.state.read().clone()
     }
 
@@ -212,22 +216,22 @@ impl LoadedModel {
         // Add to active adapters
         self.lora_adapters.push(adapter);
 
-// Actual ggml tensor merging happens in the inference backend
+        // Actual ggml tensor merging happens in the inference backend
 
         self.set_state(ModelState::Ready);
         Ok(())
     }
 
     /// Load LoRA metadata from GGUF file
-    fn load_lora_metadata(path: &str) -> Result<LoRAMetadata> {
+    fn load_lora_metadata(_path: &str) -> Result<LoRAMetadata> {
         // Placeholder: In real implementation, this would parse GGUF file
         // and extract LoRA-specific metadata
 
         // For now, return dummy metadata
         Ok(LoRAMetadata {
-            rank: 32,          // Common LoRA rank
-            alpha: 32.0,       // Common alpha value
-            num_layers: 32,    // Number of affected layers
+            rank: 32,       // Common LoRA rank
+            alpha: 32.0,    // Common alpha value
+            num_layers: 32, // Number of affected layers
         })
     }
 
@@ -287,10 +291,7 @@ impl HotSwapModelRegistry {
         // Check if already loaded
         {
             let models = self.models.read();
-            if let Some((id, model)) = models
-                .iter()
-                .find(|(_, m)| m.base_path == path_buf)
-            {
+            if let Some((id, model)) = models.iter().find(|(_, m)| m.base_path == path_buf) {
                 model.acquire();
                 return Ok(*id);
             }
@@ -302,7 +303,7 @@ impl HotSwapModelRegistry {
         // Create loaded model
         let loaded_model = LoadedModel::new(model_id, path_buf.clone(), n_ctx);
 
-// Actual model loading (llama.cpp) would happen here
+        // Actual model loading (llama.cpp) would happen here
 
         let mut models = self.models.write();
         models.insert(model_id, Arc::new(loaded_model));

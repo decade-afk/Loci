@@ -225,6 +225,7 @@ impl DeviceSelector {
 
     /// Detect NVIDIA CUDA devices
     #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
     fn detect_cuda_devices() -> Result<Vec<DeviceInfo>> {
         use std::process::Command;
 
@@ -268,12 +269,14 @@ impl DeviceSelector {
 
     /// Detect NVIDIA CUDA devices (no feature)
     #[cfg(not(feature = "cuda"))]
+    #[allow(dead_code)]
     fn detect_cuda_devices() -> Result<Vec<DeviceInfo>> {
         Ok(Vec::new())
     }
 
     /// Detect Apple Metal devices
     #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[allow(dead_code)]
     fn detect_metal_devices() -> Result<Vec<DeviceInfo>> {
         use std::process::Command;
 
@@ -303,24 +306,28 @@ impl DeviceSelector {
 
     /// Detect Metal devices (not macOS)
     #[cfg(not(all(feature = "metal", target_os = "macos")))]
+    #[allow(dead_code)]
     fn detect_metal_devices() -> Result<Vec<DeviceInfo>> {
         Ok(Vec::new())
     }
 
     /// Detect Vulkan devices
     #[cfg(feature = "vulkan")]
+    #[allow(dead_code)]
     fn detect_vulkan_devices() -> Result<Vec<DeviceInfo>> {
         Ok(Vec::new())
     }
 
     /// Detect Vulkan devices (no feature)
     #[cfg(not(feature = "vulkan"))]
+    #[allow(dead_code)]
     fn detect_vulkan_devices() -> Result<Vec<DeviceInfo>> {
         Ok(Vec::new())
     }
 
     /// Detect AMD ROCm devices
     #[cfg(feature = "rocm")]
+    #[allow(dead_code)]
     fn detect_rocm_devices() -> Result<Vec<DeviceInfo>> {
         use std::process::Command;
 
@@ -343,6 +350,7 @@ impl DeviceSelector {
 
     /// Detect ROCm devices (no feature)
     #[cfg(not(feature = "rocm"))]
+    #[allow(dead_code)]
     fn detect_rocm_devices() -> Result<Vec<DeviceInfo>> {
         Ok(Vec::new())
     }
@@ -399,10 +407,7 @@ impl DeviceSelector {
         #[cfg(target_os = "macos")]
         {
             use std::process::Command;
-            if let Ok(output) = Command::new("sysctl")
-                .args(&["-n", "hw.memsize"])
-                .output()
-            {
+            if let Ok(output) = Command::new("sysctl").args(&["-n", "hw.memsize"]).output() {
                 if let Ok(mem_str) = String::from_utf8(output.stdout) {
                     if let Ok(mem) = mem_str.trim().parse::<u64>() {
                         return mem;
@@ -431,9 +436,7 @@ impl DeviceSelector {
             .available_devices
             .iter()
             .filter(|d| {
-                d.available
-                    && d.device_type != DeviceType::CPU
-                    && d.memory_bytes >= required_memory
+                d.available && d.device_type != DeviceType::CPU && d.memory_bytes >= required_memory
             })
             .collect();
 

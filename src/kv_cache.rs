@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn test_paged_kv_cache() {
-        let mut cache = PagedKVCache::new(32, 4096, 10);
+        let cache = PagedKVCache::new(32, 4096, 10);
         assert_eq!(cache.total_blocks(), 10);
         assert_eq!(cache.free_blocks(), 10);
         assert_eq!(cache.used_blocks(), 0);

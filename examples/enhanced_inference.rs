@@ -26,10 +26,10 @@ fn main() -> Result<()> {
             .build()?;
 
         // First call will compute
-        let result1 = engine.generate_with_params("What is Rust?", &InferenceParams::default())?;
+        let _result1 = engine.generate_with_params("What is Rust?", &InferenceParams::default())?;
 
         // Second call will use cache
-        let result2 = engine.generate_with_params("What is Rust?", &InferenceParams::default())?;
+        let _result2 = engine.generate_with_params("What is Rust?", &InferenceParams::default())?;
 
         // Check cache statistics
         let stats = engine.cache_stats();
@@ -89,7 +89,7 @@ fn main() -> Result<()> {
             .build()?;
 
         // Check resource usage
-        let stats = engine.resource_stats();
+        let _stats = engine.resource_stats();
         println!("Resource summary: {}", engine.resource_summary());
 
         // Generate with resource monitoring
@@ -182,7 +182,7 @@ fn main() -> Result<()> {
     // Example 7: Full configuration
     println!("\n=== Example 7: Full Configuration ===");
     {
-        let mut engine = InferenceEngine::builder()
+        let engine = InferenceEngine::builder()
             .model_path("path/to/model.gguf")
             .backend("llama.cpp")
             .context_size(4096)
@@ -233,6 +233,7 @@ fn main() -> Result<()> {
 }
 
 /// Example showing manual cache management
+#[allow(dead_code)]
 fn manual_cache_management() -> Result<()> {
     let mut engine = InferenceEngine::builder()
         .model_path("path/to/model.gguf")
@@ -258,6 +259,7 @@ fn manual_cache_management() -> Result<()> {
 }
 
 /// Example showing error recovery with timeouts
+#[allow(dead_code)]
 fn error_recovery_with_timeout() -> Result<()> {
     let mut engine = InferenceEngine::builder()
         .model_path("path/to/model.gguf")
@@ -295,6 +297,7 @@ fn error_recovery_with_timeout() -> Result<()> {
 }
 
 /// Example showing resource-aware inference
+#[allow(dead_code)]
 fn resource_aware_inference() -> Result<()> {
     let mut engine = InferenceEngine::builder()
         .model_path("path/to/model.gguf")

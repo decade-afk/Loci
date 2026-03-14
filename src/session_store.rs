@@ -188,10 +188,7 @@ impl SessionStoreRegistry {
             .get(kind)
             .map(|entry| Arc::clone(&entry.factory))
             .ok_or_else(|| {
-                LociError::PluginError(format!(
-                    "Session store plugin '{}' not found",
-                    kind
-                ))
+                LociError::PluginError(format!("Session store plugin '{}' not found", kind))
             })?;
         factory.create(config)
     }
@@ -202,7 +199,9 @@ impl SessionStoreRegistry {
         kinds
     }
 
-    fn load_dynamic_entry<P: AsRef<Path>>(library_path: P) -> Result<(String, SessionStoreFactoryEntry)> {
+    fn load_dynamic_entry<P: AsRef<Path>>(
+        library_path: P,
+    ) -> Result<(String, SessionStoreFactoryEntry)> {
         let lib_path = library_path.as_ref();
         if !lib_path.exists() {
             return Err(LociError::PluginError(format!(
@@ -530,9 +529,7 @@ impl SessionStoreFactory for SqliteSessionStoreFactory {
             .get("path")
             .or_else(|| config.get("db_path"))
             .ok_or_else(|| {
-                LociError::ConfigError(
-                    "sqlite session store requires `path` option".to_string(),
-                )
+                LociError::ConfigError("sqlite session store requires `path` option".to_string())
             })?;
         Ok(Arc::new(SqliteSessionStore::new(db_path)?))
     }
@@ -740,7 +737,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let db_path = std::env::temp_dir().join(format!("loci-session-store-factory-{nonce}.sqlite"));
+        let db_path =
+            std::env::temp_dir().join(format!("loci-session-store-factory-{nonce}.sqlite"));
         let mut options = HashMap::new();
         options.insert("path".to_string(), db_path.to_string_lossy().to_string());
         let sqlite = registry
@@ -757,7 +755,9 @@ mod tests {
         registry
             .register_factory(InMemorySessionStoreFactory)
             .unwrap();
-        let err = registry.register_factory(InMemorySessionStoreFactory).unwrap_err();
+        let err = registry
+            .register_factory(InMemorySessionStoreFactory)
+            .unwrap_err();
         assert!(format!("{err}").contains("already registered"));
     }
 

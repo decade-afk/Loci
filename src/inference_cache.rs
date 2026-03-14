@@ -7,7 +7,6 @@
 //! - Cache statistics and management
 
 use crate::backend::InferenceParams;
-use crate::error::{LociError, Result};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
@@ -127,21 +126,21 @@ impl InferenceCache {
     pub fn generate_key(&self, prompt: &str, params: &InferenceParams) -> u64 {
         let mut hasher = Xxh64::new(0);
         prompt.hash(&mut hasher);
-        
+
         // Hash relevant parameters
         hasher.write_u32(params.max_tokens);
         hasher.write_u32(params.temperature.to_bits());
         hasher.write_u32(params.top_p.to_bits());
         hasher.write_u32(params.top_k);
         hasher.write_u32(params.repeat_penalty.to_bits());
-        
+
         hasher.finish()
     }
 
     /// Get cached result if available and not expired
     pub fn get(&mut self, key: u64) -> Option<String> {
         let now = Instant::now();
-        
+
         if let Some(entry) = self.cache.get_mut(&key) {
             // Check TTL
             if now.duration_since(entry.created_at) > self.config.ttl {
@@ -199,9 +198,7 @@ impl InferenceCache {
 
         if self.config.enable_stats {
             self.stats.entries = self.cache.len();
-            self.stats.bytes = self.cache.values()
-                .map(|e| e.value.len() as u64)
-                .sum();
+            self.stats.bytes = self.cache.values().map(|e| e.value.len() as u64).sum();
         }
     }
 
@@ -211,7 +208,7 @@ impl InferenceCache {
             let key = *key;
             self.cache.remove(&key);
             self.access_order.remove(0);
-            
+
             if self.config.enable_stats {
                 self.stats.evictions += 1;
                 self.stats.entries = self.cache.len();
@@ -247,9 +244,7 @@ impl InferenceCache {
 
         if self.config.enable_stats {
             self.stats.entries = self.cache.len();
-            self.stats.bytes = self.cache.values()
-                .map(|e| e.value.len() as u64)
-                .sum();
+            self.stats.bytes = self.cache.values().map(|e| e.value.len() as u64).sum();
         }
     }
 
@@ -334,7 +329,7 @@ mod tests {
     #[test]
     fn test_cache_stats() {
         let mut cache = InferenceCache::new();
-        
+
         cache.insert(1, "value1".to_string());
         cache.get(1); // hit
         cache.get(2); // miss
@@ -350,11 +345,11 @@ mod tests {
     fn test_key_generation() {
         let cache = InferenceCache::new();
         let params = InferenceParams::default();
-        
+
         let key1 = cache.generate_key("hello", &params);
         let key2 = cache.generate_key("hello", &params);
         let key3 = cache.generate_key("world", &params);
-        
+
         assert_eq!(key1, key2);
         assert_ne!(key1, key3);
     }

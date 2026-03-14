@@ -219,7 +219,7 @@ impl Constraint for ConstraintCombinator {
 
         for constraint in self.constraints.iter().skip(1) {
             let allowed = constraint.get_allowed_tokens()?;
-            
+
             match self.mode {
                 CombinatorMode::Intersection | CombinatorMode::All => {
                     result = result.intersection(&allowed).cloned().collect();
@@ -235,13 +235,19 @@ impl Constraint for ConstraintCombinator {
 
     fn is_satisfied(&self) -> bool {
         match self.mode {
-            CombinatorMode::Intersection | CombinatorMode::All => self.constraints.iter().all(|c| c.is_satisfied()),
-            CombinatorMode::Union | CombinatorMode::Any => self.constraints.iter().any(|c| c.is_satisfied()),
+            CombinatorMode::Intersection | CombinatorMode::All => {
+                self.constraints.iter().all(|c| c.is_satisfied())
+            }
+            CombinatorMode::Union | CombinatorMode::Any => {
+                self.constraints.iter().any(|c| c.is_satisfied())
+            }
         }
     }
 
     fn current_state(&self) -> String {
-        let states: Vec<String> = self.constraints.iter()
+        let states: Vec<String> = self
+            .constraints
+            .iter()
             .map(|c| format!("{}: {}", c.name(), c.current_state()))
             .collect();
         format!("{:?}({})", self.mode, states.join(", "))
@@ -351,10 +357,11 @@ impl Constraint for LengthConstraint {
 
     fn get_allowed_tokens(&self) -> Result<HashSet<i32>> {
         let mut allowed = HashSet::new();
-        
+
         if self.current_length < self.min_length {
             for i in 0..50000 {
-                if i != 2 { // Assume token 2 is EOS
+                if i != 2 {
+                    // Assume token 2 is EOS
                     allowed.insert(i);
                 }
             }
@@ -365,7 +372,7 @@ impl Constraint for LengthConstraint {
                 allowed.insert(i);
             }
         }
-        
+
         Ok(allowed)
     }
 
@@ -374,7 +381,10 @@ impl Constraint for LengthConstraint {
     }
 
     fn current_state(&self) -> String {
-        format!("length: {}/{}-{}", self.current_length, self.min_length, self.max_length)
+        format!(
+            "length: {}/{}-{}",
+            self.current_length, self.min_length, self.max_length
+        )
     }
 }
 
@@ -388,9 +398,12 @@ pub struct RegexConstraint {
 impl RegexConstraint {
     pub fn new(name: &str, pattern: &str) -> Result<Self> {
         if pattern.contains('[') && !pattern.contains(']') {
-            return Err(LociError::ConfigError(format!("Invalid regex pattern: {}", pattern)));
+            return Err(LociError::ConfigError(format!(
+                "Invalid regex pattern: {}",
+                pattern
+            )));
         }
-        
+
         Ok(Self {
             name: name.to_string(),
             pattern: pattern.to_string(),
@@ -419,9 +432,10 @@ impl Constraint for RegexConstraint {
 
     fn get_allowed_tokens(&self) -> Result<HashSet<i32>> {
         let mut allowed = HashSet::new();
-        
+
         if self.pattern == r"\d+" {
-            for i in 48..58 { // ASCII digits 0-9
+            for i in 48..58 {
+                // ASCII digits 0-9
                 allowed.insert(i);
             }
         } else {
@@ -429,7 +443,7 @@ impl Constraint for RegexConstraint {
                 allowed.insert(i);
             }
         }
-        
+
         Ok(allowed)
     }
 
@@ -463,6 +477,10 @@ impl JsonConstraint {
             brace_depth: 0,
         }
     }
+
+    pub fn schema(&self) -> &JsonSchema {
+        &self.schema
+    }
 }
 
 impl Constraint for JsonConstraint {
@@ -481,7 +499,7 @@ impl Constraint for JsonConstraint {
 
     fn update(&mut self, _token_id: i32, token_text: &str) -> Result<()> {
         self.current_json.push_str(token_text);
-        
+
         for ch in token_text.chars() {
             match ch {
                 '{' | '[' => self.brace_depth += 1,
@@ -489,34 +507,37 @@ impl Constraint for JsonConstraint {
                 _ => {}
             }
         }
-        
+
         Ok(())
     }
 
     fn get_allowed_tokens(&self) -> Result<HashSet<i32>> {
         let mut allowed = HashSet::new();
-        
+
         if self.current_json.is_empty() {
             allowed.insert(123); // '{'
         } else if self.brace_depth > 0 {
-            allowed.insert(34);  // '"'
-            allowed.insert(44);  // ','
-            allowed.insert(58);  // ':'
+            allowed.insert(34); // '"'
+            allowed.insert(44); // ','
+            allowed.insert(58); // ':'
             allowed.insert(125); // '}'
-            
-            for i in 48..58 { // 0-9
+
+            for i in 48..58 {
+                // 0-9
                 allowed.insert(i);
             }
-            for i in 65..91 { // A-Z
+            for i in 65..91 {
+                // A-Z
                 allowed.insert(i);
             }
-            for i in 97..123 { // a-z
+            for i in 97..123 {
+                // a-z
                 allowed.insert(i);
             }
         } else {
             allowed.insert(2); // EOS
         }
-        
+
         Ok(allowed)
     }
 
@@ -584,7 +605,7 @@ impl ConstraintManager {
 
         for constraint in self.constraints.iter().skip(1) {
             let allowed = constraint.get_allowed_tokens()?;
-            
+
             match self.combinator_mode {
                 CombinatorMode::Intersection | CombinatorMode::All => {
                     result = result.intersection(&allowed).cloned().collect();
@@ -600,18 +621,18 @@ impl ConstraintManager {
 
     pub fn apply_to_logits(&self, logits: &mut LogitsView) -> Result<()> {
         let allowed_tokens = self.get_combined_allowed_tokens()?;
-        
+
         // Create constraint mask
         let mut mask = ConstraintMask::new(logits.vocab_size());
         mask.apply_whitelist(&allowed_tokens);
-        
+
         // Apply mask to logits
         for i in 0..logits.vocab_size() {
             if !mask.is_allowed(i) {
                 logits.set_usize(i, f32::NEG_INFINITY)?;
             }
         }
-        
+
         Ok(())
     }
 }
@@ -694,7 +715,8 @@ impl ConstraintBuilder {
         }
 
         if let Some(pattern) = self.regex_pattern {
-            if let Ok(regex_constraint) = RegexConstraint::new(&format!("{}_regex", name), &pattern) {
+            if let Ok(regex_constraint) = RegexConstraint::new(&format!("{}_regex", name), &pattern)
+            {
                 constraints.push(Box::new(regex_constraint));
             }
         }

@@ -9,11 +9,16 @@ fn main() {
     println!("cargo:rerun-if-changed={}", LLAMA_CPP_PATH);
     println!("cargo:rerun-if-changed=src/ffi_shim.c");
     println!("cargo:rerun-if-env-changed=LOCI_CPU_OPT");
+    println!("cargo:rerun-if-env-changed=LOCI_CMAKE_BUILD_JOBS");
 
     // Get the output directory where generated files should be placed
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     let target = env::var("TARGET").unwrap_or_default();
+
+    if let Some(cmake_jobs) = resolve_cmake_build_jobs(&target) {
+        env::set_var("NUM_JOBS", cmake_jobs);
+    }
 
     // Configure CMake to build llama.cpp with specific options
     let mut config = cmake::Config::new(LLAMA_CPP_PATH);
@@ -30,6 +35,9 @@ fn main() {
         .define("LLAMA_BUILD_TOOLS", "OFF")
         // Disable curl dependency to simplify build process
         .define("LLAMA_CURL", "OFF")
+        // Avoid noisy warnings about optional build-cache tools on machines
+        // where ccache is not installed.
+        .define("GGML_CCACHE", "OFF")
         // Disable native optimizations to improve portability
         .define("GGML_NATIVE", "OFF")
         // Disable OpenMP for better Windows MinGW runtime stability.
@@ -157,6 +165,14 @@ fn main() {
     bindings
         .write_to_file(out_dir.join("bindings.rs"))
         .expect("Couldn't write bindings!");
+}
+
+fn resolve_cmake_build_jobs(target: &str) -> Option<String> {
+    match env::var("LOCI_CMAKE_BUILD_JOBS") {
+        Ok(raw) if !raw.trim().is_empty() => Some(raw),
+        _ if target.contains("windows-msvc") => Some("1".to_string()),
+        _ => None,
+    }
 }
 
 /// Links the required llama.cpp libraries based on the target platform

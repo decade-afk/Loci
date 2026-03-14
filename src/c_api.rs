@@ -492,6 +492,14 @@ pub unsafe extern "C" fn loci_engine_new(
         n_threads: None,
         n_gpu_layers,
         use_gpu: n_gpu_layers != 0,
+        use_mmap: true,
+        use_mlock: false,
+        kv_offload: n_gpu_layers != 0,
+        op_offload: n_gpu_layers != 0,
+        split_mode: crate::backend::GpuSplitMode::Layer,
+        main_gpu: 0,
+        tensor_split: None,
+        load_strategy: crate::model::ModelLoadStrategy::Strict,
     };
 
     match InferenceEngine::new(config) {
@@ -1068,9 +1076,10 @@ pub extern "C" fn loci_has_gpu_support() -> bool {
     use crate::device::{DeviceSelector, DeviceType};
 
     let selector = DeviceSelector::new();
-    selector.devices().iter().any(|d| {
-        d.available && d.device_type != DeviceType::CPU
-    })
+    selector
+        .devices()
+        .iter()
+        .any(|d| d.available && d.device_type != DeviceType::CPU)
 }
 
 // Get last error message (thread-local)
@@ -1115,7 +1124,7 @@ pub struct LociDeviceInfo {
     pub device_id: i32,
     pub name: [c_char; 256],
     pub memory_bytes: u64,
-    pub device_type: i32,  // 0=CPU, 1=CUDA, 2=Metal, 3=Vulkan, 4=ROCm, 5=OpenCL
+    pub device_type: i32, // 0=CPU, 1=CUDA, 2=Metal, 3=Vulkan, 4=ROCm, 5=OpenCL
     pub compute_capability: f32,
     pub available: bool,
 }
@@ -1292,6 +1301,14 @@ pub unsafe extern "C" fn loci_engine_new_auto(
         n_threads: None,
         n_gpu_layers: device_config.n_gpu_layers,
         use_gpu: device_config.device_type != DeviceType::CPU,
+        use_mmap: true,
+        use_mlock: false,
+        kv_offload: device_config.device_type != DeviceType::CPU,
+        op_offload: device_config.device_type != DeviceType::CPU,
+        split_mode: crate::backend::GpuSplitMode::Layer,
+        main_gpu: 0,
+        tensor_split: None,
+        load_strategy: crate::model::ModelLoadStrategy::Strict,
     };
 
     match InferenceEngine::new(config) {
@@ -1337,6 +1354,14 @@ pub unsafe extern "C" fn loci_engine_new_with_device(
         n_threads: None,
         n_gpu_layers,
         use_gpu: n_gpu_layers != 0,
+        use_mmap: true,
+        use_mlock: false,
+        kv_offload: n_gpu_layers != 0,
+        op_offload: n_gpu_layers != 0,
+        split_mode: crate::backend::GpuSplitMode::Layer,
+        main_gpu: 0,
+        tensor_split: None,
+        load_strategy: crate::model::ModelLoadStrategy::Strict,
     };
 
     match InferenceEngine::new(config) {
@@ -1450,13 +1475,7 @@ mod tests {
     #[test]
     fn c_api_with_len_variants_validate_input() {
         unsafe {
-            let rc = loci_generate_with_len(
-                ptr::null_mut(),
-                ptr::null(),
-                1,
-                8,
-                0.7,
-            );
+            let rc = loci_generate_with_len(ptr::null_mut(), ptr::null(), 1, 8, 0.7);
             assert!(rc.is_null());
             let err = loci_get_last_error();
             assert!(!err.is_null());

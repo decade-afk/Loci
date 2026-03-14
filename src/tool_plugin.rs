@@ -7,6 +7,9 @@ use crate::error::{LociError, Result};
 use crate::function_calling::{
     FunctionCall, FunctionCallingManager, FunctionDefinition, FunctionHandler,
 };
+use crate::plugin_contract::{
+    load_and_validate_plugin_contract, validate_runtime_plugin_identity, PluginContractKind,
+};
 use libloading::{Library, Symbol};
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -248,6 +251,7 @@ pub fn load_dynamic_tool_plugin<P: AsRef<Path>>(
     manager: &mut FunctionCallingManager,
 ) -> Result<LoadedToolPlugin> {
     let path = library_path.as_ref();
+    let manifest = load_and_validate_plugin_contract(path, PluginContractKind::ToolPlugin)?;
     if !path.exists() {
         return Err(LociError::PluginError(format!(
             "Tool plugin library not found: {}",
@@ -293,6 +297,7 @@ pub fn load_dynamic_tool_plugin<P: AsRef<Path>>(
     };
 
     plugin.init()?;
+    validate_runtime_plugin_identity(manifest.as_ref(), plugin.name(), plugin.version())?;
     let runtime = Arc::new(ToolPluginRuntime {
         plugin: Mutex::new(plugin),
         library: Some(library),

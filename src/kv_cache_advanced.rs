@@ -46,12 +46,14 @@ pub type BlockId = u64;
 #[derive(Clone)]
 struct BlockMetadata {
     /// Block ID
+    #[allow(dead_code)]
     id: BlockId,
     /// Reference count (Arc for thread-safe sharing)
     ref_count: Arc<AtomicUsize>,
     /// Last access timestamp
     last_access: Instant,
     /// Number of valid tokens (0-32)
+    #[allow(dead_code)]
     valid_tokens: usize,
     /// Whether this block is pinned (cannot be evicted)
     pinned: bool,
@@ -116,9 +118,9 @@ pub struct MemoryBudgetConfig {
 impl Default for MemoryBudgetConfig {
     fn default() -> Self {
         Self {
-            total_memory: 8 * 1024 * 1024 * 1024, // 8 GB default
-            floor_percentage: 0.10,                // 10% floor
-            eviction_threshold: 0.85,              // 85% threshold
+            total_memory: 8 * 1024 * 1024 * 1024,       // 8 GB default
+            floor_percentage: 0.10,                     // 10% floor
+            eviction_threshold: 0.85,                   // 85% threshold
             cool_down_duration: Duration::from_secs(3), // 3s cool-down
         }
     }
@@ -308,7 +310,7 @@ impl PhysicalBlockPool {
         // 3. Check if we can allocate a new block
         if !self.budgeter.is_below_floor() {
             let block_id = self.allocate_block_id();
-            let mut metadata = BlockMetadata::new(block_id);
+            let metadata = BlockMetadata::new(block_id);
             metadata.acquire(); // Set ref_count to 1
             self.blocks.insert(block_id, metadata);
             self.budgeter.allocate(self.block_size_bytes);
@@ -431,11 +433,6 @@ impl PhysicalBlockPool {
         Ok(None)
     }
 
-    /// Get block metadata
-    pub fn get_metadata(&self, block_id: BlockId) -> Option<&BlockMetadata> {
-        self.blocks.get(&block_id)
-    }
-
     /// Get pool statistics
     pub fn statistics(&self) -> &PoolStatistics {
         &self.stats
@@ -477,6 +474,7 @@ pub struct BlockTable {
     num_tokens: usize,
 
     /// Session ID for debugging
+    #[allow(dead_code)]
     session_id: String,
 }
 
@@ -529,11 +527,7 @@ impl BlockTable {
     }
 
     /// Remove tokens from the end
-    pub fn remove_tokens(
-        &mut self,
-        count: usize,
-        pool: &mut PhysicalBlockPool,
-    ) -> Result<()> {
+    pub fn remove_tokens(&mut self, count: usize, pool: &mut PhysicalBlockPool) -> Result<()> {
         if count >= self.num_tokens {
             self.clear(pool)?;
             return Ok(());
@@ -643,7 +637,7 @@ mod tests {
         assert_eq!(pool.num_lru_blocks(), 1);
 
         // Allocate again (should reuse from LRU)
-        let block2 = pool.allocate().unwrap();
+        let _block2 = pool.allocate().unwrap();
         // The block might be reused but the ID could be different
         assert_eq!(pool.num_lru_blocks(), 0);
     }

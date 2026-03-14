@@ -6,6 +6,9 @@
 
 use crate::error::{LociError, Result};
 use crate::inference::{DefaultExecutionPolicy, ExecutionPolicy};
+use crate::plugin_contract::{
+    load_and_validate_plugin_contract, validate_runtime_plugin_identity, PluginContractKind,
+};
 use libloading::{Library, Symbol};
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -297,6 +300,8 @@ pub fn load_dynamic_execution_policy<P: AsRef<Path>>(
     library_path: P,
 ) -> Result<LoadedExecutionPolicy> {
     let lib_path = library_path.as_ref();
+    let manifest =
+        load_and_validate_plugin_contract(lib_path, PluginContractKind::ExecutionPolicy)?;
     if !lib_path.exists() {
         return Err(LociError::PluginError(format!(
             "Execution policy plugin library not found: {}",
@@ -339,6 +344,7 @@ pub fn load_dynamic_execution_policy<P: AsRef<Path>>(
             "Execution policy plugin returned empty name".to_string(),
         ));
     }
+    validate_runtime_plugin_identity(manifest.as_ref(), policy.name(), "")?;
 
     Ok(LoadedExecutionPolicy {
         policy: Arc::<dyn ExecutionPolicy>::from(policy),

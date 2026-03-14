@@ -11,7 +11,9 @@
 //! - Resource management
 //! - Concurrency control
 
-use crate::backend::{BackendParams, BackendRegistry, InferenceParams, Model};
+use crate::backend::{
+    BackendCapabilities, BackendParams, BackendRegistry, GpuSplitMode, InferenceParams, Model,
+};
 use crate::concurrency_manager::{ConcurrencyConfig, ConcurrencyManager};
 use crate::error::{LociError, Result};
 use crate::function_calling::{
@@ -22,10 +24,11 @@ use crate::mcp::{
     connect_and_register_stdio_server, register_mcp_client_tools, McpClient, McpRegistrationReport,
     McpStdioServerConfig, McpToolRegistrationOptions,
 };
-use crate::model::ModelConfig;
+use crate::model::{ModelConfig, ModelLoadStrategy};
 use crate::plugin::PluginManager;
 use crate::rag::{InMemoryRagPlugin, RagDocument, RagPlugin};
 use crate::resource_manager::{ResourceLimits, ResourceManager};
+use crate::resource_planner::{ResourcePlan, ResourcePlanner};
 use crate::skills::{Skill, SkillRegistry};
 use crate::timeout_controller::{TimeoutConfig, TimeoutContext, TimeoutController};
 use crate::tool_plugin::{
@@ -292,6 +295,129 @@ pub struct InferenceEngine {
 }
 
 impl InferenceEngine {
+    fn backend_params_from_config(config: &ModelConfig) -> BackendParams {
+        let mut backend_params = BackendParams {
+            n_gpu_layers: config.n_gpu_layers,
+            use_gpu: config.use_gpu,
+            use_mmap: config.use_mmap,
+            use_mlock: config.use_mlock,
+            kv_offload: config.kv_offload,
+            op_offload: config.op_offload,
+            split_mode: config.split_mode,
+            main_gpu: config.main_gpu,
+            tensor_split: config.tensor_split.clone(),
+            options: vec![
+                ("n_ctx".to_string(), config.n_ctx.to_string()),
+                ("n_batch".to_string(), config.n_batch.to_string()),
+            ],
+        };
+        if let Some(n_threads) = config.n_threads {
+            backend_params
+                .options
+                .push(("n_threads".to_string(), n_threads.to_string()));
+        }
+        backend_params
+    }
+
+    fn config_for_gpu_layer_attempt(config: &ModelConfig, n_gpu_layers: i32) -> ModelConfig {
+        if n_gpu_layers <= 0 {
+            config.clone().cpu_only()
+        } else {
+            let mut retry = config.clone();
+            retry.n_gpu_layers = n_gpu_layers;
+            retry
+        }
+    }
+
+    fn fallback_gpu_layer_attempts(config: &ModelConfig, step: u32) -> Vec<i32> {
+        if !config.use_gpu || config.n_gpu_layers == 0 || step == 0 {
+            return Vec::new();
+        }
+
+        if config.n_gpu_layers > 0 {
+            let step = step as i32;
+            let mut attempts = Vec::new();
+            let mut next = config.n_gpu_layers - step;
+            while next > 0 {
+                attempts.push(next);
+                next -= step;
+            }
+            attempts.push(0);
+            return attempts;
+        }
+
+        let mut attempts = vec![64, 48, 32, 24, 16, 12, 8, 4, 0];
+        attempts.dedup();
+        attempts
+    }
+
+    fn is_retryable_gpu_load_error(error: &LociError) -> bool {
+        match error {
+            LociError::OutOfMemory(_) | LociError::ResourceExhausted(_) => true,
+            LociError::ModelLoadError(message)
+            | LociError::BackendError(message)
+            | LociError::LlamaCppError(message) => {
+                let message = message.to_ascii_lowercase();
+                [
+                    "out of memory",
+                    "failed to allocate",
+                    "insufficient",
+                    "not enough memory",
+                    "cuda",
+                    "vram",
+                    "oom",
+                ]
+                .iter()
+                .any(|needle| message.contains(needle))
+            }
+            _ => false,
+        }
+    }
+
+    fn load_model_with_strategy(
+        backend_registry: &mut BackendRegistry,
+        backend_name: &str,
+        config: &ModelConfig,
+    ) -> Result<Box<dyn Model>> {
+        let initial_params = Self::backend_params_from_config(config);
+        match backend_registry.load_model(backend_name, &config.model_path, initial_params) {
+            Ok(model) => Ok(model),
+            Err(initial_error) => {
+                let ModelLoadStrategy::AutoReduceGpuLayers { step } = config.load_strategy else {
+                    return Err(initial_error);
+                };
+
+                if !config.use_gpu
+                    || config.n_gpu_layers == 0
+                    || !Self::is_retryable_gpu_load_error(&initial_error)
+                {
+                    return Err(initial_error);
+                }
+
+                let mut last_error = initial_error;
+                for n_gpu_layers in Self::fallback_gpu_layer_attempts(config, step) {
+                    let retry_config = Self::config_for_gpu_layer_attempt(config, n_gpu_layers);
+                    let retry_params = Self::backend_params_from_config(&retry_config);
+                    match backend_registry.load_model(
+                        backend_name,
+                        &retry_config.model_path,
+                        retry_params,
+                    ) {
+                        Ok(model) => return Ok(model),
+                        Err(retry_error) => {
+                            if !Self::is_retryable_gpu_load_error(&retry_error) {
+                                return Err(retry_error);
+                            }
+                            last_error = retry_error;
+                        }
+                    }
+                }
+
+                Err(last_error)
+            }
+        }
+    }
+
     /// Create a new inference engine with default backend (`llama.cpp`)
     pub fn new(config: ModelConfig) -> Result<Self> {
         Self::new_with_backend(config, "llama.cpp")
@@ -313,23 +439,7 @@ impl InferenceEngine {
         mut backend_registry: BackendRegistry,
     ) -> Result<Self> {
         config.validate()?;
-
-        let mut backend_params = BackendParams {
-            n_gpu_layers: config.n_gpu_layers,
-            use_gpu: config.use_gpu,
-            options: vec![
-                ("n_ctx".to_string(), config.n_ctx.to_string()),
-                ("n_batch".to_string(), config.n_batch.to_string()),
-            ],
-        };
-        if let Some(n_threads) = config.n_threads {
-            backend_params
-                .options
-                .push(("n_threads".to_string(), n_threads.to_string()));
-        }
-
-        let model =
-            backend_registry.load_model(backend_name, &config.model_path, backend_params)?;
+        let model = Self::load_model_with_strategy(&mut backend_registry, backend_name, &config)?;
 
         Ok(Self {
             model,
@@ -368,6 +478,28 @@ impl InferenceEngine {
         &self.backend_name
     }
 
+    /// Whether the active backend supports token streaming.
+    pub fn supports_streaming(&self) -> bool {
+        self.model.supports_streaming()
+    }
+
+    /// Whether the active backend supports embedding generation.
+    pub fn supports_embeddings(&self) -> bool {
+        self.model.supports_embeddings()
+    }
+
+    /// Whether the active backend supports multimodal inference.
+    pub fn supports_multimodal(&self) -> bool {
+        self.model.supports_multimodal()
+    }
+
+    /// Declarative backend capabilities for the currently selected backend.
+    pub fn backend_capabilities(&self) -> Option<BackendCapabilities> {
+        self.backend_registry
+            .get(&self.backend_name)
+            .map(|backend| backend.capabilities())
+    }
+
     /// List available backends in current registry.
     pub fn available_backends(&self) -> Vec<&str> {
         self.backend_registry.names()
@@ -386,23 +518,8 @@ impl InferenceEngine {
     /// Switch backend and reload model.
     pub fn switch_backend(&mut self, backend_name: &str, config: ModelConfig) -> Result<()> {
         config.validate()?;
-        let mut backend_params = BackendParams {
-            n_gpu_layers: config.n_gpu_layers,
-            use_gpu: config.use_gpu,
-            options: vec![
-                ("n_ctx".to_string(), config.n_ctx.to_string()),
-                ("n_batch".to_string(), config.n_batch.to_string()),
-            ],
-        };
-        if let Some(n_threads) = config.n_threads {
-            backend_params
-                .options
-                .push(("n_threads".to_string(), n_threads.to_string()));
-        }
-
         let model =
-            self.backend_registry
-                .load_model(backend_name, &config.model_path, backend_params)?;
+            Self::load_model_with_strategy(&mut self.backend_registry, backend_name, &config)?;
 
         self.model = model;
         self.backend_name = backend_name.to_string();
@@ -928,6 +1045,13 @@ impl InferenceEngine {
         self.model.metadata()
     }
 
+    /// Generate embeddings for input text when supported by the active backend.
+    pub fn generate_embeddings(&mut self, text: &str) -> Result<Vec<f32>> {
+        let _concurrency_guard = self.concurrency_manager.acquire()?;
+        let _resource_guard = self.resource_manager.acquire()?;
+        self.model.generate_embeddings(text)
+    }
+
     // ==================== Cache Management ====================
 
     /// Enable or disable result caching
@@ -1168,6 +1292,16 @@ pub struct InferenceEngineBuilder {
     n_batch: u32,
     use_gpu: bool,
     n_gpu_layers: i32,
+    use_mmap: bool,
+    use_mlock: bool,
+    kv_offload: bool,
+    op_offload: bool,
+    split_mode: GpuSplitMode,
+    main_gpu: u32,
+    tensor_split: Option<Vec<f32>>,
+    load_strategy: ModelLoadStrategy,
+    resource_plan: Option<ResourcePlan>,
+    auto_resource_plan: bool,
     backend_name: String,
     backend_registry: Option<BackendRegistry>,
     dynamic_backends: Vec<(String, PathBuf)>,
@@ -1190,6 +1324,16 @@ impl InferenceEngineBuilder {
             n_batch: 512,
             use_gpu: true,
             n_gpu_layers: -1,
+            use_mmap: true,
+            use_mlock: false,
+            kv_offload: true,
+            op_offload: true,
+            split_mode: GpuSplitMode::Layer,
+            main_gpu: 0,
+            tensor_split: None,
+            load_strategy: ModelLoadStrategy::Strict,
+            resource_plan: None,
+            auto_resource_plan: false,
             backend_name: "llama.cpp".to_string(),
             backend_registry: None,
             dynamic_backends: Vec::new(),
@@ -1254,12 +1398,83 @@ impl InferenceEngineBuilder {
     pub fn cpu_only(mut self) -> Self {
         self.use_gpu = false;
         self.n_gpu_layers = 0;
+        self.kv_offload = false;
+        self.op_offload = false;
+        self.split_mode = GpuSplitMode::None;
+        self.main_gpu = 0;
+        self.tensor_split = None;
         self
     }
 
     /// Set GPU layers to offload.
     pub fn gpu_layers(mut self, n_gpu_layers: i32) -> Self {
         self.n_gpu_layers = n_gpu_layers;
+        self
+    }
+
+    /// Enable or disable memory-mapped model loading.
+    pub fn with_mmap(mut self, use_mmap: bool) -> Self {
+        self.use_mmap = use_mmap;
+        self
+    }
+
+    /// Enable or disable memory locking for model pages.
+    pub fn with_mlock(mut self, use_mlock: bool) -> Self {
+        self.use_mlock = use_mlock;
+        self
+    }
+
+    /// Enable or disable K/Q/V and KV cache offload.
+    pub fn with_kv_offload(mut self, kv_offload: bool) -> Self {
+        self.kv_offload = kv_offload;
+        self
+    }
+
+    /// Enable or disable host op offload.
+    pub fn with_op_offload(mut self, op_offload: bool) -> Self {
+        self.op_offload = op_offload;
+        self
+    }
+
+    /// Set the multi-GPU split strategy.
+    pub fn with_gpu_split_mode(mut self, split_mode: GpuSplitMode) -> Self {
+        self.split_mode = split_mode;
+        self
+    }
+
+    /// Set the primary GPU index used for single-GPU placement.
+    pub fn with_main_gpu(mut self, main_gpu: u32) -> Self {
+        self.main_gpu = main_gpu;
+        self
+    }
+
+    /// Set relative split weights across multiple GPUs.
+    pub fn with_tensor_split(mut self, tensor_split: Vec<f32>) -> Self {
+        self.tensor_split = Some(tensor_split);
+        self
+    }
+
+    /// Apply an explicit resource plan before model load.
+    pub fn with_resource_plan(mut self, resource_plan: ResourcePlan) -> Self {
+        self.resource_plan = Some(resource_plan);
+        self
+    }
+
+    /// Derive GPU/CPU placement from the model file and detected hardware.
+    pub fn with_auto_resource_plan(mut self, enabled: bool) -> Self {
+        self.auto_resource_plan = enabled;
+        self
+    }
+
+    /// Set the model loading strategy.
+    pub fn with_load_strategy(mut self, load_strategy: ModelLoadStrategy) -> Self {
+        self.load_strategy = load_strategy;
+        self
+    }
+
+    /// Retry model loading with progressively fewer GPU layers when placement fails.
+    pub fn with_auto_gpu_layer_fallback(mut self, step: u32) -> Self {
+        self.load_strategy = ModelLoadStrategy::AutoReduceGpuLayers { step };
         self
     }
 
@@ -1320,12 +1535,67 @@ impl InferenceEngineBuilder {
             .model_path
             .ok_or_else(|| LociError::ConfigError("Model path not specified".to_string()))?;
 
+        let resolved_resource_plan = if let Some(plan) = self.resource_plan.clone() {
+            Some(plan)
+        } else if self.auto_resource_plan && self.use_gpu {
+            Some(ResourcePlanner::plan_for_model(&model_path, self.n_ctx)?)
+        } else {
+            None
+        };
+
+        let (
+            use_gpu,
+            n_gpu_layers,
+            use_mmap,
+            use_mlock,
+            kv_offload,
+            op_offload,
+            split_mode,
+            main_gpu,
+            tensor_split,
+        ) = if let Some(plan) = &resolved_resource_plan {
+            (
+                plan.use_gpu,
+                plan.n_gpu_layers,
+                plan.use_mmap,
+                plan.use_mlock,
+                plan.kv_offload,
+                plan.op_offload,
+                plan.split_mode,
+                plan.main_gpu,
+                plan.tensor_split.clone(),
+            )
+        } else {
+            (
+                self.use_gpu,
+                self.n_gpu_layers,
+                self.use_mmap,
+                self.use_mlock,
+                self.kv_offload,
+                self.op_offload,
+                self.split_mode,
+                self.main_gpu,
+                self.tensor_split.clone(),
+            )
+        };
+
         let mut config = ModelConfig::new(model_path)
             .with_context_size(self.n_ctx)
             .with_batch_size(self.n_batch)
-            .with_gpu_layers(self.n_gpu_layers);
+            .with_gpu_layers(n_gpu_layers)
+            .with_mmap(use_mmap)
+            .with_mlock(use_mlock)
+            .with_kv_offload(kv_offload)
+            .with_op_offload(op_offload)
+            .with_gpu_split_mode(split_mode)
+            .with_main_gpu(main_gpu)
+            .with_load_strategy(self.load_strategy);
 
-        if !self.use_gpu {
+        if let Some(tensor_split) = tensor_split {
+            config = config.with_tensor_split(tensor_split);
+        }
+
+        if !use_gpu {
             config = config.cpu_only();
         }
 

@@ -97,9 +97,7 @@ pub fn dynamic_plugin_into_opaque(plugin: Box<dyn Plugin>) -> DynamicPluginOpaqu
 /// # Safety
 /// The payload must come from `dynamic_plugin_into_opaque` under a compatible
 /// Rust toolchain/target ABI.
-pub unsafe fn dynamic_plugin_from_opaque(
-    opaque: DynamicPluginOpaque,
-) -> Option<Box<dyn Plugin>> {
+pub unsafe fn dynamic_plugin_from_opaque(opaque: DynamicPluginOpaque) -> Option<Box<dyn Plugin>> {
     if opaque.data.is_null() || opaque.vtable.is_null() {
         return None;
     }
@@ -273,10 +271,7 @@ impl PluginManager {
 
     /// Check if a plugin is enabled
     pub fn is_enabled(&self, name: &str) -> bool {
-        self.plugins
-            .get(name)
-            .map(|e| e.enabled)
-            .unwrap_or(false)
+        self.plugins.get(name).map(|e| e.enabled).unwrap_or(false)
     }
 
     /// Get a plugin by name (returns None if disabled)

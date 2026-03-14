@@ -153,7 +153,7 @@ impl TimeoutController {
 
         let mut times = self.completion_times.lock();
         times.push(duration_ms);
-        
+
         // Keep only last 100 completion times
         if times.len() > 100 {
             times.remove(0);
@@ -191,8 +191,8 @@ impl TimeoutController {
     pub fn is_likely_timeout(&self, estimated_duration: Duration) -> bool {
         let stats = self.stats.lock();
         let avg_ms = stats.avg_completion_ms;
-        
-        // If average completion time is much higher than estimated, 
+
+        // If average completion time is much higher than estimated,
         // timeout is likely
         avg_ms > 0.0 && (estimated_duration.as_millis() as f64) < avg_ms * 0.5
     }
@@ -201,7 +201,7 @@ impl TimeoutController {
     pub fn recommended_timeout(&self) -> Duration {
         let stats = self.stats.lock();
         let avg_ms = stats.avg_completion_ms;
-        
+
         if avg_ms > 0.0 {
             // Add 50% buffer
             let recommended = avg_ms * 1.5;
@@ -288,7 +288,7 @@ impl TimeoutContext {
         if self.is_cancelled() {
             return Err(LociError::Timeout("Operation cancelled".to_string()));
         }
-        
+
         if self.is_timeout() {
             return Err(LociError::Timeout("Operation timed out".to_string()));
         }
@@ -363,7 +363,7 @@ mod tests {
     fn test_timeout_context() {
         let ctx = TimeoutContext::new(Duration::from_millis(100));
         assert!(!ctx.is_timeout());
-        
+
         thread::sleep(Duration::from_millis(150));
         assert!(ctx.is_timeout());
     }
@@ -379,7 +379,7 @@ mod tests {
     fn test_cancellation() {
         let ctx = TimeoutContext::new(Duration::from_secs(60));
         let handle = ctx.cancellation_handle();
-        
+
         assert!(!ctx.is_cancelled());
         handle.cancel();
         assert!(ctx.is_cancelled());
@@ -389,7 +389,7 @@ mod tests {
     fn test_should_continue() {
         let ctx = TimeoutContext::new(Duration::from_secs(60));
         assert!(ctx.should_continue());
-        
+
         ctx.cancel();
         assert!(!ctx.should_continue());
     }
@@ -423,10 +423,10 @@ mod tests {
     #[test]
     fn test_timeout_stats() {
         let controller = TimeoutController::new();
-        
+
         controller.record_completion(100);
         controller.record_completion(200);
-        
+
         let stats = controller.stats();
         assert_eq!(stats.completed, 2);
         assert_eq!(stats.timeouts, 0);
@@ -436,12 +436,12 @@ mod tests {
     #[test]
     fn test_timeout_guard() {
         let controller = TimeoutController::new();
-        
+
         {
             let _guard = TimeoutGuard::new(&controller);
             // Guard records completion when dropped
         }
-        
+
         let stats = controller.stats();
         assert_eq!(stats.completed, 1);
     }

@@ -1,6 +1,4 @@
 use loci::constraint::*;
-use loci::prelude::*;
-use loci::sampler::LogitsView;
 use std::collections::HashSet;
 
 #[test]
@@ -53,6 +51,7 @@ fn test_length_constraint() {
     let allowed = constraint.get_allowed_tokens().unwrap();
     // In a real implementation, this would only contain EOS token IDs
     // For now, we just check it's not empty (placeholder implementation)
+    assert!(!allowed.is_empty());
 }
 
 #[test]

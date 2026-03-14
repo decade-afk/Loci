@@ -4,11 +4,12 @@
 //! the new stateless sampling system with zero-copy logits manipulation.
 
 use crate::backend::{
-    BackendCapabilities, BackendParams, InferenceBackend, InferenceParams, Model, ModelMetadata,
+    BackendCapabilities, BackendParams, GpuSplitMode, InferenceBackend, InferenceParams, Model,
+    ModelMetadata,
 };
 use crate::error::{LociError, Result};
 use crate::ffi;
-use crate::sampler::{LogitsView, SamplingParams, sample_token};
+use crate::sampler::{sample_token, LogitsView, SamplingParams};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -25,9 +26,7 @@ pub struct LlamaCppBackend {
 impl LlamaCppBackend {
     /// Create a new llama.cpp backend
     pub fn new() -> Self {
-        Self {
-            initialized: false,
-        }
+        Self { initialized: false }
     }
 }
 
@@ -102,6 +101,8 @@ pub struct LlamaCppModel {
     current_n_ctx: u32,
     current_n_batch: u32,
     current_n_threads: Option<u32>,
+    kv_offload: bool,
+    op_offload: bool,
 }
 
 // Safety: llama.cpp's context is thread-safe for single-threaded access
@@ -122,7 +123,10 @@ impl LlamaCppModel {
 
     fn generation_headroom(max_tokens: u32) -> usize {
         let requested = usize::try_from(max_tokens).unwrap_or(GENERATION_HEADROOM_MAX_TOKENS);
-        requested.clamp(GENERATION_HEADROOM_MIN_TOKENS, GENERATION_HEADROOM_MAX_TOKENS)
+        requested.clamp(
+            GENERATION_HEADROOM_MIN_TOKENS,
+            GENERATION_HEADROOM_MAX_TOKENS,
+        )
     }
 
     fn max_decode_chunk(&self) -> usize {
@@ -137,12 +141,10 @@ impl LlamaCppModel {
     ) -> Result<()> {
         let n_ctx_usize = n_ctx as usize;
         if n_ctx_usize <= reserve_tokens {
-            return Err(LociError::InferenceError(
-                format!(
-                    "n_ctx is too small for inference (requires > {})",
-                    reserve_tokens
-                ),
-            ));
+            return Err(LociError::InferenceError(format!(
+                "n_ctx is too small for inference (requires > {})",
+                reserve_tokens
+            )));
         }
 
         let limit = n_ctx_usize - reserve_tokens;
@@ -156,9 +158,47 @@ impl LlamaCppModel {
 
     /// Load a model from file
     pub fn load(model_path: &Path, params: BackendParams) -> Result<Self> {
+        let BackendParams {
+            n_gpu_layers: requested_n_gpu_layers,
+            use_gpu,
+            use_mmap,
+            use_mlock,
+            kv_offload: requested_kv_offload,
+            op_offload: requested_op_offload,
+            split_mode: requested_split_mode,
+            main_gpu,
+            tensor_split: requested_tensor_split,
+            options,
+        } = params;
+
+        let n_gpu_layers = if use_gpu { requested_n_gpu_layers } else { 0 };
+        let kv_offload = if use_gpu { requested_kv_offload } else { false };
+        let op_offload = if use_gpu { requested_op_offload } else { false };
+        let split_mode = if use_gpu {
+            requested_split_mode
+        } else {
+            GpuSplitMode::None
+        };
+        let tensor_split = if use_gpu && split_mode != GpuSplitMode::None {
+            requested_tensor_split
+        } else {
+            None
+        };
+
         // Set up model parameters
         let mut model_params = ffi::model_default_params();
-        model_params.n_gpu_layers = params.n_gpu_layers as i32;
+        model_params.n_gpu_layers = n_gpu_layers as i32;
+        model_params.split_mode = match split_mode {
+            GpuSplitMode::None => ffi::llama_split_mode_LLAMA_SPLIT_MODE_NONE,
+            GpuSplitMode::Layer => ffi::llama_split_mode_LLAMA_SPLIT_MODE_LAYER,
+            GpuSplitMode::Row => ffi::llama_split_mode_LLAMA_SPLIT_MODE_ROW,
+        };
+        model_params.main_gpu = main_gpu as i32;
+        model_params.tensor_split = tensor_split
+            .as_ref()
+            .map_or(std::ptr::null(), |values| values.as_ptr());
+        model_params.use_mmap = use_mmap;
+        model_params.use_mlock = use_mlock;
 
         // Load model
         let model_path_str = model_path
@@ -185,20 +225,17 @@ impl LlamaCppModel {
         };
 
         // Create context using backend options when provided
-        let n_ctx = params
-            .options
+        let n_ctx = options
             .iter()
             .find(|(k, _)| k == "n_ctx")
             .and_then(|(_, v)| v.parse::<u32>().ok())
             .unwrap_or(4096);
-        let n_batch = params
-            .options
+        let n_batch = options
             .iter()
             .find(|(k, _)| k == "n_batch")
             .and_then(|(_, v)| v.parse::<u32>().ok())
             .unwrap_or(512);
-        let n_threads = params
-            .options
+        let n_threads = options
             .iter()
             .find(|(k, _)| k == "n_threads")
             .and_then(|(_, v)| v.parse::<u32>().ok());
@@ -206,8 +243,9 @@ impl LlamaCppModel {
         let mut ctx_params = ffi::context_default_params();
         ctx_params.n_ctx = n_ctx;
         ctx_params.n_batch = n_batch;
-        ctx_params.flash_attn_type =
-            ffi::llama_flash_attn_type_LLAMA_FLASH_ATTN_TYPE_DISABLED;
+        ctx_params.offload_kqv = kv_offload;
+        ctx_params.op_offload = op_offload;
+        ctx_params.flash_attn_type = ffi::llama_flash_attn_type_LLAMA_FLASH_ATTN_TYPE_DISABLED;
         if let Some(n_threads) = n_threads {
             ctx_params.n_threads = n_threads as i32;
         }
@@ -222,6 +260,8 @@ impl LlamaCppModel {
             current_n_ctx: n_ctx,
             current_n_batch: n_batch,
             current_n_threads: n_threads,
+            kv_offload,
+            op_offload,
         })
     }
 
@@ -237,8 +277,9 @@ impl LlamaCppModel {
         let mut ctx_params = ffi::context_default_params();
         ctx_params.n_ctx = params.n_ctx;
         ctx_params.n_batch = params.n_batch;
-        ctx_params.flash_attn_type =
-            ffi::llama_flash_attn_type_LLAMA_FLASH_ATTN_TYPE_DISABLED;
+        ctx_params.offload_kqv = self.kv_offload;
+        ctx_params.op_offload = self.op_offload;
+        ctx_params.flash_attn_type = ffi::llama_flash_attn_type_LLAMA_FLASH_ATTN_TYPE_DISABLED;
 
         if let Some(n_threads) = params.n_threads {
             ctx_params.n_threads = n_threads as i32;
@@ -262,6 +303,7 @@ impl LlamaCppModel {
     /// - Plugin logits transformation
     /// - Stateless sampling
     /// - Plugin post-sample hooks
+    #[allow(dead_code)]
     fn sample_with_plugins(
         &mut self,
         logits_ptr: *mut f32,
@@ -303,7 +345,8 @@ impl LlamaCppModel {
         if n_tokens > self.max_decode_chunk() {
             return Err(LociError::InferenceError(format!(
                 "Decode batch too large: {} > n_batch({})",
-                n_tokens, self.max_decode_chunk()
+                n_tokens,
+                self.max_decode_chunk()
             )));
         }
 
@@ -315,8 +358,8 @@ impl LlamaCppModel {
             .checked_add(n_tokens_i32 - 1)
             .ok_or_else(|| LociError::InferenceError("Token position overflow".to_string()))?;
 
-        let mut batch = ffi::OwnedBatch::new(n_tokens_i32, 0, 1)
-            .map_err(LociError::InferenceError)?;
+        let mut batch =
+            ffi::OwnedBatch::new(n_tokens_i32, 0, 1).map_err(LociError::InferenceError)?;
         let batch_ref = batch.as_mut();
 
         unsafe {
@@ -339,7 +382,9 @@ impl LlamaCppModel {
             batch_ref.n_tokens = n_tokens_i32;
         }
 
-        self.context.decode(batch_ref).map_err(LociError::InferenceError)
+        self.context
+            .decode(batch_ref)
+            .map_err(LociError::InferenceError)
     }
 
     /// Decode potentially long token sequences in n_batch-sized chunks.
@@ -491,7 +536,11 @@ impl Model for LlamaCppModel {
         let reserve = Self::generation_headroom(params.max_tokens);
         self.enforce_context_window(&mut tokens, params.n_ctx, reserve)?;
         if trace_enabled {
-            eprintln!("[infer_text] prompt tokens={} values={:?}", tokens.len(), tokens);
+            eprintln!(
+                "[infer_text] prompt tokens={} values={:?}",
+                tokens.len(),
+                tokens
+            );
         }
 
         // Clear context
@@ -604,13 +653,9 @@ impl Model for LlamaCppModel {
         params: &InferenceParams,
         callback: &mut dyn FnMut(&str) -> bool,
     ) -> Result<()> {
-        crate::backend::ModelExt::infer_multimodal_stream(
-            self,
-            text,
-            images,
-            params,
-            |token| callback(token),
-        )
+        crate::backend::ModelExt::infer_multimodal_stream(self, text, images, params, |token| {
+            callback(token)
+        })
     }
 }
 

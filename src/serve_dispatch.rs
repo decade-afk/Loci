@@ -4,6 +4,9 @@
 //! when the serve worker queue is full.
 
 use crate::error::{LociError, Result};
+use crate::plugin_contract::{
+    load_and_validate_plugin_contract, validate_runtime_plugin_identity, PluginContractKind,
+};
 use libloading::{Library, Symbol};
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -371,6 +374,8 @@ pub fn load_dynamic_serve_dispatch_policy<P: AsRef<Path>>(
     library_path: P,
 ) -> Result<LoadedServeDispatchPolicy> {
     let lib_path = library_path.as_ref();
+    let manifest =
+        load_and_validate_plugin_contract(lib_path, PluginContractKind::ServeDispatchPolicy)?;
     if !lib_path.exists() {
         return Err(LociError::PluginError(format!(
             "Serve dispatch policy plugin library not found: {}",
@@ -413,6 +418,7 @@ pub fn load_dynamic_serve_dispatch_policy<P: AsRef<Path>>(
             "Serve dispatch policy plugin returned empty name".to_string(),
         ));
     }
+    validate_runtime_plugin_identity(manifest.as_ref(), plugin.name(), "")?;
 
     Ok(LoadedServeDispatchPolicy {
         plugin: Arc::<dyn ServeDispatchPolicyPlugin>::from(plugin),

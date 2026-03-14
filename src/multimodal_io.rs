@@ -132,8 +132,7 @@ pub unsafe fn dynamic_multimodal_io_plugin_from_opaque(
     }
 }
 
-type MultimodalIoPluginConstructor =
-    unsafe extern "C" fn() -> DynamicMultimodalIoPluginOpaque;
+type MultimodalIoPluginConstructor = unsafe extern "C" fn() -> DynamicMultimodalIoPluginOpaque;
 
 struct MultimodalIoPluginEntry {
     plugin: Box<dyn MultimodalIoPlugin>,

@@ -1,5 +1,5 @@
 use loci::backend::{
-    BackendParams, Image as BackendImage, ImageData, ImageFormat, InferenceParams,
+    BackendParams, GpuSplitMode, Image as BackendImage, ImageData, ImageFormat, InferenceParams,
 };
 use loci::backends::LlamaCppBackend;
 use loci::error::{LociError, Result};
@@ -10,6 +10,13 @@ fn test_backend_params_default() {
 
     assert_eq!(params.n_gpu_layers, -1);
     assert!(params.use_gpu);
+    assert!(params.use_mmap);
+    assert!(!params.use_mlock);
+    assert!(params.kv_offload);
+    assert!(params.op_offload);
+    assert_eq!(params.split_mode, GpuSplitMode::Layer);
+    assert_eq!(params.main_gpu, 0);
+    assert!(params.tensor_split.is_none());
     assert!(params.options.is_empty());
 }
 
@@ -18,12 +25,26 @@ fn test_backend_params_builder() {
     let mut params = BackendParams::default();
     params.n_gpu_layers = 10;
     params.use_gpu = false;
+    params.use_mmap = false;
+    params.use_mlock = true;
+    params.kv_offload = false;
+    params.op_offload = false;
+    params.split_mode = GpuSplitMode::Row;
+    params.main_gpu = 1;
+    params.tensor_split = Some(vec![3.0, 2.0, 1.0]);
     params
         .options
         .push(("key".to_string(), "value".to_string()));
 
     assert_eq!(params.n_gpu_layers, 10);
     assert!(!params.use_gpu);
+    assert!(!params.use_mmap);
+    assert!(params.use_mlock);
+    assert!(!params.kv_offload);
+    assert!(!params.op_offload);
+    assert_eq!(params.split_mode, GpuSplitMode::Row);
+    assert_eq!(params.main_gpu, 1);
+    assert_eq!(params.tensor_split, Some(vec![3.0, 2.0, 1.0]));
     assert_eq!(params.options.len(), 1);
     assert_eq!(params.options[0], ("key".to_string(), "value".to_string()));
 }
@@ -199,6 +220,13 @@ fn test_backend_params_cloning() {
     let params1 = BackendParams {
         n_gpu_layers: 20,
         use_gpu: false,
+        use_mmap: false,
+        use_mlock: true,
+        kv_offload: false,
+        op_offload: false,
+        split_mode: GpuSplitMode::Row,
+        main_gpu: 1,
+        tensor_split: Some(vec![3.0, 2.0, 1.0]),
         options: vec![("test".to_string(), "value".to_string())],
     };
 
@@ -206,5 +234,12 @@ fn test_backend_params_cloning() {
 
     assert_eq!(params1.n_gpu_layers, params2.n_gpu_layers);
     assert_eq!(params1.use_gpu, params2.use_gpu);
+    assert_eq!(params1.use_mmap, params2.use_mmap);
+    assert_eq!(params1.use_mlock, params2.use_mlock);
+    assert_eq!(params1.kv_offload, params2.kv_offload);
+    assert_eq!(params1.op_offload, params2.op_offload);
+    assert_eq!(params1.split_mode, params2.split_mode);
+    assert_eq!(params1.main_gpu, params2.main_gpu);
+    assert_eq!(params1.tensor_split, params2.tensor_split);
     assert_eq!(params1.options, params2.options);
 }

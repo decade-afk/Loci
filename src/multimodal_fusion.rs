@@ -2,7 +2,7 @@
 //!
 //! This module implements advanced token-level fusion for multimodal inputs.
 
-use crate::error::{LociError, Result};
+use crate::error::Result;
 use crate::vision_clip::ImageEmbedding;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -32,6 +32,7 @@ pub enum SpecialToken {
 pub struct FusedTokenSequence {
     tokens: Vec<TokenType>,
     vision_embeddings: Option<Arc<ImageEmbedding>>,
+    #[allow(dead_code)]
     text_embeddings: Option<Arc<[f32]>>,
     embedding_dim: usize,
 }
@@ -133,6 +134,7 @@ impl Default for FusionConfig {
 /// Multimodal fusion manager
 pub struct MultimodalFusion {
     config: FusionConfig,
+    #[allow(dead_code)]
     projection_weights: Option<Vec<f32>>,
 }
 
@@ -187,10 +189,8 @@ impl MultimodalFusion {
             fused.push_vision(0);
         }
 
-        let num_patches = std::cmp::min(
-            image_embedding.seq_len() - 1,
-            self.config.max_vision_tokens,
-        );
+        let num_patches =
+            std::cmp::min(image_embedding.seq_len() - 1, self.config.max_vision_tokens);
 
         for i in 0..num_patches {
             fused.push_vision(i + 1);
@@ -216,10 +216,8 @@ impl MultimodalFusion {
             fused.push_vision(0);
         }
 
-        let num_patches = std::cmp::min(
-            image_embedding.seq_len() - 1,
-            self.config.max_vision_tokens,
-        );
+        let num_patches =
+            std::cmp::min(image_embedding.seq_len() - 1, self.config.max_vision_tokens);
 
         for i in 0..num_patches {
             fused.push_vision(i + 1);

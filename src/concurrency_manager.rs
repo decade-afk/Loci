@@ -149,7 +149,7 @@ impl ConcurrencyManager {
                 let mut stats = self.stats.lock();
                 stats.total_rejected += 1;
                 return Err(LociError::ResourceExhausted(
-                    "Rate limit exceeded".to_string()
+                    "Rate limit exceeded".to_string(),
                 ));
             }
         }
@@ -159,11 +159,11 @@ impl ConcurrencyManager {
             let mut active = self.active_ops.lock();
             if *active < self.config.max_concurrent {
                 *active += 1;
-                
+
                 let mut stats = self.stats.lock();
                 stats.active_ops = *active;
                 stats.total_completed += 1;
-                
+
                 if *active > stats.peak_concurrent {
                     stats.peak_concurrent = *active;
                 }
@@ -184,9 +184,10 @@ impl ConcurrencyManager {
         if queue.len() >= self.config.queue_size {
             let mut stats = self.stats.lock();
             stats.total_rejected += 1;
-            return Err(LociError::ResourceExhausted(
-                format!("Queue full (max {})", self.config.queue_size)
-            ));
+            return Err(LociError::ResourceExhausted(format!(
+                "Queue full (max {})",
+                self.config.queue_size
+            )));
         }
 
         let mut id = self.next_id.lock();
@@ -200,7 +201,7 @@ impl ConcurrencyManager {
         };
 
         queue.push_back(request);
-        
+
         let mut stats = self.stats.lock();
         stats.queued_ops = queue.len();
         drop(queue);
@@ -208,7 +209,7 @@ impl ConcurrencyManager {
         // Wait for slot to become available with timeout
         let start = Instant::now();
         let mut active = self.active_ops.lock();
-        
+
         while *active >= self.config.max_concurrent {
             // Calculate remaining time
             let elapsed = start.elapsed();
@@ -218,23 +219,21 @@ impl ConcurrencyManager {
                 if let Some(pos) = queue.iter().position(|r| r.id == request_id) {
                     queue.remove(pos);
                 }
-                
+
                 let mut stats = self.stats.lock();
                 stats.total_rejected += 1;
                 stats.queued_ops = queue.len();
-                
+
                 return Err(LociError::Timeout("Request timed out in queue".to_string()));
             }
-            
+
             // Wait for notification with remaining time
             let remaining = timeout.saturating_sub(elapsed);
             let _ = self.condvar.wait_for(&mut active, remaining);
-            
+
             // Re-check queue
-            let mut queue = self.queue.lock();
-            if let Some(pos) = queue.iter().position(|r| r.id == request_id) {
-                // Still in queue, continue waiting
-            } else {
+            let queue = self.queue.lock();
+            if queue.iter().all(|request| request.id != request_id) {
                 // Was removed (shouldn't happen)
                 return Err(LociError::Timeout("Request removed from queue".to_string()));
             }
@@ -243,24 +242,28 @@ impl ConcurrencyManager {
 
         // Acquire the slot
         *active += 1;
-        
+
         // Remove from queue
         let mut queue = self.queue.lock();
-        if let Some(pos) = queue.iter().position(|r| r.id == request_id) {
-            queue.remove(pos);
-        }
-        
-        let wait_time = start.elapsed();
-        
+        let wait_time = if let Some(pos) = queue.iter().position(|request| request.id == request_id)
+        {
+            queue
+                .remove(pos)
+                .map(|request| request.submitted_at.elapsed())
+                .unwrap_or_else(|| start.elapsed())
+        } else {
+            start.elapsed()
+        };
+
         let mut stats = self.stats.lock();
         stats.active_ops = *active;
         stats.total_completed += 1;
         stats.queued_ops = queue.len();
-        
+
         // Update average wait time
         let current_avg = stats.avg_queue_wait_ms;
         let wait_ms = wait_time.as_millis() as f64;
-        stats.avg_queue_wait_ms = (current_avg * (stats.total_completed - 1) as f64 + wait_ms) 
+        stats.avg_queue_wait_ms = (current_avg * (stats.total_completed - 1) as f64 + wait_ms)
             / stats.total_completed as f64;
 
         if *active > stats.peak_concurrent {
@@ -322,7 +325,7 @@ impl Drop for ConcurrencyGuard {
         if *active > 0 {
             *active -= 1;
         }
-        
+
         self.condvar.notify_one();
 
         let queued_ops = self.queue.lock().len();
@@ -363,7 +366,7 @@ impl RateLimiter {
         }
 
         let elapsed = now.duration_since(self.last_update);
-        
+
         // Refill tokens based on elapsed time
         let new_tokens = elapsed.as_secs_f64() * max_tokens;
         self.tokens = (self.tokens + new_tokens).min(max_tokens);
@@ -403,7 +406,7 @@ impl<T> ConnectionPool<T> {
 
         // Pre-populate with minimum connections
         pool.populate_min()?;
-        
+
         Ok(pool)
     }
 
@@ -413,7 +416,7 @@ impl<T> ConnectionPool<T> {
         while pool.len() < self.min_size {
             let conn = (self.create_fn)()?;
             pool.push_back(conn);
-            
+
             let mut stats = self.stats.lock();
             stats.total_created += 1;
         }
@@ -423,13 +426,13 @@ impl<T> ConnectionPool<T> {
     /// Acquire a connection from the pool
     pub fn acquire(&self) -> Result<PooledConnection<T>> {
         let mut pool = self.pool.lock();
-        
+
         // Try to get existing connection
         if let Some(conn) = pool.pop_front() {
             let mut stats = self.stats.lock();
             stats.active += 1;
             stats.acquired += 1;
-            
+
             Ok(PooledConnection {
                 conn: Some(conn),
                 pool: self.pool.clone(),
@@ -443,16 +446,17 @@ impl<T> ConnectionPool<T> {
                 stats.active += 1;
                 stats.total_created += 1;
                 stats.acquired += 1;
-                
+
                 Ok(PooledConnection {
                     conn: Some(conn),
                     pool: self.pool.clone(),
                     stats: self.stats.clone(),
                 })
             } else {
-                Err(LociError::ResourceExhausted(
-                    format!("Connection pool exhausted (max {})", self.max_size)
-                ))
+                Err(LociError::ResourceExhausted(format!(
+                    "Connection pool exhausted (max {})",
+                    self.max_size
+                )))
             }
         }
     }
@@ -497,10 +501,11 @@ impl<T> Drop for PooledConnection<T> {
         if let Some(conn) = self.conn.take() {
             // Return to pool
             let mut pool = self.pool.lock();
-            if pool.len() < 100 { // Simple safety check
+            if pool.len() < 100 {
+                // Simple safety check
                 pool.push_back(conn);
             }
-            
+
             let mut stats = self.stats.lock();
             stats.active -= 1;
             stats.released += 1;
@@ -529,9 +534,8 @@ mod tests {
 
     #[test]
     fn test_concurrency_manager_basic() {
-        let manager = ConcurrencyManager::with_config(
-            ConcurrencyConfig::new().with_max_concurrent(2)
-        );
+        let manager =
+            ConcurrencyManager::with_config(ConcurrencyConfig::new().with_max_concurrent(2));
 
         let guard1 = manager.acquire().unwrap();
         assert_eq!(manager.active_operations(), 1);
@@ -555,21 +559,19 @@ mod tests {
         let manager = ConcurrencyManager::with_config(
             ConcurrencyConfig::new()
                 .with_max_concurrent(1)
-                .with_queue_size(0)
+                .with_queue_size(0),
         );
 
         let _guard1 = manager.acquire().unwrap();
-        
+
         // Should fail due to queue size 0
         assert!(manager.acquire().is_err());
     }
 
     #[test]
     fn test_rate_limiter() {
-        let manager = ConcurrencyManager::with_config(
-            ConcurrencyConfig::new()
-                .with_rate_limit(true, 10)
-        );
+        let manager =
+            ConcurrencyManager::with_config(ConcurrencyConfig::new().with_rate_limit(true, 10));
 
         // First 10 should succeed
         for _ in 0..10 {
@@ -583,7 +585,7 @@ mod tests {
     #[test]
     fn test_connection_pool() {
         let pool = ConnectionPool::new(1, 3, || Ok(42)).unwrap();
-        
+
         let conn1 = pool.acquire().unwrap();
         assert_eq!(*conn1.get(), 42);
 

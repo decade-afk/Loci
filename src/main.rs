@@ -1,16 +1,38 @@
-use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args as ClapArgs, Parser, Subcommand, ValueEnum};
 use crossbeam::channel::{self, Sender, TrySendError};
 use loci::execution_policy_plugin::{ExecutionPolicyDescriptor, ExecutionPolicyRegistry};
+use loci::http_compat::{
+    chunk_text_for_streaming, compatibility_created_at, estimate_token_count,
+    normalize_openai_embedding_input, ollama_stream_event, openai_chat_messages_to_prompt,
+    openai_chat_stream_chunk, OllamaGenerateRequest, OllamaGenerateResponse, OllamaModelTag,
+    OllamaTagsResponse, OpenAiChatChoice, OpenAiChatCompletionsRequest,
+    OpenAiChatCompletionsResponse, OpenAiChatMessage, OpenAiEmbeddingData, OpenAiEmbeddingsRequest,
+    OpenAiEmbeddingsResponse, OpenAiModelDescriptor, OpenAiModelListResponse, OpenAiUsage,
+};
 use loci::image_kernel::{load_dynamic_image_plugin, ImageGenerationRequest};
 use loci::inference::GenerationParams;
 use loci::management_auth::{
     ManagementAuthContext, ManagementAuthDecision, ManagementAuthPolicyPlugin,
     ManagementAuthPolicyRegistry,
 };
-use loci::model_store::{ModelPullOptions, ModelStore};
+use loci::model_pull_jobs::{
+    ModelPullJobEvent, ModelPullJobManager, ModelPullJobRequest, ModelPullJobSnapshot,
+};
+use loci::model_pull_policy::{
+    authorize_model_pull_request, ModelPullPolicyContext, ModelPullPolicyDescriptor,
+    ModelPullPolicyPlugin, ModelPullPolicyRegistry,
+};
+use loci::model_pull_verifier::{
+    ModelPullVerifierDescriptor, ModelPullVerifierPlugin, ModelPullVerifierRegistry,
+};
+use loci::model_store::{ModelPullOptions, ModelPullProgress, ModelStore, StoredModel};
 use loci::plugin_registry::PluginRegistry;
 use loci::policy_registry::DynamicPolicyRegistry;
 use loci::prelude::*;
+use loci::resource_planner::{ModelResourceEstimate, ResourcePlan, ResourcePlanner};
+use loci::runtime_events::{
+    RuntimeEvent, RuntimeEventBus, RuntimeEventCategory, RuntimeEventOutcome,
+};
 use loci::serve_dispatch::{
     QueueFullAction, QueuePressureContext, ServeDispatchPolicyDescriptor,
     ServeDispatchPolicyPlugin, ServeDispatchPolicyRegistry,
@@ -32,6 +54,15 @@ const MAX_HTTP_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 const MAX_HTTP_LINE_BYTES: usize = 8 * 1024;
 const MIN_PROMPT_BYTES_LIMIT: usize = 1024;
+const OPENAPI_SPEC_YAML_PATH: &str = "/openapi.yaml";
+const OPENAPI_SPEC_JSON_PATH: &str = "/openapi.json";
+const OPENAPI_SPEC_YAML: &str = include_str!("../docs/openapi/loci-rest-v1.yaml");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenApiSpecFormat {
+    Yaml,
+    Json,
+}
 
 fn parse_prompt_bytes(raw: &str) -> std::result::Result<usize, String> {
     let value = raw
@@ -44,6 +75,81 @@ fn parse_prompt_bytes(raw: &str) -> std::result::Result<usize, String> {
         ));
     }
     Ok(value)
+}
+
+fn parse_positive_u32(raw: &str) -> std::result::Result<u32, String> {
+    let value = raw
+        .parse::<u32>()
+        .map_err(|_| format!("invalid integer: `{raw}`"))?;
+    if value == 0 {
+        return Err("value must be greater than 0".to_string());
+    }
+    Ok(value)
+}
+
+fn parse_tensor_split(raw: &str) -> std::result::Result<Vec<f32>, String> {
+    let values = raw
+        .split(',')
+        .map(str::trim)
+        .map(|part| {
+            if part.is_empty() {
+                return Err("tensor split contains an empty segment".to_string());
+            }
+            let value = part
+                .parse::<f32>()
+                .map_err(|_| format!("invalid tensor split value: `{part}`"))?;
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!(
+                    "tensor split value must be finite and non-negative: `{part}`"
+                ));
+            }
+            Ok(value)
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    if values.is_empty() {
+        return Err("tensor split must contain at least one value".to_string());
+    }
+    if !values.iter().any(|value| *value > 0.0) {
+        return Err("tensor split must contain at least one positive value".to_string());
+    }
+
+    Ok(values)
+}
+
+fn format_tensor_split(values: &[f32]) -> String {
+    values
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct TensorSplitArg(Vec<f32>);
+
+impl TensorSplitArg {
+    fn to_vec(&self) -> Vec<f32> {
+        self.0.clone()
+    }
+}
+
+impl std::str::FromStr for TensorSplitArg {
+    type Err = String;
+
+    fn from_str(raw: &str) -> std::result::Result<Self, Self::Err> {
+        parse_tensor_split(raw).map(Self)
+    }
+}
+
+fn resolve_toggle(enabled: bool, disabled: bool, default: bool) -> bool {
+    if disabled {
+        false
+    } else if enabled {
+        true
+    } else {
+        default
+    }
 }
 
 fn split_shell_words(input: &str) -> std::result::Result<Vec<String>, String> {
@@ -268,6 +374,53 @@ struct Cli {
     /// Number of GPU layers to offload (-1 = all)
     #[arg(long)]
     gpu_layers: Option<i32>,
+    /// Multi-GPU split strategy: none, layer, or row
+    #[arg(long = "gpu-split-mode", value_enum)]
+    gpu_split_mode: Option<GpuSplitModeArg>,
+    /// Primary GPU index used when --gpu-split-mode=none
+    #[arg(long = "main-gpu")]
+    main_gpu: Option<u32>,
+    /// Relative split weights per GPU, comma-separated, e.g. 3,2,1
+    #[arg(long = "tensor-split")]
+    tensor_split: Option<TensorSplitArg>,
+    /// Retry model loading with fewer GPU layers when the requested placement does not fit.
+    #[arg(long = "auto-gpu-fallback")]
+    auto_gpu_fallback: bool,
+    /// Layer decrement used by --auto-gpu-fallback for each retry.
+    #[arg(long = "gpu-fallback-step", value_parser = parse_positive_u32)]
+    gpu_fallback_step: Option<u32>,
+    /// Derive GPU/CPU placement automatically from model size and detected hardware.
+    #[arg(long = "auto-resource-plan")]
+    auto_resource_plan: bool,
+    /// Enable memory-mapped model loading (disk-backed paging)
+    #[arg(long, action = ArgAction::SetTrue, overrides_with = "no_mmap")]
+    mmap: bool,
+    /// Disable memory-mapped model loading
+    #[arg(long = "no-mmap", action = ArgAction::SetTrue, overrides_with = "mmap")]
+    no_mmap: bool,
+    /// Lock model pages into RAM when supported by the OS
+    #[arg(long)]
+    mlock: bool,
+    /// Enable K/Q/V and KV cache offload to device
+    #[arg(long, action = ArgAction::SetTrue, overrides_with = "no_kv_offload")]
+    kv_offload: bool,
+    /// Disable K/Q/V and KV cache offload to device
+    #[arg(
+        long = "no-kv-offload",
+        action = ArgAction::SetTrue,
+        overrides_with = "kv_offload"
+    )]
+    no_kv_offload: bool,
+    /// Enable host op offload to device
+    #[arg(long, action = ArgAction::SetTrue, overrides_with = "no_op_offload")]
+    op_offload: bool,
+    /// Disable host op offload to device
+    #[arg(
+        long = "no-op-offload",
+        action = ArgAction::SetTrue,
+        overrides_with = "op_offload"
+    )]
+    no_op_offload: bool,
     /// LoRA adapter path(s). Accepted for compatibility; backend merge support is build-dependent.
     #[arg(long = "lora-path")]
     lora_paths: Vec<PathBuf>,
@@ -309,6 +462,23 @@ enum Commands {
     Model(ModelCmd),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum GpuSplitModeArg {
+    None,
+    Layer,
+    Row,
+}
+
+impl From<GpuSplitModeArg> for GpuSplitMode {
+    fn from(value: GpuSplitModeArg) -> Self {
+        match value {
+            GpuSplitModeArg::None => GpuSplitMode::None,
+            GpuSplitModeArg::Layer => GpuSplitMode::Layer,
+            GpuSplitModeArg::Row => GpuSplitMode::Row,
+        }
+    }
+}
+
 #[derive(ClapArgs, Debug, Clone)]
 struct EngineArgs {
     /// Backend name (llama.cpp, candle, ...)
@@ -340,6 +510,61 @@ struct EngineArgs {
     /// Number of GPU layers to offload (-1 = all)
     #[arg(long, default_value_t = -1)]
     gpu_layers: i32,
+    /// Multi-GPU split strategy: none, layer, or row
+    #[arg(
+        long = "gpu-split-mode",
+        value_enum,
+        default_value_t = GpuSplitModeArg::Layer
+    )]
+    gpu_split_mode: GpuSplitModeArg,
+    /// Primary GPU index used when --gpu-split-mode=none
+    #[arg(long = "main-gpu", default_value_t = 0)]
+    main_gpu: u32,
+    /// Relative split weights per GPU, comma-separated, e.g. 3,2,1
+    #[arg(long = "tensor-split")]
+    tensor_split: Option<TensorSplitArg>,
+    /// Retry model loading with fewer GPU layers when the requested placement does not fit.
+    #[arg(long = "auto-gpu-fallback")]
+    auto_gpu_fallback: bool,
+    /// Layer decrement used by --auto-gpu-fallback for each retry.
+    #[arg(
+        long = "gpu-fallback-step",
+        default_value_t = 8,
+        value_parser = parse_positive_u32
+    )]
+    gpu_fallback_step: u32,
+    /// Derive GPU/CPU placement automatically from model size and detected hardware.
+    #[arg(long = "auto-resource-plan")]
+    auto_resource_plan: bool,
+    /// Enable memory-mapped model loading (disk-backed paging)
+    #[arg(long, action = ArgAction::SetTrue, overrides_with = "no_mmap")]
+    mmap: bool,
+    /// Disable memory-mapped model loading
+    #[arg(long = "no-mmap", action = ArgAction::SetTrue, overrides_with = "mmap")]
+    no_mmap: bool,
+    /// Lock model pages into RAM when supported by the OS
+    #[arg(long)]
+    mlock: bool,
+    /// Enable K/Q/V and KV cache offload to device
+    #[arg(long, action = ArgAction::SetTrue, overrides_with = "no_kv_offload")]
+    kv_offload: bool,
+    /// Disable K/Q/V and KV cache offload to device
+    #[arg(
+        long = "no-kv-offload",
+        action = ArgAction::SetTrue,
+        overrides_with = "kv_offload"
+    )]
+    no_kv_offload: bool,
+    /// Enable host op offload to device
+    #[arg(long, action = ArgAction::SetTrue, overrides_with = "no_op_offload")]
+    op_offload: bool,
+    /// Disable host op offload to device
+    #[arg(
+        long = "no-op-offload",
+        action = ArgAction::SetTrue,
+        overrides_with = "op_offload"
+    )]
+    no_op_offload: bool,
     /// LoRA adapter path(s). Accepted for compatibility; backend merge support is build-dependent.
     #[arg(long = "lora-path")]
     lora_paths: Vec<PathBuf>,
@@ -355,6 +580,44 @@ struct EngineArgs {
     /// Execution policy name from builtin/dynamic registry
     #[arg(long = "execution-policy-name")]
     execution_policy_name: Option<String>,
+}
+
+impl EngineArgs {
+    fn resolved_gpu_split_mode(&self) -> GpuSplitMode {
+        self.gpu_split_mode.into()
+    }
+
+    fn resolved_tensor_split(&self) -> Option<Vec<f32>> {
+        self.tensor_split.as_ref().map(TensorSplitArg::to_vec)
+    }
+
+    fn resolved_gpu_fallback_step(&self) -> Option<u32> {
+        if self.auto_gpu_fallback {
+            Some(self.gpu_fallback_step)
+        } else {
+            None
+        }
+    }
+
+    fn resolved_auto_resource_plan(&self) -> bool {
+        self.auto_resource_plan && !self.cpu_only
+    }
+
+    fn resolved_mmap(&self) -> bool {
+        resolve_toggle(self.mmap, self.no_mmap, true)
+    }
+
+    fn resolved_mlock(&self) -> bool {
+        self.mlock
+    }
+
+    fn resolved_kv_offload(&self) -> bool {
+        resolve_toggle(self.kv_offload, self.no_kv_offload, true)
+    }
+
+    fn resolved_op_offload(&self) -> bool {
+        resolve_toggle(self.op_offload, self.no_op_offload, true)
+    }
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -462,6 +725,30 @@ struct ServeCmd {
     /// Management auth policy name from builtin/dynamic registry
     #[arg(long = "management-auth-policy-name")]
     management_auth_policy_name: Option<String>,
+    /// Model pull policy registry file
+    #[arg(
+        long = "model-pull-policy-registry",
+        default_value = "loci_model_pull_policies.toml"
+    )]
+    model_pull_policy_registry: PathBuf,
+    /// Dynamic model pull policy plugin library (.dll/.so/.dylib), repeatable
+    #[arg(long = "model-pull-policy-plugin")]
+    model_pull_policy_plugins: Vec<PathBuf>,
+    /// Model pull policy name from builtin/dynamic registry
+    #[arg(long = "model-pull-policy-name")]
+    model_pull_policy_name: Option<String>,
+    /// Model pull verifier registry file
+    #[arg(
+        long = "model-pull-verifier-registry",
+        default_value = "loci_model_pull_verifiers.toml"
+    )]
+    model_pull_verifier_registry: PathBuf,
+    /// Dynamic model pull verifier plugin library (.dll/.so/.dylib), repeatable
+    #[arg(long = "model-pull-verifier-plugin")]
+    model_pull_verifier_plugins: Vec<PathBuf>,
+    /// Model pull verifier name from builtin/dynamic registry
+    #[arg(long = "model-pull-verifier-name")]
+    model_pull_verifier_name: Option<String>,
     /// Optional bearer token used to enable builtin bearer-token management auth policy
     #[arg(long = "management-auth-bearer-token")]
     management_auth_bearer_token: Option<String>,
@@ -1117,6 +1404,26 @@ enum PluginAction {
 
 #[derive(Subcommand, Debug, Clone)]
 enum ModelAction {
+    /// Inspect model resource placement without loading the model into the inference engine.
+    Plan {
+        /// Path to GGUF model file
+        #[arg(short, long)]
+        model: Option<PathBuf>,
+        /// Model asset id from built-in model store
+        #[arg(long = "model-id")]
+        model_id: Option<String>,
+        /// Requested runtime context size used for KV cache sizing
+        #[arg(
+            short = 'c',
+            long = "context-length",
+            visible_alias = "context-size",
+            default_value_t = 4096
+        )]
+        context_size: u32,
+        /// Render the plan as JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Register an existing local model file without copying it.
     Add {
         /// Local model file path
@@ -1253,6 +1560,14 @@ struct ErrorResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct ResourcePlanReport {
+    model: String,
+    estimate: ModelResourceEstimate,
+    plan: ResourcePlan,
+    devices: Vec<DeviceInfoResponse>,
+}
+
+#[derive(Debug, Serialize)]
 struct AuthErrorResponse {
     error: String,
     policy: String,
@@ -1383,6 +1698,11 @@ struct ToolPluginRegistryMutationResponse {
     functions: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct RuntimeEventListResponse {
+    events: Vec<RuntimeEvent>,
+}
+
 enum SessionApiRoute {
     Collection,
     Item { session_id: SessionId },
@@ -1395,10 +1715,67 @@ enum SessionApiRoute {
     Destroy { session_id: SessionId },
 }
 
+enum ModelStoreApiRoute {
+    Collection,
+    Pull,
+    PullJobsCollection,
+    PullJobItem { id: String },
+    PullJobCancel { id: String },
+    PullJobEvents { id: String },
+    Item { id: String },
+}
+
 #[derive(Debug, Deserialize)]
 struct RuntimePluginLoadRequest {
     path: String,
     activate: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelAssetRegisterRequest {
+    path: String,
+    id: Option<String>,
+    name: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelAssetPullRequest {
+    source: String,
+    #[serde(default)]
+    mirrors: Vec<String>,
+    id: Option<String>,
+    name: Option<String>,
+    sha256: Option<String>,
+    no_resume: Option<bool>,
+    stream: Option<bool>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ModelAssetListResponse {
+    models: Vec<StoredModel>,
+}
+
+#[derive(Debug, Serialize)]
+struct ModelAssetRemoveResponse {
+    model: StoredModel,
+    deleted_file: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ModelAssetPullJobListResponse {
+    jobs: Vec<ModelPullJobSnapshot>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ModelAssetPullStreamEvent {
+    Progress { progress: ModelPullProgress },
+    Complete { model: StoredModel },
+    Error { error: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -1442,6 +1819,11 @@ enum ToolApiRoute {
     PluginLoad,
     PluginReload { name: String },
     PluginUnload { name: String },
+}
+
+enum RuntimeEventsApiRoute {
+    Collection,
+    Stream,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1524,9 +1906,81 @@ impl ManagementAuthScopeConfig {
 struct ModelInfoResponse {
     status: &'static str,
     version: &'static str,
+    engine: &'static str,
+    positioning: &'static str,
+    runtime_model: String,
+    backend: BackendInfoResponse,
+    capabilities: EngineCapabilityResponse,
+    plugins: EnginePluginSummaryResponse,
+    tools: EngineToolSummaryResponse,
+    integrations: EngineIntegrationResponse,
     n_vocab: u32,
     n_ctx_train: u32,
     n_embd: u32,
+    n_layer: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    param_count: Option<u64>,
+    architecture: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BackendInfoResponse {
+    name: String,
+    version: String,
+    has_gpu_support: bool,
+    supported_formats: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct EngineCapabilityResponse {
+    streaming: bool,
+    embeddings: bool,
+    multimodal: bool,
+    resource_planning: bool,
+    openai_compat: bool,
+    ollama_compat: bool,
+    plugin_hot_reload: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct EnginePluginSummaryResponse {
+    text_plugins_total: usize,
+    text_plugins_enabled: usize,
+    text_plugins_dynamic: usize,
+    text_plugins_wasm: usize,
+    tool_plugins_total: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct EngineToolSummaryResponse {
+    registered_functions: usize,
+    tool_plugin_functions: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct EngineIntegrationResponse {
+    rest: bool,
+    c_api: bool,
+    plugin_upgradeable: bool,
+    openapi_spec_path: &'static str,
+    openapi_spec_json_path: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelPlanRequest {
+    model: Option<String>,
+    model_id: Option<String>,
+    context_size: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeviceInfoResponse {
+    id: i32,
+    name: String,
+    memory_bytes: u64,
+    device_type: String,
+    compute_capability: f32,
+    available: bool,
 }
 
 #[derive(Debug, Default)]
@@ -1627,6 +2081,166 @@ fn status_code_value(status: &str) -> u16 {
         .next()
         .and_then(|x| x.parse::<u16>().ok())
         .unwrap_or(500)
+}
+
+fn gib(bytes: u64) -> f64 {
+    (bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+}
+
+fn device_info_response(device: &DeviceInfo) -> DeviceInfoResponse {
+    DeviceInfoResponse {
+        id: device.id,
+        name: device.name.clone(),
+        memory_bytes: device.memory_bytes,
+        device_type: device.device_type.to_string(),
+        compute_capability: device.compute_capability,
+        available: device.available,
+    }
+}
+
+fn build_resource_plan_report(
+    model: &Path,
+    estimate: ModelResourceEstimate,
+    plan: ResourcePlan,
+    devices: &[DeviceInfo],
+) -> ResourcePlanReport {
+    ResourcePlanReport {
+        model: model.display().to_string(),
+        estimate,
+        plan,
+        devices: devices.iter().map(device_info_response).collect(),
+    }
+}
+
+fn build_model_info_response(
+    engine: &InferenceEngine,
+    plugins: Option<&PluginRegistry>,
+) -> ModelInfoResponse {
+    let metadata = engine.model_metadata();
+    let backend = engine.backend_capabilities();
+    let tool_plugins = engine.list_tool_plugins();
+    let tool_plugin_functions = tool_plugins
+        .iter()
+        .map(|plugin| plugin.function_names.len())
+        .sum();
+
+    ModelInfoResponse {
+        status: "ok",
+        version: env!("CARGO_PKG_VERSION"),
+        engine: "loci",
+        positioning: "embeddable-ai-inference-engine",
+        runtime_model: format!("loci/{}:{}", engine.backend_name(), metadata.architecture),
+        backend: BackendInfoResponse {
+            name: engine.backend_name().to_string(),
+            version: backend
+                .as_ref()
+                .map(|capabilities| capabilities.version.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            has_gpu_support: backend
+                .as_ref()
+                .map(|capabilities| capabilities.has_gpu_support)
+                .unwrap_or(false),
+            supported_formats: backend
+                .as_ref()
+                .map(|capabilities| capabilities.supported_formats.clone())
+                .unwrap_or_default(),
+        },
+        capabilities: EngineCapabilityResponse {
+            streaming: engine.supports_streaming(),
+            embeddings: engine.supports_embeddings(),
+            multimodal: engine.supports_multimodal(),
+            resource_planning: true,
+            openai_compat: true,
+            ollama_compat: true,
+            plugin_hot_reload: true,
+        },
+        plugins: EnginePluginSummaryResponse {
+            text_plugins_total: plugins.map_or(0, PluginRegistry::count),
+            text_plugins_enabled: plugins.map_or(0, PluginRegistry::count_enabled),
+            text_plugins_dynamic: plugins.map_or(0, PluginRegistry::count_dynamic),
+            text_plugins_wasm: plugins.map_or(0, PluginRegistry::count_wasm),
+            tool_plugins_total: tool_plugins.len(),
+        },
+        tools: EngineToolSummaryResponse {
+            registered_functions: engine.function_calling_manager().list_functions().len(),
+            tool_plugin_functions,
+        },
+        integrations: EngineIntegrationResponse {
+            rest: true,
+            c_api: true,
+            plugin_upgradeable: true,
+            openapi_spec_path: OPENAPI_SPEC_YAML_PATH,
+            openapi_spec_json_path: OPENAPI_SPEC_JSON_PATH,
+        },
+        n_vocab: metadata.n_vocab,
+        n_ctx_train: metadata.n_ctx_train,
+        n_embd: metadata.n_embd,
+        n_layer: metadata.n_layer,
+        param_count: metadata.param_count,
+        architecture: metadata.architecture,
+    }
+}
+
+fn print_resource_plan_summary(estimate: &ModelResourceEstimate, plan: &ResourcePlan) {
+    println!("Resource metadata source: {:?}", estimate.metadata_source);
+    if let Some(metadata) = &estimate.gguf_metadata {
+        println!(
+            "GGUF metadata: arch={} version={} tensors={} train_ctx={} embd={} layers={} heads={} kv_heads={} file_type={}",
+            metadata
+                .architecture
+                .as_deref()
+                .unwrap_or("unknown"),
+            metadata.version,
+            metadata.tensor_count,
+            metadata
+                .context_length
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            metadata
+                .embedding_length
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            metadata
+                .block_count
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            metadata
+                .attention_head_count
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            metadata
+                .attention_head_count_kv
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            metadata
+                .file_type
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+    }
+    println!(
+        "Resource estimate: model={:.2} GiB kv_cache={:.2} GiB working_set={:.2} GiB total={:.2} GiB",
+        gib(estimate.model_bytes),
+        gib(estimate.kv_cache_bytes),
+        gib(estimate.working_set_bytes),
+        gib(estimate.total_bytes)
+    );
+    println!(
+        "Resource plan: use_gpu={} gpu_layers={} mmap={} mlock={} kv_offload={} op_offload={} split_mode={:?} main_gpu={} tensor_split={} rationale={}",
+        plan.use_gpu,
+        plan.n_gpu_layers,
+        plan.use_mmap,
+        plan.use_mlock,
+        plan.kv_offload,
+        plan.op_offload,
+        plan.split_mode,
+        plan.main_gpu,
+        plan.tensor_split
+            .as_ref()
+            .map(|values| format_tensor_split(values))
+            .unwrap_or_else(|| "auto".to_string()),
+        plan.rationale
+    );
 }
 
 trait ServeDispatchPolicy: Send + Sync {
@@ -1746,6 +2360,60 @@ impl ActiveManagementAuthPolicy {
     }
 }
 
+struct ActiveModelPullPolicy {
+    name: RwLock<String>,
+    policy: RwLock<Arc<dyn ModelPullPolicyPlugin>>,
+}
+
+impl ActiveModelPullPolicy {
+    fn new(name: String, policy: Arc<dyn ModelPullPolicyPlugin>) -> Self {
+        Self {
+            name: RwLock::new(name),
+            policy: RwLock::new(policy),
+        }
+    }
+
+    fn name(&self) -> String {
+        self.name.read().clone()
+    }
+
+    fn snapshot(&self) -> (String, Arc<dyn ModelPullPolicyPlugin>) {
+        (self.name.read().clone(), Arc::clone(&self.policy.read()))
+    }
+
+    fn activate(&self, name: String, policy: Arc<dyn ModelPullPolicyPlugin>) {
+        *self.policy.write() = policy;
+        *self.name.write() = name;
+    }
+}
+
+struct ActiveModelPullVerifier {
+    name: RwLock<String>,
+    verifier: RwLock<Arc<dyn ModelPullVerifierPlugin>>,
+}
+
+impl ActiveModelPullVerifier {
+    fn new(name: String, verifier: Arc<dyn ModelPullVerifierPlugin>) -> Self {
+        Self {
+            name: RwLock::new(name),
+            verifier: RwLock::new(verifier),
+        }
+    }
+
+    fn name(&self) -> String {
+        self.name.read().clone()
+    }
+
+    fn snapshot(&self) -> (String, Arc<dyn ModelPullVerifierPlugin>) {
+        (self.name.read().clone(), Arc::clone(&self.verifier.read()))
+    }
+
+    fn activate(&self, name: String, verifier: Arc<dyn ModelPullVerifierPlugin>) {
+        *self.verifier.write() = verifier;
+        *self.name.write() = name;
+    }
+}
+
 fn default_backpressure_policy_name(mode: ServeBackpressureArg) -> &'static str {
     match mode {
         ServeBackpressureArg::Reject => "reject",
@@ -1794,6 +2462,41 @@ fn parse_session_api_route(path: &str) -> Option<SessionApiRoute> {
     }
 }
 
+fn parse_model_store_api_route(path: &str) -> Option<ModelStoreApiRoute> {
+    let path = path.split('?').next().unwrap_or(path);
+    let normalized = path.strip_prefix("/v1").unwrap_or(path);
+    if normalized == "/models/assets" {
+        return Some(ModelStoreApiRoute::Collection);
+    }
+    if normalized == "/models/assets/pull" {
+        return Some(ModelStoreApiRoute::Pull);
+    }
+    if normalized == "/models/assets/pulls" {
+        return Some(ModelStoreApiRoute::PullJobsCollection);
+    }
+    if let Some(rest) = normalized.strip_prefix("/models/assets/pulls/") {
+        let parts = rest.split('/').collect::<Vec<_>>();
+        if parts.is_empty() || parts[0].is_empty() {
+            return None;
+        }
+        let id = parts[0].to_string();
+        return match parts.len() {
+            1 => Some(ModelStoreApiRoute::PullJobItem { id }),
+            2 => match parts[1] {
+                "cancel" => Some(ModelStoreApiRoute::PullJobCancel { id }),
+                "events" => Some(ModelStoreApiRoute::PullJobEvents { id }),
+                _ => None,
+            },
+            _ => None,
+        };
+    }
+    let id = normalized.strip_prefix("/models/assets/")?;
+    if id.is_empty() || id.contains('/') {
+        return None;
+    }
+    Some(ModelStoreApiRoute::Item { id: id.to_string() })
+}
+
 fn parse_policy_api_route(path: &str, prefix: &str) -> Option<PolicyApiRoute> {
     let path = path.split('?').next().unwrap_or(path);
     let normalized = path.strip_prefix("/v1").unwrap_or(path);
@@ -1833,6 +2536,14 @@ fn parse_execution_policy_api_route(path: &str) -> Option<PolicyApiRoute> {
 
 fn parse_auth_policy_api_route(path: &str) -> Option<PolicyApiRoute> {
     parse_policy_api_route(path, "/auth-policies")
+}
+
+fn parse_model_pull_policy_api_route(path: &str) -> Option<PolicyApiRoute> {
+    parse_policy_api_route(path, "/model-pull-policies")
+}
+
+fn parse_model_pull_verifier_api_route(path: &str) -> Option<PolicyApiRoute> {
+    parse_policy_api_route(path, "/model-pull-verifiers")
 }
 
 fn parse_tool_api_route(path: &str) -> Option<ToolApiRoute> {
@@ -1875,8 +2586,45 @@ fn parse_tool_api_route(path: &str) -> Option<ToolApiRoute> {
     })
 }
 
+fn parse_runtime_events_api_route(path: &str) -> Option<RuntimeEventsApiRoute> {
+    let path = path.split('?').next().unwrap_or(path);
+    let normalized = path.strip_prefix("/v1").unwrap_or(path);
+    match normalized {
+        "/events" => Some(RuntimeEventsApiRoute::Collection),
+        "/events/stream" => Some(RuntimeEventsApiRoute::Stream),
+        _ => None,
+    }
+}
+
 fn request_path_for_matching(path: &str) -> &str {
     path.split('?').next().unwrap_or(path)
+}
+
+fn request_query_value<'a>(path: &'a str, key: &str) -> Option<&'a str> {
+    let query = path.split_once('?')?.1;
+    for pair in query.split('&') {
+        let (candidate_key, candidate_value) = match pair.split_once('=') {
+            Some((candidate_key, candidate_value)) => (candidate_key, candidate_value),
+            None => (pair, ""),
+        };
+        if candidate_key == key {
+            return Some(candidate_value);
+        }
+    }
+    None
+}
+
+fn request_query_bool(path: &str, key: &str) -> Option<bool> {
+    let value = request_query_value(path, key)?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn request_query_usize(path: &str, key: &str) -> Option<usize> {
+    request_query_value(path, key)?.trim().parse::<usize>().ok()
 }
 
 fn strip_v1_path_prefix(path: &str) -> &str {
@@ -1940,12 +2688,35 @@ fn is_high_risk_automation_api_request(path: &str) -> bool {
 fn is_control_plane_api_request(path: &str) -> bool {
     let path = request_path_for_matching(path);
     let canonical = strip_v1_path_prefix(path);
+    let model_plan_request = path == "/models/plan" || canonical == "/models/plan";
     parse_session_api_route(path).is_some()
+        || parse_model_store_api_route(path).is_some()
         || parse_dispatch_policy_api_route(path).is_some()
         || parse_execution_policy_api_route(path).is_some()
         || parse_auth_policy_api_route(path).is_some()
+        || parse_model_pull_policy_api_route(path).is_some()
+        || parse_model_pull_verifier_api_route(path).is_some()
+        || parse_runtime_events_api_route(path).is_some()
+        || model_plan_request
         || is_high_risk_automation_api_request(path)
         || is_high_risk_automation_api_request(canonical)
+}
+
+fn requested_openapi_spec_format(path: &str) -> Option<OpenApiSpecFormat> {
+    let path = request_path_for_matching(path);
+    let canonical = strip_v1_path_prefix(path);
+    if path == OPENAPI_SPEC_YAML_PATH || canonical == OPENAPI_SPEC_YAML_PATH {
+        return Some(OpenApiSpecFormat::Yaml);
+    }
+    if path == OPENAPI_SPEC_JSON_PATH || canonical == OPENAPI_SPEC_JSON_PATH {
+        return Some(OpenApiSpecFormat::Json);
+    }
+    None
+}
+
+fn build_openapi_json_spec() -> anyhow::Result<String> {
+    let spec: Value = serde_yaml::from_str(OPENAPI_SPEC_YAML)?;
+    Ok(serde_json::to_string_pretty(&spec)?)
 }
 
 fn resolve_management_auth_scope(
@@ -2088,6 +2859,70 @@ fn auth_descriptor_to_response(
     }
 }
 
+fn model_pull_descriptor_to_response(
+    descriptor: ModelPullPolicyDescriptor,
+    active_name: Option<&str>,
+) -> PolicyRegistryEntryResponse {
+    let active = active_name
+        .map(|name| name == descriptor.name.as_str())
+        .unwrap_or(false);
+    PolicyRegistryEntryResponse {
+        name: descriptor.name,
+        dynamic: descriptor.dynamic,
+        source: descriptor.source.map(|path| path.display().to_string()),
+        active,
+    }
+}
+
+fn model_pull_verifier_descriptor_to_response(
+    descriptor: ModelPullVerifierDescriptor,
+    active_name: Option<&str>,
+) -> PolicyRegistryEntryResponse {
+    let active = active_name
+        .map(|name| name == descriptor.name.as_str())
+        .unwrap_or(false);
+    PolicyRegistryEntryResponse {
+        name: descriptor.name,
+        dynamic: descriptor.dynamic,
+        source: descriptor.source.map(|path| path.display().to_string()),
+        active,
+    }
+}
+
+fn build_model_pull_policy_context(payload: &ModelAssetPullRequest) -> ModelPullPolicyContext {
+    ModelPullPolicyContext::new(
+        payload.source.clone(),
+        payload.mirrors.clone(),
+        payload.id.clone(),
+        payload.name.clone(),
+        payload.sha256.clone(),
+        !payload.no_resume.unwrap_or(false),
+        payload.tags.clone(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_runtime_event(
+    runtime_events: &RuntimeEventBus,
+    category: RuntimeEventCategory,
+    action: impl Into<String>,
+    outcome: RuntimeEventOutcome,
+    endpoint: Option<&str>,
+    request: Option<&HttpRequest>,
+    status_code: Option<u16>,
+    subject: Option<String>,
+    details: Option<Value>,
+) {
+    let mut event = RuntimeEvent::new(category, action, outcome);
+    event.endpoint = endpoint.map(str::to_string);
+    event.method = request.map(|request| request.method.clone());
+    event.path = request.map(|request| request.path.clone());
+    event.status_code = status_code;
+    event.subject = subject;
+    event.details = details;
+    runtime_events.emit(event);
+}
+
 fn tool_plugin_descriptor_to_response(
     descriptor: loci::LoadedToolPluginDescriptor,
 ) -> ToolPluginRegistryEntryResponse {
@@ -2167,6 +3002,38 @@ fn build_management_auth_policy_registry(
     Ok(registry)
 }
 
+fn build_model_pull_policy_registry(
+    plugin_paths: &[PathBuf],
+) -> anyhow::Result<ModelPullPolicyRegistry> {
+    let registry = ModelPullPolicyRegistry::with_builtin_policies();
+    for plugin_path in plugin_paths {
+        registry.load_dynamic_policy(plugin_path).map_err(|e| {
+            anyhow::anyhow!(
+                "failed loading model pull policy plugin '{}': {}",
+                plugin_path.display(),
+                e
+            )
+        })?;
+    }
+    Ok(registry)
+}
+
+fn build_model_pull_verifier_registry(
+    plugin_paths: &[PathBuf],
+) -> anyhow::Result<ModelPullVerifierRegistry> {
+    let registry = ModelPullVerifierRegistry::with_builtin_verifiers();
+    for plugin_path in plugin_paths {
+        registry.load_dynamic_verifier(plugin_path).map_err(|e| {
+            anyhow::anyhow!(
+                "failed loading model pull verifier plugin '{}': {}",
+                plugin_path.display(),
+                e
+            )
+        })?;
+    }
+    Ok(registry)
+}
+
 fn resolve_dispatch_policy_from_registry(
     registry: &ServeDispatchPolicyRegistry,
     requested_name: Option<&str>,
@@ -2190,10 +3057,100 @@ fn build_engine_with_execution_registry(
     model: &Path,
     engine_args: &EngineArgs,
 ) -> anyhow::Result<(InferenceEngine, Arc<ExecutionPolicyRegistry>, String)> {
+    let resource_plan = if engine_args.resolved_auto_resource_plan() {
+        let estimate =
+            ResourcePlanner::estimate_model_requirements(model, engine_args.context_size)
+                .map_err(|e| anyhow::anyhow!(e))?;
+        let plan = ResourcePlanner::plan_for_model(model, engine_args.context_size)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        print_resource_plan_summary(&estimate, &plan);
+        Some(plan)
+    } else {
+        None
+    };
+    let effective_gpu_layers = if engine_args.cpu_only {
+        0
+    } else if let Some(plan) = &resource_plan {
+        plan.n_gpu_layers
+    } else {
+        engine_args.gpu_layers
+    };
+    let effective_split_mode = if engine_args.cpu_only {
+        GpuSplitMode::None
+    } else if let Some(plan) = &resource_plan {
+        plan.split_mode
+    } else {
+        engine_args.resolved_gpu_split_mode()
+    };
+    let effective_main_gpu = if engine_args.cpu_only {
+        0
+    } else if let Some(plan) = &resource_plan {
+        plan.main_gpu
+    } else {
+        engine_args.main_gpu
+    };
+    let effective_tensor_split = if engine_args.cpu_only {
+        None
+    } else if let Some(plan) = &resource_plan {
+        plan.tensor_split.clone()
+    } else {
+        engine_args.resolved_tensor_split()
+    };
+    let effective_mmap = resource_plan
+        .as_ref()
+        .map(|plan| plan.use_mmap)
+        .unwrap_or_else(|| engine_args.resolved_mmap());
+    let effective_mlock = resource_plan
+        .as_ref()
+        .map(|plan| plan.use_mlock)
+        .unwrap_or_else(|| engine_args.resolved_mlock());
+    let effective_kv_offload = if engine_args.cpu_only {
+        false
+    } else if let Some(plan) = &resource_plan {
+        plan.kv_offload
+    } else {
+        engine_args.resolved_kv_offload()
+    };
+    let effective_op_offload = if engine_args.cpu_only {
+        false
+    } else if let Some(plan) = &resource_plan {
+        plan.op_offload
+    } else {
+        engine_args.resolved_op_offload()
+    };
+
     println!("Loading model from: {}", model.display());
     println!("Backend: {}", engine_args.backend);
     println!("Context size: {}", engine_args.context_size);
-    println!("GPU layers: {}", engine_args.gpu_layers);
+    println!("GPU layers: {}", effective_gpu_layers);
+    println!(
+        "GPU split: mode={:?} main_gpu={} tensor_split={}",
+        effective_split_mode,
+        effective_main_gpu,
+        effective_tensor_split
+            .as_ref()
+            .map(|values| format_tensor_split(values))
+            .unwrap_or_else(|| "auto".to_string())
+    );
+    println!(
+        "Tiered loading: mmap={} mlock={} kv_offload={} op_offload={}",
+        effective_mmap, effective_mlock, effective_kv_offload, effective_op_offload
+    );
+    println!(
+        "GPU load fallback: {}",
+        engine_args
+            .resolved_gpu_fallback_step()
+            .map(|step| format!("enabled (step={step})"))
+            .unwrap_or_else(|| "disabled".to_string())
+    );
+    println!(
+        "Auto resource plan: {}",
+        if engine_args.resolved_auto_resource_plan() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     if let Some(limit) = engine_args.max_prompt_bytes {
         std::env::set_var("LOCI_MAX_PROMPT_BYTES", limit.to_string());
         println!("Max prompt bytes: {} (from --max-prompt-bytes)", limit);
@@ -2262,7 +3219,23 @@ fn build_engine_with_execution_registry(
         .context_size(engine_args.context_size)
         .batch_size(512)
         .gpu_layers(engine_args.gpu_layers)
+        .with_gpu_split_mode(engine_args.resolved_gpu_split_mode())
+        .with_main_gpu(engine_args.main_gpu)
+        .with_mmap(engine_args.resolved_mmap())
+        .with_mlock(engine_args.resolved_mlock())
+        .with_kv_offload(engine_args.resolved_kv_offload())
+        .with_op_offload(engine_args.resolved_op_offload())
         .with_execution_policy_arc(execution_policy);
+
+    if let Some(tensor_split) = engine_args.resolved_tensor_split() {
+        builder = builder.with_tensor_split(tensor_split);
+    }
+    if let Some(resource_plan) = resource_plan {
+        builder = builder.with_resource_plan(resource_plan);
+    }
+    if let Some(step) = engine_args.resolved_gpu_fallback_step() {
+        builder = builder.with_auto_gpu_layer_fallback(step);
+    }
 
     if let Some(backend_lib) = &engine_args.backend_lib {
         if !backend_lib.exists() {
@@ -2398,6 +3371,19 @@ fn run_legacy_mode(cli: Cli) -> anyhow::Result<()> {
         threads: cli.threads,
         cpu_only: cli.cpu_only,
         gpu_layers: cli.gpu_layers.unwrap_or(-1),
+        gpu_split_mode: cli.gpu_split_mode.unwrap_or(GpuSplitModeArg::Layer),
+        main_gpu: cli.main_gpu.unwrap_or(0),
+        tensor_split: cli.tensor_split,
+        auto_gpu_fallback: cli.auto_gpu_fallback,
+        gpu_fallback_step: cli.gpu_fallback_step.unwrap_or(8),
+        auto_resource_plan: cli.auto_resource_plan,
+        mmap: cli.mmap,
+        no_mmap: cli.no_mmap,
+        mlock: cli.mlock,
+        kv_offload: cli.kv_offload,
+        no_kv_offload: cli.no_kv_offload,
+        op_offload: cli.op_offload,
+        no_op_offload: cli.no_op_offload,
         lora_paths: cli.lora_paths,
         execution_policy_plugins: Vec::new(),
         execution_policy_registry: PathBuf::from("loci_execution_policies.toml"),
@@ -3656,6 +4642,33 @@ fn run_plugin_command(cmd: PluginCmd) -> anyhow::Result<()> {
 fn run_model_command(cmd: ModelCmd) -> anyhow::Result<()> {
     let store = ModelStore::new(&cmd.store);
     match cmd.command {
+        ModelAction::Plan {
+            model,
+            model_id,
+            context_size,
+            json,
+        } => {
+            let resolved =
+                resolve_model_reference(model.as_deref(), model_id.as_deref(), &cmd.store)?;
+            let estimate = ResourcePlanner::estimate_model_requirements(&resolved, context_size)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let selector = DeviceSelector::new();
+            let plan = ResourcePlanner::plan_for_estimate(&estimate, selector.devices());
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&build_resource_plan_report(
+                        &resolved,
+                        estimate,
+                        plan,
+                        selector.devices(),
+                    ))?
+                );
+            } else {
+                println!("Model: {}", resolved.display());
+                print_resource_plan_summary(&estimate, &plan);
+            }
+        }
         ModelAction::Add {
             path,
             id,
@@ -4124,9 +5137,13 @@ fn run_serve_command(cmd: ServeCmd) -> anyhow::Result<()> {
         &cmd.session_store_options,
         cmd.session_store_plugin.as_deref(),
     )?);
+    let served_model_path = Arc::new(model.clone());
     let model_store_root = Arc::new(cmd.model_store.clone());
+    let model_store = Arc::new(Mutex::new(ModelStore::new(cmd.model_store.clone())));
+    let model_pull_jobs = Arc::new(ModelPullJobManager::new(Arc::clone(&model_store)));
     let default_sampling = Arc::new(cmd.sampling.clone());
     let metrics = Arc::new(ServerMetrics::new());
+    let runtime_events = Arc::new(RuntimeEventBus::new(1024));
     let worker_count = cmd.workers.max(1);
     let queue_size = cmd.queue_size.max(1);
     let dispatch_policy_store_loaded = load_dynamic_policy_registry(&cmd.backpressure_registry)?;
@@ -4189,6 +5206,70 @@ fn run_serve_command(cmd: ServeCmd) -> anyhow::Result<()> {
     }
     let management_auth_store = Arc::new(Mutex::new(management_auth_store_loaded));
     let management_auth_scope = Arc::new(resolved_management_auth_scope);
+    let model_pull_policy_store_loaded =
+        load_dynamic_policy_registry(&cmd.model_pull_policy_registry)?;
+    let stored_model_pull_policy_active = model_pull_policy_store_loaded
+        .active()
+        .map(|name| name.to_string());
+    let model_pull_policy_plugins = merge_plugin_paths(
+        model_pull_policy_store_loaded.plugins(),
+        &cmd.model_pull_policy_plugins,
+    );
+    let model_pull_policy_registry = Arc::new(build_model_pull_policy_registry(
+        &model_pull_policy_plugins,
+    )?);
+    let selected_model_pull_policy_name = cmd
+        .model_pull_policy_name
+        .clone()
+        .or(stored_model_pull_policy_active)
+        .unwrap_or_else(|| "allow-all.model.pull".to_string());
+    let model_pull_policy = model_pull_policy_registry
+        .get(&selected_model_pull_policy_name)
+        .ok_or_else(|| {
+            let available = model_pull_policy_registry.list_names().join(", ");
+            anyhow::anyhow!(
+                "unknown model pull policy '{}'. available: {}",
+                selected_model_pull_policy_name,
+                available
+            )
+        })?;
+    let active_model_pull_policy = Arc::new(ActiveModelPullPolicy::new(
+        selected_model_pull_policy_name.clone(),
+        model_pull_policy,
+    ));
+    let model_pull_policy_store = Arc::new(Mutex::new(model_pull_policy_store_loaded));
+    let model_pull_verifier_store_loaded =
+        load_dynamic_policy_registry(&cmd.model_pull_verifier_registry)?;
+    let stored_model_pull_verifier_active = model_pull_verifier_store_loaded
+        .active()
+        .map(|name| name.to_string());
+    let model_pull_verifier_plugins = merge_plugin_paths(
+        model_pull_verifier_store_loaded.plugins(),
+        &cmd.model_pull_verifier_plugins,
+    );
+    let model_pull_verifier_registry = Arc::new(build_model_pull_verifier_registry(
+        &model_pull_verifier_plugins,
+    )?);
+    let selected_model_pull_verifier_name = cmd
+        .model_pull_verifier_name
+        .clone()
+        .or(stored_model_pull_verifier_active)
+        .unwrap_or_else(|| "allow-all.model.verify".to_string());
+    let model_pull_verifier = model_pull_verifier_registry
+        .get(&selected_model_pull_verifier_name)
+        .ok_or_else(|| {
+            let available = model_pull_verifier_registry.list_names().join(", ");
+            anyhow::anyhow!(
+                "unknown model pull verifier '{}'. available: {}",
+                selected_model_pull_verifier_name,
+                available
+            )
+        })?;
+    let active_model_pull_verifier = Arc::new(ActiveModelPullVerifier::new(
+        selected_model_pull_verifier_name.clone(),
+        model_pull_verifier,
+    ));
+    let model_pull_verifier_store = Arc::new(Mutex::new(model_pull_verifier_store_loaded));
     let (selected_policy_name, dispatch_policy_plugin) = resolve_dispatch_policy_from_registry(
         dispatch_registry.as_ref(),
         cmd.backpressure_policy_name
@@ -4212,16 +5293,18 @@ fn run_serve_command(cmd: ServeCmd) -> anyhow::Result<()> {
 
     println!("Loci REST server listening on http://{addr}");
     println!(
-        "Endpoints: GET /health,/info,/metrics,/tools,/tools/{{name}},/tools/plugins,/tools/plugins/{{name}},/sessions,/sessions/{{id}},/dispatch-policies,/execution-policies,/auth-policies; POST /generate,/tools/invoke,/tools/plugins/load,/tools/plugins/{{name}}/(reload|unload),/sessions,/sessions/{{id}}/generate,/suspend,/resume,/save,/restore,/clear,/destroy,/dispatch-policies/load,/dispatch-policies/{{name}}/(activate|reload|unload),/execution-policies/load,/execution-policies/{{name}}/(activate|reload|unload),/auth-policies/load,/auth-policies/{{name}}/(activate|reload|unload) (+ /v1/* aliases)"
+        "Endpoints: GET /health,/info,/metrics,/openapi.yaml,/openapi.json,/events,/events/stream,/v1/models,/api/tags,/models/assets,/models/assets/{{id}},/models/assets/pulls,/models/assets/pulls/{{job_id}},/models/assets/pulls/{{job_id}}/events,/tools,/tools/{{name}},/tools/plugins,/tools/plugins/{{name}},/sessions,/sessions/{{id}},/dispatch-policies,/execution-policies,/auth-policies,/model-pull-policies,/model-pull-verifiers; POST /generate,/v1/chat/completions,/v1/embeddings,/api/generate,/models/plan,/models/assets,/models/assets/pull,/models/assets/pulls,/models/assets/pulls/{{job_id}}/cancel,/tools/invoke,/tools/plugins/load,/tools/plugins/{{name}}/(reload|unload),/sessions,/sessions/{{id}}/generate,/suspend,/resume,/save,/restore,/clear,/destroy,/dispatch-policies/load,/dispatch-policies/{{name}}/(activate|reload|unload),/execution-policies/load,/execution-policies/{{name}}/(activate|reload|unload),/auth-policies/load,/auth-policies/{{name}}/(activate|reload|unload),/model-pull-policies/load,/model-pull-policies/{{name}}/(activate|reload|unload),/model-pull-verifiers/load,/model-pull-verifiers/{{name}}/(activate|reload|unload); DELETE /models/assets/{{id}} (+ /v1/* aliases)"
     );
     println!(
-        "Request handling: worker_pool={} queue_size={} dispatch_policy={} execution_policy={} management_auth={} management_auth_scope={}",
+        "Request handling: worker_pool={} queue_size={} dispatch_policy={} execution_policy={} management_auth={} management_auth_scope={} model_pull_policy={} model_pull_verifier={}",
         worker_count,
         queue_size,
         selected_policy_name,
         selected_execution_policy_name,
         selected_management_auth_name,
         management_auth_scope.display_label(),
+        selected_model_pull_policy_name,
+        selected_model_pull_verifier_name,
     );
 
     for worker_id in 0..worker_count {
@@ -4230,8 +5313,12 @@ fn run_serve_command(cmd: ServeCmd) -> anyhow::Result<()> {
         let default_sampling = Arc::clone(&default_sampling);
         let plugins = Arc::clone(&plugins);
         let metrics = Arc::clone(&metrics);
+        let runtime_events = Arc::clone(&runtime_events);
         let session_manager = Arc::clone(&session_manager);
+        let served_model_path = Arc::clone(&served_model_path);
         let model_store_root = Arc::clone(&model_store_root);
+        let model_store = Arc::clone(&model_store);
+        let model_pull_jobs = Arc::clone(&model_pull_jobs);
         let dispatch_registry = Arc::clone(&dispatch_registry);
         let active_dispatch_policy = Arc::clone(&active_dispatch_policy);
         let dispatch_policy_store = Arc::clone(&dispatch_policy_store);
@@ -4242,6 +5329,12 @@ fn run_serve_command(cmd: ServeCmd) -> anyhow::Result<()> {
         let active_management_auth_policy = Arc::clone(&active_management_auth_policy);
         let management_auth_store = Arc::clone(&management_auth_store);
         let management_auth_scope = Arc::clone(&management_auth_scope);
+        let model_pull_policy_registry = Arc::clone(&model_pull_policy_registry);
+        let model_pull_policy_store = Arc::clone(&model_pull_policy_store);
+        let active_model_pull_policy = Arc::clone(&active_model_pull_policy);
+        let model_pull_verifier_registry = Arc::clone(&model_pull_verifier_registry);
+        let model_pull_verifier_store = Arc::clone(&model_pull_verifier_store);
+        let active_model_pull_verifier = Arc::clone(&active_model_pull_verifier);
         thread::spawn(move || loop {
             let mut stream = match rx.recv() {
                 Ok(stream) => stream,
@@ -4254,8 +5347,12 @@ fn run_serve_command(cmd: ServeCmd) -> anyhow::Result<()> {
                 default_sampling.as_ref(),
                 &plugins,
                 metrics.as_ref(),
+                runtime_events.as_ref(),
                 session_manager.as_ref(),
+                served_model_path.as_path(),
                 model_store_root.as_path(),
+                model_store.as_ref(),
+                model_pull_jobs.as_ref(),
                 dispatch_registry.as_ref(),
                 active_dispatch_policy.as_ref(),
                 dispatch_policy_store.as_ref(),
@@ -4266,6 +5363,12 @@ fn run_serve_command(cmd: ServeCmd) -> anyhow::Result<()> {
                 management_auth_store.as_ref(),
                 management_auth_scope.as_ref(),
                 active_management_auth_policy.as_ref(),
+                model_pull_policy_registry.as_ref(),
+                model_pull_policy_store.as_ref(),
+                active_model_pull_policy.as_ref(),
+                model_pull_verifier_registry.as_ref(),
+                model_pull_verifier_store.as_ref(),
+                active_model_pull_verifier.as_ref(),
             ) {
                 let _ = write_json_response(
                     &mut stream,
@@ -4427,8 +5530,12 @@ fn handle_connection(
     default_sampling: &SamplingArgs,
     plugins: &Arc<Mutex<Option<PluginRegistry>>>,
     metrics: &ServerMetrics,
+    runtime_events: &RuntimeEventBus,
     session_manager: &SessionManager,
+    served_model_path: &Path,
     model_store_root: &Path,
+    model_store: &Mutex<ModelStore>,
+    model_pull_jobs: &ModelPullJobManager,
     dispatch_registry: &ServeDispatchPolicyRegistry,
     active_dispatch_policy: &ActiveServeDispatchPolicy,
     dispatch_policy_store: &Mutex<DynamicPolicyRegistry>,
@@ -4439,6 +5546,12 @@ fn handle_connection(
     management_auth_store: &Mutex<DynamicPolicyRegistry>,
     management_auth_scope: &ManagementAuthScopeConfig,
     active_management_auth_policy: &ActiveManagementAuthPolicy,
+    model_pull_policy_registry: &ModelPullPolicyRegistry,
+    model_pull_policy_store: &Mutex<DynamicPolicyRegistry>,
+    active_model_pull_policy: &ActiveModelPullPolicy,
+    model_pull_verifier_registry: &ModelPullVerifierRegistry,
+    model_pull_verifier_store: &Mutex<DynamicPolicyRegistry>,
+    active_model_pull_verifier: &ActiveModelPullVerifier,
 ) -> anyhow::Result<()> {
     let request_started = Instant::now();
     let request = match read_http_request(stream) {
@@ -4467,6 +5580,19 @@ fn handle_connection(
         management_auth_scope,
         active_management_auth_policy,
     )? {
+        publish_runtime_event(
+            runtime_events,
+            RuntimeEventCategory::Auth,
+            "management_auth.authorize",
+            RuntimeEventOutcome::Denied,
+            Some("management_auth"),
+            Some(&request),
+            Some(status_code_value(status)),
+            Some(payload.policy.clone()),
+            Some(serde_json::json!({
+                "error": payload.error,
+            })),
+        );
         write_json_response(stream, status, &payload)?;
         metrics.record(
             "management_auth",
@@ -4488,25 +5614,1071 @@ fn handle_connection(
     }
 
     if request.method == "GET" && (request.path == "/info" || request.path == "/v1/info") {
-        let info = {
+        let payload = {
+            let plugins_guard = plugins
+                .lock()
+                .expect("plugin registry mutex should not be poisoned");
             let guard = engine
                 .lock()
                 .expect("inference engine mutex should not be poisoned");
-            guard.model_info()
+            build_model_info_response(&guard, plugins_guard.as_ref())
         };
         let status = "200 OK";
+        write_json_response(stream, status, &payload)?;
+        metrics.record("info", status_code_value(status), request_started.elapsed());
+        return Ok(());
+    }
+
+    if let Some(route) = parse_runtime_events_api_route(&request.path) {
+        let endpoint = "events";
+        match (request.method.as_str(), route) {
+            ("GET", RuntimeEventsApiRoute::Collection) => {
+                let limit = request_query_usize(&request.path, "limit");
+                let status = "200 OK";
+                write_json_response(
+                    stream,
+                    status,
+                    &RuntimeEventListResponse {
+                        events: runtime_events.recent_events(limit),
+                    },
+                )?;
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            ("GET", RuntimeEventsApiRoute::Stream) => {
+                let replay = request_query_usize(&request.path, "replay");
+                let follow = request_query_bool(&request.path, "follow").unwrap_or(true);
+                let status = "200 OK";
+                write_streaming_response_headers(stream, status, "application/x-ndjson")?;
+                for event in runtime_events.recent_events(replay) {
+                    write_ndjson_event(stream, &event)?;
+                }
+                if follow {
+                    let receiver = runtime_events.subscribe();
+                    loop {
+                        match receiver.recv_timeout(Duration::from_millis(250)) {
+                            Ok(event) => {
+                                if write_ndjson_event(stream, &event).is_err() {
+                                    break;
+                                }
+                            }
+                            Err(crossbeam::channel::RecvTimeoutError::Timeout) => continue,
+                            Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break,
+                        }
+                    }
+                }
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
+    if request.method == "GET" {
+        if let Some(format) = requested_openapi_spec_format(&request.path) {
+            let status = "200 OK";
+            match format {
+                OpenApiSpecFormat::Yaml => {
+                    write_plain_response(stream, status, "application/yaml", OPENAPI_SPEC_YAML)?;
+                }
+                OpenApiSpecFormat::Json => {
+                    let body = build_openapi_json_spec()?;
+                    write_plain_response(stream, status, "application/json", &body)?;
+                }
+            }
+            metrics.record(
+                "openapi",
+                status_code_value(status),
+                request_started.elapsed(),
+            );
+            return Ok(());
+        }
+    }
+
+    if request.method == "POST"
+        && (request.path == "/models/plan" || request.path == "/v1/models/plan")
+    {
+        let payload: ModelPlanRequest = if request.body.is_empty() {
+            ModelPlanRequest {
+                model: None,
+                model_id: None,
+                context_size: None,
+            }
+        } else {
+            match serde_json::from_slice(&request.body) {
+                Ok(payload) => payload,
+                Err(err) => {
+                    let status = "400 Bad Request";
+                    write_json_response(
+                        stream,
+                        status,
+                        &ErrorResponse {
+                            error: format!("invalid JSON payload for /models/plan: {err}"),
+                        },
+                    )?;
+                    metrics.record(
+                        "models.plan",
+                        status_code_value(status),
+                        request_started.elapsed(),
+                    );
+                    return Ok(());
+                }
+            }
+        };
+
+        let model = match (payload.model.as_deref(), payload.model_id.as_deref()) {
+            (None, None) => served_model_path.to_path_buf(),
+            (model, model_id) => {
+                match resolve_model_reference(model.map(Path::new), model_id, model_store_root) {
+                    Ok(model) => model,
+                    Err(err) => {
+                        let status = "400 Bad Request";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: err.to_string(),
+                            },
+                        )?;
+                        metrics.record(
+                            "models.plan",
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+        };
+        let context_size = payload.context_size.unwrap_or(4096);
+        if context_size == 0 {
+            let status = "400 Bad Request";
+            write_json_response(
+                stream,
+                status,
+                &ErrorResponse {
+                    error: "context_size must be greater than 0".to_string(),
+                },
+            )?;
+            metrics.record(
+                "models.plan",
+                status_code_value(status),
+                request_started.elapsed(),
+            );
+            return Ok(());
+        }
+        let estimate = ResourcePlanner::estimate_model_requirements(&model, context_size)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let selector = DeviceSelector::new();
+        let plan = ResourcePlanner::plan_for_estimate(&estimate, selector.devices());
+        let response = build_resource_plan_report(&model, estimate, plan, selector.devices());
+        let status = "200 OK";
+        write_json_response(stream, status, &response)?;
+        metrics.record(
+            "models.plan",
+            status_code_value(status),
+            request_started.elapsed(),
+        );
+        return Ok(());
+    }
+
+    if let Some(route) = parse_model_store_api_route(&request.path) {
+        let endpoint = "model_assets";
+        match (request.method.as_str(), route) {
+            ("GET", ModelStoreApiRoute::Collection) => match model_store
+                .lock()
+                .expect("model store mutex should not be poisoned")
+                .list()
+            {
+                Ok(models) => {
+                    let status = "200 OK";
+                    write_json_response(stream, status, &ModelAssetListResponse { models })?;
+                    metrics.record(
+                        endpoint,
+                        status_code_value(status),
+                        request_started.elapsed(),
+                    );
+                    return Ok(());
+                }
+                Err(err) => {
+                    let status = "500 Internal Server Error";
+                    write_json_response(
+                        stream,
+                        status,
+                        &ErrorResponse {
+                            error: err.to_string(),
+                        },
+                    )?;
+                    metrics.record(
+                        endpoint,
+                        status_code_value(status),
+                        request_started.elapsed(),
+                    );
+                    return Ok(());
+                }
+            },
+            ("POST", ModelStoreApiRoute::Collection) => {
+                let payload: ModelAssetRegisterRequest = match serde_json::from_slice(&request.body)
+                {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        let status = "400 Bad Request";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: format!("invalid JSON payload for /models/assets: {err}"),
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::ModelAsset,
+                            "model_assets.register",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            None,
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                };
+
+                match model_store
+                    .lock()
+                    .expect("model store mutex should not be poisoned")
+                    .add_external(payload.path, payload.id, payload.name, payload.tags)
+                {
+                    Ok(model) => {
+                        let status = "200 OK";
+                        write_json_response(stream, status, &model)?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::ModelAsset,
+                            "model_assets.register",
+                            RuntimeEventOutcome::Success,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(model.id.clone()),
+                            Some(serde_json::json!({
+                                "managed": model.managed,
+                                "path": model.path,
+                                "source": model.source,
+                                "tags": model.tags,
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        let status = "400 Bad Request";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: err.to_string(),
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::ModelAsset,
+                            "model_assets.register",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            None,
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+            ("GET", ModelStoreApiRoute::PullJobsCollection) => {
+                let status = "200 OK";
+                write_json_response(
+                    stream,
+                    status,
+                    &ModelAssetPullJobListResponse {
+                        jobs: model_pull_jobs.list_jobs(),
+                    },
+                )?;
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            ("POST", ModelStoreApiRoute::PullJobsCollection) => {
+                let payload: ModelAssetPullRequest = match serde_json::from_slice(&request.body) {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        let status = "400 Bad Request";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: format!(
+                                    "invalid JSON payload for /models/assets/pulls: {err}"
+                                ),
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::ModelAsset,
+                            "model_assets.pulls.submit",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            None,
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                };
+
+                let policy_context = build_model_pull_policy_context(&payload);
+                let (policy_name, policy) = active_model_pull_policy.snapshot();
+                if let Err(reason) = authorize_model_pull_request(policy.as_ref(), &policy_context)
+                {
+                    let status = "403 Forbidden";
+                    write_json_response(
+                        stream,
+                        status,
+                        &ErrorResponse {
+                            error: format!(
+                                "model pull denied by policy '{}': {}",
+                                policy_name, reason
+                            ),
+                        },
+                    )?;
+                    publish_runtime_event(
+                        runtime_events,
+                        RuntimeEventCategory::ModelAsset,
+                        "model_assets.pulls.submit",
+                        RuntimeEventOutcome::Denied,
+                        Some(endpoint),
+                        Some(&request),
+                        Some(status_code_value(status)),
+                        payload.id.clone().or_else(|| Some(payload.source.clone())),
+                        Some(serde_json::json!({
+                            "source": payload.source,
+                            "policy": policy_name,
+                            "reason": reason,
+                        })),
+                    );
+                    metrics.record(
+                        endpoint,
+                        status_code_value(status),
+                        request_started.elapsed(),
+                    );
+                    return Ok(());
+                }
+                let (verifier_name, verifier) = active_model_pull_verifier.snapshot();
+
+                let pull_job_request = ModelPullJobRequest {
+                    source: payload.source,
+                    mirrors: payload.mirrors,
+                    id: payload.id,
+                    name: payload.name,
+                    sha256: payload.sha256,
+                    resume: !payload.no_resume.unwrap_or(false),
+                    tags: payload.tags,
+                };
+                match model_pull_jobs.submit_pull_with_governance(
+                    pull_job_request,
+                    Some(policy_name),
+                    Some(policy),
+                    Some(verifier_name),
+                    Some(verifier),
+                ) {
+                    Ok(job) => {
+                        let status = "202 Accepted";
+                        write_json_response(stream, status, &job)?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::ModelAsset,
+                            "model_assets.pulls.submit",
+                            RuntimeEventOutcome::Started,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(job.job_id.clone()),
+                            Some(serde_json::json!({
+                                "source": job.request.source,
+                                "model_id": job.request.id,
+                                "policy": job.policy_name,
+                                "verifier": job.verifier_name,
+                                "resume": job.request.resume,
+                                "tags": job.request.tags,
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        let status = "500 Internal Server Error";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: err.to_string(),
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::ModelAsset,
+                            "model_assets.pulls.submit",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            payload.id.clone().or_else(|| Some(payload.source.clone())),
+                            Some(serde_json::json!({
+                                "source": payload.source,
+                                "error": err.to_string(),
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+            ("POST", ModelStoreApiRoute::Pull) => {
+                let payload: ModelAssetPullRequest = match serde_json::from_slice(&request.body) {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        let status = "400 Bad Request";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: format!(
+                                    "invalid JSON payload for /models/assets/pull: {err}"
+                                ),
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::ModelAsset,
+                            "model_assets.pull",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            None,
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                };
+
+                let policy_context = build_model_pull_policy_context(&payload);
+                let options = ModelPullOptions {
+                    mirrors: payload.mirrors.clone(),
+                    expected_sha256: payload.sha256.clone(),
+                    resume: !payload.no_resume.unwrap_or(false),
+                };
+                let (policy_name, policy) = active_model_pull_policy.snapshot();
+                let (verifier_name, verifier) = active_model_pull_verifier.snapshot();
+                let pull_subject = payload.id.clone().unwrap_or_else(|| payload.source.clone());
+                let pull_source = payload.source.clone();
+                if let Err(reason) = authorize_model_pull_request(policy.as_ref(), &policy_context)
+                {
+                    let status = "403 Forbidden";
+                    write_json_response(
+                        stream,
+                        status,
+                        &ErrorResponse {
+                            error: format!(
+                                "model pull denied by policy '{}': {}",
+                                policy_name, reason
+                            ),
+                        },
+                    )?;
+                    publish_runtime_event(
+                        runtime_events,
+                        RuntimeEventCategory::ModelAsset,
+                        "model_assets.pull",
+                        RuntimeEventOutcome::Denied,
+                        Some(endpoint),
+                        Some(&request),
+                        Some(status_code_value(status)),
+                        Some(pull_subject.clone()),
+                        Some(serde_json::json!({
+                            "source": pull_source,
+                            "policy": policy_name,
+                            "reason": reason,
+                        })),
+                    );
+                    metrics.record(
+                        endpoint,
+                        status_code_value(status),
+                        request_started.elapsed(),
+                    );
+                    return Ok(());
+                }
+                let stream_pull = payload.stream.unwrap_or(false)
+                    || request_query_bool(&request.path, "stream").unwrap_or(false);
+
+                if stream_pull {
+                    let status = "200 OK";
+                    write_streaming_response_headers(stream, status, "application/x-ndjson")?;
+                    let mut stream_write_failed = false;
+                    let result = {
+                        let store = model_store
+                            .lock()
+                            .expect("model store mutex should not be poisoned");
+                        let mut emit = |progress: ModelPullProgress| {
+                            if stream_write_failed {
+                                return;
+                            }
+                            if write_ndjson_event(
+                                stream,
+                                &ModelAssetPullStreamEvent::Progress { progress },
+                            )
+                            .is_err()
+                            {
+                                stream_write_failed = true;
+                            }
+                        };
+                        store
+                            .pull_from_source_with_options_and_progress_and_policy_and_verifier_and_cancellation(
+                                &payload.source,
+                                payload.id.clone(),
+                                payload.name.clone(),
+                                payload.tags.clone(),
+                                options,
+                                Some(policy.as_ref()),
+                                Some(verifier.as_ref()),
+                                None,
+                                &mut emit,
+                            )
+                    };
+                    match result {
+                        Ok(model) => {
+                            let _ = write_ndjson_event(
+                                stream,
+                                &ModelAssetPullStreamEvent::Complete { model },
+                            );
+                            publish_runtime_event(
+                                runtime_events,
+                                RuntimeEventCategory::ModelAsset,
+                                "model_assets.pull",
+                                RuntimeEventOutcome::Success,
+                                Some(endpoint),
+                                Some(&request),
+                                Some(status_code_value(status)),
+                                Some(pull_subject.clone()),
+                                Some(serde_json::json!({
+                                    "source": pull_source,
+                                    "stream": true,
+                                    "policy": policy_name,
+                                    "verifier": verifier_name,
+                                })),
+                            );
+                            metrics.record(
+                                endpoint,
+                                status_code_value(status),
+                                request_started.elapsed(),
+                            );
+                            return Ok(());
+                        }
+                        Err(err) => {
+                            let _ = write_ndjson_event(
+                                stream,
+                                &ModelAssetPullStreamEvent::Error {
+                                    error: err.to_string(),
+                                },
+                            );
+                            publish_runtime_event(
+                                runtime_events,
+                                RuntimeEventCategory::ModelAsset,
+                                "model_assets.pull",
+                                RuntimeEventOutcome::Error,
+                                Some(endpoint),
+                                Some(&request),
+                                Some(400),
+                                Some(pull_subject.clone()),
+                                Some(serde_json::json!({
+                                    "source": pull_source,
+                                    "stream": true,
+                                    "policy": policy_name,
+                                    "verifier": verifier_name,
+                                    "error": err.to_string(),
+                                })),
+                            );
+                            metrics.record(endpoint, 400, request_started.elapsed());
+                            return Ok(());
+                        }
+                    }
+                }
+
+                match model_store
+                    .lock()
+                    .expect("model store mutex should not be poisoned")
+                    .pull_from_source_with_options_and_progress_and_policy_and_verifier_and_cancellation(
+                        &payload.source,
+                        payload.id.clone(),
+                        payload.name.clone(),
+                        payload.tags.clone(),
+                        options,
+                        Some(policy.as_ref()),
+                        Some(verifier.as_ref()),
+                        None,
+                        &mut |_| {},
+                    ) {
+                    Ok(model) => {
+                        let status = "200 OK";
+                        write_json_response(stream, status, &model)?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::ModelAsset,
+                            "model_assets.pull",
+                            RuntimeEventOutcome::Success,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(model.id.clone()),
+                            Some(serde_json::json!({
+                                "source": pull_source,
+                                "stream": false,
+                                "policy": policy_name,
+                                "verifier": verifier_name,
+                                "managed": model.managed,
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        let status = "400 Bad Request";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: err.to_string(),
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::ModelAsset,
+                            "model_assets.pull",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(pull_subject),
+                            Some(serde_json::json!({
+                                "source": pull_source,
+                                "stream": false,
+                                "policy": policy_name,
+                                "verifier": verifier_name,
+                                "error": err.to_string(),
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+            ("GET", ModelStoreApiRoute::PullJobItem { id }) => match model_pull_jobs.get_job(&id) {
+                Ok(job) => {
+                    let status = "200 OK";
+                    write_json_response(stream, status, &job)?;
+                    metrics.record(
+                        endpoint,
+                        status_code_value(status),
+                        request_started.elapsed(),
+                    );
+                    return Ok(());
+                }
+                Err(err) => {
+                    let status = if matches!(err, loci::error::LociError::ModelNotFound) {
+                        "404 Not Found"
+                    } else {
+                        "400 Bad Request"
+                    };
+                    write_json_response(
+                        stream,
+                        status,
+                        &ErrorResponse {
+                            error: err.to_string(),
+                        },
+                    )?;
+                    metrics.record(
+                        endpoint,
+                        status_code_value(status),
+                        request_started.elapsed(),
+                    );
+                    return Ok(());
+                }
+            },
+            ("POST", ModelStoreApiRoute::PullJobCancel { id }) => {
+                match model_pull_jobs.cancel_job(&id) {
+                    Ok(job) => {
+                        let status = "200 OK";
+                        write_json_response(stream, status, &job)?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::ModelAsset,
+                            "model_assets.pulls.cancel",
+                            RuntimeEventOutcome::Cancelled,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(job.job_id.clone()),
+                            Some(serde_json::json!({
+                                "state": format!("{:?}", job.state),
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        let status = if matches!(err, loci::error::LociError::ModelNotFound) {
+                            "404 Not Found"
+                        } else {
+                            "409 Conflict"
+                        };
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: err.to_string(),
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::ModelAsset,
+                            "model_assets.pulls.cancel",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(id.clone()),
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+            ("GET", ModelStoreApiRoute::PullJobEvents { id }) => {
+                match model_pull_jobs.subscribe(&id) {
+                    Ok((snapshot, receiver)) => {
+                        let status = "200 OK";
+                        write_streaming_response_headers(stream, status, "application/x-ndjson")?;
+                        if write_ndjson_event(
+                            stream,
+                            &ModelPullJobEvent::Snapshot {
+                                job: snapshot.clone(),
+                            },
+                        )
+                        .is_err()
+                        {
+                            metrics.record(
+                                endpoint,
+                                status_code_value(status),
+                                request_started.elapsed(),
+                            );
+                            return Ok(());
+                        }
+                        if snapshot.state.is_terminal() {
+                            metrics.record(
+                                endpoint,
+                                status_code_value(status),
+                                request_started.elapsed(),
+                            );
+                            return Ok(());
+                        }
+
+                        while let Ok(event) = receiver.recv() {
+                            let terminal = matches!(
+                                event,
+                                ModelPullJobEvent::Complete { .. }
+                                    | ModelPullJobEvent::Failed { .. }
+                                    | ModelPullJobEvent::Cancelled { .. }
+                            );
+                            if write_ndjson_event(stream, &event).is_err() {
+                                break;
+                            }
+                            if terminal {
+                                break;
+                            }
+                        }
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        let status = if matches!(err, loci::error::LociError::ModelNotFound) {
+                            "404 Not Found"
+                        } else {
+                            "400 Bad Request"
+                        };
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: err.to_string(),
+                            },
+                        )?;
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+            ("GET", ModelStoreApiRoute::Item { id }) => match model_store
+                .lock()
+                .expect("model store mutex should not be poisoned")
+                .get(&id)
+            {
+                Ok(model) => {
+                    let status = "200 OK";
+                    write_json_response(stream, status, &model)?;
+                    metrics.record(
+                        endpoint,
+                        status_code_value(status),
+                        request_started.elapsed(),
+                    );
+                    return Ok(());
+                }
+                Err(err) => {
+                    let status = if matches!(err, loci::error::LociError::ModelNotFound) {
+                        "404 Not Found"
+                    } else {
+                        "400 Bad Request"
+                    };
+                    write_json_response(
+                        stream,
+                        status,
+                        &ErrorResponse {
+                            error: err.to_string(),
+                        },
+                    )?;
+                    metrics.record(
+                        endpoint,
+                        status_code_value(status),
+                        request_started.elapsed(),
+                    );
+                    return Ok(());
+                }
+            },
+            ("DELETE", ModelStoreApiRoute::Item { id }) => {
+                let delete_file = request_query_bool(&request.path, "delete_file").unwrap_or(false);
+                match model_store
+                    .lock()
+                    .expect("model store mutex should not be poisoned")
+                    .remove(&id, delete_file)
+                {
+                    Ok(model) => {
+                        let status = "200 OK";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ModelAssetRemoveResponse {
+                                model,
+                                deleted_file: delete_file,
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::ModelAsset,
+                            "model_assets.remove",
+                            RuntimeEventOutcome::Success,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(model.id.clone()),
+                            Some(serde_json::json!({
+                                "deleted_file": delete_file,
+                                "managed": model.managed,
+                                "path": model.path,
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        let status = if matches!(err, loci::error::LociError::ModelNotFound) {
+                            "404 Not Found"
+                        } else {
+                            "400 Bad Request"
+                        };
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: err.to_string(),
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::ModelAsset,
+                            "model_assets.remove",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(id.clone()),
+                            Some(serde_json::json!({
+                                "delete_file": delete_file,
+                                "error": err.to_string(),
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+            _ => {
+                let status = "405 Method Not Allowed";
+                write_json_response(
+                    stream,
+                    status,
+                    &ErrorResponse {
+                        error: "method not allowed for model asset endpoint".to_string(),
+                    },
+                )?;
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    if request.method == "GET" && request.path == "/v1/models" {
+        let status = "200 OK";
+        let model_id = current_runtime_model_name(engine);
         write_json_response(
             stream,
             status,
-            &ModelInfoResponse {
-                status: "ok",
-                version: env!("CARGO_PKG_VERSION"),
-                n_vocab: info.n_vocab,
-                n_ctx_train: info.n_ctx_train,
-                n_embd: info.n_embd,
+            &OpenAiModelListResponse {
+                object: "list",
+                data: vec![OpenAiModelDescriptor {
+                    id: model_id,
+                    object: "model",
+                    owned_by: "loci",
+                }],
             },
         )?;
-        metrics.record("info", status_code_value(status), request_started.elapsed());
+        metrics.record(
+            "compat.openai.models",
+            status_code_value(status),
+            request_started.elapsed(),
+        );
+        return Ok(());
+    }
+
+    if request.method == "GET" && request.path == "/api/tags" {
+        let status = "200 OK";
+        let model_id = current_runtime_model_name(engine);
+        write_json_response(
+            stream,
+            status,
+            &OllamaTagsResponse {
+                models: vec![OllamaModelTag {
+                    name: model_id.clone(),
+                    model: model_id,
+                    modified_at: compatibility_created_at(),
+                    size: 0,
+                }],
+            },
+        )?;
+        metrics.record(
+            "compat.ollama.tags",
+            status_code_value(status),
+            request_started.elapsed(),
+        );
         return Ok(());
     }
 
@@ -4519,6 +6691,433 @@ fn handle_connection(
             status_code_value(status),
             request_started.elapsed(),
         );
+        return Ok(());
+    }
+
+    if request.method == "POST" && request.path == "/v1/chat/completions" {
+        let payload: OpenAiChatCompletionsRequest = match serde_json::from_slice(&request.body) {
+            Ok(payload) => payload,
+            Err(err) => {
+                let status = "400 Bad Request";
+                write_json_response(
+                    stream,
+                    status,
+                    &ErrorResponse {
+                        error: format!("invalid JSON payload for /v1/chat/completions: {err}"),
+                    },
+                )?;
+                metrics.record(
+                    "compat.openai.chat",
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+        };
+
+        let prompt = openai_chat_messages_to_prompt(&payload.messages);
+        let params = GenerationParams {
+            max_tokens: payload.max_tokens.unwrap_or(default_sampling.max_tokens),
+            temperature: payload.temperature.unwrap_or(default_sampling.temperature),
+            top_p: payload.top_p.unwrap_or(default_sampling.top_p),
+            min_p: default_sampling.min_p,
+            top_k: default_sampling.top_k,
+            repeat_penalty: default_sampling.repetition_penalty,
+        };
+        let model_name = payload
+            .model
+            .unwrap_or_else(|| current_runtime_model_name(engine));
+
+        if payload.stream.unwrap_or(false) {
+            let stream_id = format!("chatcmpl-{}", unix_ms_now());
+            let created = unix_ms_now() / 1000;
+            let mut headers_written = false;
+            let mut started = false;
+            let mut start_stream = |stream: &mut TcpStream| -> anyhow::Result<()> {
+                if !headers_written {
+                    write_streaming_response_headers(stream, "200 OK", "text/event-stream")?;
+                    headers_written = true;
+                }
+                if !started {
+                    write_sse_json_event(
+                        stream,
+                        &openai_chat_stream_chunk(
+                            &stream_id,
+                            created,
+                            &model_name,
+                            Some("assistant"),
+                            None,
+                            None,
+                        ),
+                    )?;
+                    started = true;
+                }
+                Ok(())
+            };
+
+            match generate_stream_with_runtime(engine, plugins, &prompt, params, |chunk| {
+                start_stream(stream)?;
+                write_sse_json_event(
+                    stream,
+                    &openai_chat_stream_chunk(
+                        &stream_id,
+                        created,
+                        &model_name,
+                        None,
+                        Some(chunk.to_string()),
+                        None,
+                    ),
+                )
+            }) {
+                Ok(_) => {
+                    let status = "200 OK";
+                    start_stream(stream)?;
+                    write_sse_json_event(
+                        stream,
+                        &openai_chat_stream_chunk(
+                            &stream_id,
+                            created,
+                            &model_name,
+                            None,
+                            None,
+                            Some("stop"),
+                        ),
+                    )?;
+                    write_sse_done(stream)?;
+                    metrics.record(
+                        "compat.openai.chat",
+                        status_code_value(status),
+                        request_started.elapsed(),
+                    );
+                }
+                Err(err) => {
+                    let status = "500 Internal Server Error";
+                    if headers_written {
+                        let _ = write_sse_json_event(
+                            stream,
+                            &ErrorResponse {
+                                error: err.to_string(),
+                            },
+                        );
+                        let _ = write_sse_done(stream);
+                    } else {
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: err.to_string(),
+                            },
+                        )?;
+                    }
+                    metrics.record(
+                        "compat.openai.chat",
+                        status_code_value(status),
+                        request_started.elapsed(),
+                    );
+                }
+            }
+            return Ok(());
+        }
+
+        match generate_with_runtime(engine, plugins, &prompt, params) {
+            Ok(response) => {
+                let usage = compatibility_usage(&prompt, &response);
+                let status = "200 OK";
+                write_json_response(
+                    stream,
+                    status,
+                    &OpenAiChatCompletionsResponse {
+                        id: format!("chatcmpl-{}", unix_ms_now()),
+                        object: "chat.completion",
+                        created: unix_ms_now() / 1000,
+                        model: model_name,
+                        choices: vec![OpenAiChatChoice {
+                            index: 0,
+                            message: OpenAiChatMessage {
+                                role: "assistant".to_string(),
+                                content: response,
+                            },
+                            finish_reason: "stop",
+                        }],
+                        usage,
+                    },
+                )?;
+                metrics.record(
+                    "compat.openai.chat",
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+            }
+            Err(err) => {
+                let status = "500 Internal Server Error";
+                write_json_response(
+                    stream,
+                    status,
+                    &ErrorResponse {
+                        error: err.to_string(),
+                    },
+                )?;
+                metrics.record(
+                    "compat.openai.chat",
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    if request.method == "POST" && request.path == "/v1/embeddings" {
+        let payload: OpenAiEmbeddingsRequest = match serde_json::from_slice(&request.body) {
+            Ok(payload) => payload,
+            Err(err) => {
+                let status = "400 Bad Request";
+                write_json_response(
+                    stream,
+                    status,
+                    &ErrorResponse {
+                        error: format!("invalid JSON payload for /v1/embeddings: {err}"),
+                    },
+                )?;
+                metrics.record(
+                    "compat.openai.embeddings",
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+        };
+
+        let inputs = normalize_openai_embedding_input(&payload.input);
+        let model_name = payload
+            .model
+            .unwrap_or_else(|| current_runtime_model_name(engine));
+        let mut data = Vec::with_capacity(inputs.len());
+        let mut prompt_tokens: u32 = 0;
+        let mut failed: Option<String> = None;
+
+        for (index, input) in inputs.iter().enumerate() {
+            prompt_tokens = prompt_tokens.saturating_add(estimate_token_count(input));
+            let embedding = {
+                let mut engine_guard = engine
+                    .lock()
+                    .expect("inference engine mutex should not be poisoned");
+                engine_guard.generate_embeddings(input)
+            };
+            match embedding {
+                Ok(embedding) => data.push(OpenAiEmbeddingData {
+                    object: "embedding",
+                    index: index as u32,
+                    embedding,
+                }),
+                Err(err) => {
+                    failed = Some(err.to_string());
+                    break;
+                }
+            }
+        }
+
+        if let Some(error) = failed {
+            let status = "500 Internal Server Error";
+            write_json_response(stream, status, &ErrorResponse { error })?;
+            metrics.record(
+                "compat.openai.embeddings",
+                status_code_value(status),
+                request_started.elapsed(),
+            );
+            return Ok(());
+        }
+
+        let status = "200 OK";
+        write_json_response(
+            stream,
+            status,
+            &OpenAiEmbeddingsResponse {
+                object: "list",
+                data,
+                model: model_name,
+                usage: OpenAiUsage {
+                    prompt_tokens,
+                    completion_tokens: 0,
+                    total_tokens: prompt_tokens,
+                },
+            },
+        )?;
+        metrics.record(
+            "compat.openai.embeddings",
+            status_code_value(status),
+            request_started.elapsed(),
+        );
+        return Ok(());
+    }
+
+    if request.method == "POST" && request.path == "/api/generate" {
+        let payload: OllamaGenerateRequest = match serde_json::from_slice(&request.body) {
+            Ok(payload) => payload,
+            Err(err) => {
+                let status = "400 Bad Request";
+                write_json_response(
+                    stream,
+                    status,
+                    &ErrorResponse {
+                        error: format!("invalid JSON payload for /api/generate: {err}"),
+                    },
+                )?;
+                metrics.record(
+                    "compat.ollama.generate",
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+        };
+
+        let params = GenerationParams {
+            max_tokens: payload
+                .options
+                .as_ref()
+                .and_then(|options| options.num_predict)
+                .unwrap_or(default_sampling.max_tokens),
+            temperature: payload
+                .options
+                .as_ref()
+                .and_then(|options| options.temperature)
+                .unwrap_or(default_sampling.temperature),
+            top_p: payload
+                .options
+                .as_ref()
+                .and_then(|options| options.top_p)
+                .unwrap_or(default_sampling.top_p),
+            min_p: default_sampling.min_p,
+            top_k: default_sampling.top_k,
+            repeat_penalty: default_sampling.repetition_penalty,
+        };
+        let model_name = payload
+            .model
+            .unwrap_or_else(|| current_runtime_model_name(engine));
+        let prompt_eval_count = estimate_token_count(&payload.prompt);
+
+        if payload.stream.unwrap_or(false) {
+            let created_at = compatibility_created_at();
+            let mut headers_written = false;
+
+            match generate_stream_with_runtime(engine, plugins, &payload.prompt, params, |chunk| {
+                if !headers_written {
+                    write_streaming_response_headers(stream, "200 OK", "application/x-ndjson")?;
+                    headers_written = true;
+                }
+                write_ndjson_event(
+                    stream,
+                    &ollama_stream_event(
+                        &model_name,
+                        &created_at,
+                        chunk.to_string(),
+                        false,
+                        None,
+                        0,
+                        0,
+                        None,
+                    ),
+                )
+            }) {
+                Ok(response) => {
+                    let status = "200 OK";
+                    if !headers_written {
+                        write_streaming_response_headers(stream, status, "application/x-ndjson")?;
+                    }
+                    write_ndjson_event(
+                        stream,
+                        &ollama_stream_event(
+                            &model_name,
+                            &created_at,
+                            String::new(),
+                            true,
+                            Some("stop"),
+                            prompt_eval_count,
+                            estimate_token_count(&response),
+                            None,
+                        ),
+                    )?;
+                    metrics.record(
+                        "compat.ollama.generate",
+                        status_code_value(status),
+                        request_started.elapsed(),
+                    );
+                }
+                Err(err) => {
+                    let status = "500 Internal Server Error";
+                    if headers_written {
+                        let _ = write_ndjson_event(
+                            stream,
+                            &ollama_stream_event(
+                                &model_name,
+                                &created_at,
+                                String::new(),
+                                true,
+                                Some("error"),
+                                prompt_eval_count,
+                                0,
+                                Some(err.to_string()),
+                            ),
+                        );
+                    } else {
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: err.to_string(),
+                            },
+                        )?;
+                    }
+                    metrics.record(
+                        "compat.ollama.generate",
+                        status_code_value(status),
+                        request_started.elapsed(),
+                    );
+                }
+            }
+            return Ok(());
+        }
+
+        match generate_with_runtime(engine, plugins, &payload.prompt, params) {
+            Ok(response) => {
+                let status = "200 OK";
+                write_json_response(
+                    stream,
+                    status,
+                    &OllamaGenerateResponse {
+                        model: model_name,
+                        created_at: compatibility_created_at(),
+                        response: response.clone(),
+                        done: true,
+                        done_reason: Some("stop"),
+                        prompt_eval_count,
+                        eval_count: estimate_token_count(&response),
+                        error: None,
+                    },
+                )?;
+                metrics.record(
+                    "compat.ollama.generate",
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+            }
+            Err(err) => {
+                let status = "500 Internal Server Error";
+                write_json_response(
+                    stream,
+                    status,
+                    &ErrorResponse {
+                        error: err.to_string(),
+                    },
+                )?;
+                metrics.record(
+                    "compat.ollama.generate",
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+            }
+        }
         return Ok(());
     }
 
@@ -4628,6 +7227,20 @@ fn handle_connection(
                                     error: err.to_string(),
                                 },
                             )?;
+                            publish_runtime_event(
+                                runtime_events,
+                                RuntimeEventCategory::Plugin,
+                                "tools.plugins.load",
+                                RuntimeEventOutcome::Error,
+                                Some(endpoint),
+                                Some(&request),
+                                Some(status_code_value(status)),
+                                None,
+                                Some(serde_json::json!({
+                                    "path": payload.path,
+                                    "error": err.to_string(),
+                                })),
+                            );
                             metrics.record(
                                 endpoint,
                                 status_code_value(status),
@@ -4649,17 +7262,36 @@ fn handle_connection(
                 }
 
                 let status = "200 OK";
-                write_json_response(
-                    stream,
-                    status,
-                    &ToolPluginRegistryMutationResponse {
-                        name: descriptor.name,
-                        version: descriptor.version,
-                        dynamic: descriptor.dynamic,
-                        source: descriptor.source.map(|path| path.display().to_string()),
-                        functions: descriptor.function_names,
-                    },
-                )?;
+                let source = descriptor
+                    .source
+                    .as_ref()
+                    .map(|path| path.display().to_string());
+                let response = ToolPluginRegistryMutationResponse {
+                    name: descriptor.name,
+                    version: descriptor.version,
+                    dynamic: descriptor.dynamic,
+                    source: source.clone(),
+                    functions: descriptor.function_names,
+                };
+                write_json_response(stream, status, &response)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Plugin,
+                    "tools.plugins.load",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response.name.clone()),
+                    Some(serde_json::json!({
+                        "activate_requested": payload.activate.unwrap_or(false),
+                        "path": payload.path,
+                        "version": response.version,
+                        "dynamic": response.dynamic,
+                        "source": source,
+                        "functions": response.functions,
+                    })),
+                );
                 metrics.record(
                     endpoint,
                     status_code_value(status),
@@ -4738,6 +7370,19 @@ fn handle_connection(
                                 error: format!("invalid JSON payload for /tools/invoke: {err}"),
                             },
                         )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Tool,
+                            "tools.invoke",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            None,
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
                         metrics.record(
                             endpoint,
                             status_code_value(status),
@@ -4750,6 +7395,7 @@ fn handle_connection(
                     name: payload.name.clone(),
                     arguments: payload.arguments,
                 };
+                let argument_keys = call.arguments.keys().cloned().collect::<Vec<_>>();
                 let result = {
                     let guard = engine
                         .lock()
@@ -4759,16 +7405,31 @@ fn handle_connection(
                 match result {
                     Ok(value) => {
                         let status = "200 OK";
+                        let tool_name = call.name.clone();
                         write_json_response(
                             stream,
                             status,
                             &ToolInvokeResponse {
-                                tool: call.name,
+                                tool: tool_name.clone(),
                                 ok: true,
                                 result: Some(value),
                                 error: None,
                             },
                         )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Tool,
+                            "tools.invoke",
+                            RuntimeEventOutcome::Success,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(tool_name),
+                            Some(serde_json::json!({
+                                "argument_count": argument_keys.len(),
+                                "argument_keys": argument_keys,
+                            })),
+                        );
                         metrics.record(
                             endpoint,
                             status_code_value(status),
@@ -4778,16 +7439,32 @@ fn handle_connection(
                     }
                     Err(err) => {
                         let status = "400 Bad Request";
+                        let tool_name = call.name.clone();
                         write_json_response(
                             stream,
                             status,
                             &ToolInvokeResponse {
-                                tool: call.name,
+                                tool: tool_name.clone(),
                                 ok: false,
                                 result: None,
                                 error: Some(err.to_string()),
                             },
                         )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Tool,
+                            "tools.invoke",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(tool_name),
+                            Some(serde_json::json!({
+                                "argument_count": argument_keys.len(),
+                                "argument_keys": argument_keys,
+                                "error": err.to_string(),
+                            })),
+                        );
                         metrics.record(
                             endpoint,
                             status_code_value(status),
@@ -4822,6 +7499,19 @@ fn handle_connection(
                                     error: err.to_string(),
                                 },
                             )?;
+                            publish_runtime_event(
+                                runtime_events,
+                                RuntimeEventCategory::Plugin,
+                                "tools.plugins.reload",
+                                RuntimeEventOutcome::Error,
+                                Some(endpoint),
+                                Some(&request),
+                                Some(status_code_value(status)),
+                                Some(name.clone()),
+                                Some(serde_json::json!({
+                                    "error": err.to_string(),
+                                })),
+                            );
                             metrics.record(
                                 endpoint,
                                 status_code_value(status),
@@ -4833,17 +7523,34 @@ fn handle_connection(
                 };
 
                 let status = "200 OK";
-                write_json_response(
-                    stream,
-                    status,
-                    &ToolPluginRegistryMutationResponse {
-                        name: descriptor.name,
-                        version: descriptor.version,
-                        dynamic: descriptor.dynamic,
-                        source: descriptor.source.map(|path| path.display().to_string()),
-                        functions: descriptor.function_names,
-                    },
-                )?;
+                let source = descriptor
+                    .source
+                    .as_ref()
+                    .map(|path| path.display().to_string());
+                let response = ToolPluginRegistryMutationResponse {
+                    name: descriptor.name,
+                    version: descriptor.version,
+                    dynamic: descriptor.dynamic,
+                    source: source.clone(),
+                    functions: descriptor.function_names,
+                };
+                write_json_response(stream, status, &response)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Plugin,
+                    "tools.plugins.reload",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response.name.clone()),
+                    Some(serde_json::json!({
+                        "version": response.version,
+                        "dynamic": response.dynamic,
+                        "source": source,
+                        "functions": response.functions,
+                    })),
+                );
                 metrics.record(
                     endpoint,
                     status_code_value(status),
@@ -4866,13 +7573,27 @@ fn handle_connection(
                     Some(descriptor) => descriptor,
                     None => {
                         let status = "404 Not Found";
+                        let error_message = format!("tool plugin '{}' not found", name);
                         write_json_response(
                             stream,
                             status,
                             &ErrorResponse {
-                                error: format!("tool plugin '{}' not found", name),
+                                error: error_message.clone(),
                             },
                         )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Plugin,
+                            "tools.plugins.unload",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(name.clone()),
+                            Some(serde_json::json!({
+                                "error": error_message,
+                            })),
+                        );
                         metrics.record(
                             endpoint,
                             status_code_value(status),
@@ -4895,6 +7616,19 @@ fn handle_connection(
                                 error: err.to_string(),
                             },
                         )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Plugin,
+                            "tools.plugins.unload",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(name.clone()),
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
                         metrics.record(
                             endpoint,
                             status_code_value(status),
@@ -4915,17 +7649,34 @@ fn handle_connection(
                 }
 
                 let status = "200 OK";
-                write_json_response(
-                    stream,
-                    status,
-                    &ToolPluginRegistryMutationResponse {
-                        name: descriptor.name,
-                        version: descriptor.version,
-                        dynamic: descriptor.dynamic,
-                        source: descriptor.source.map(|path| path.display().to_string()),
-                        functions: descriptor.function_names,
-                    },
-                )?;
+                let source = descriptor
+                    .source
+                    .as_ref()
+                    .map(|path| path.display().to_string());
+                let response = ToolPluginRegistryMutationResponse {
+                    name: descriptor.name,
+                    version: descriptor.version,
+                    dynamic: descriptor.dynamic,
+                    source: source.clone(),
+                    functions: descriptor.function_names,
+                };
+                write_json_response(stream, status, &response)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Plugin,
+                    "tools.plugins.unload",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response.name.clone()),
+                    Some(serde_json::json!({
+                        "version": response.version,
+                        "dynamic": response.dynamic,
+                        "source": source,
+                        "functions": response.functions,
+                    })),
+                );
                 metrics.record(
                     endpoint,
                     status_code_value(status),
@@ -5987,6 +8738,974 @@ fn handle_connection(
         }
     }
 
+    if let Some(route) = parse_model_pull_policy_api_route(&request.path) {
+        let endpoint = "model_pull_policies";
+        match (request.method.as_str(), route) {
+            ("GET", PolicyApiRoute::Collection) => {
+                let active_name = active_model_pull_policy.name();
+                let policies = model_pull_policy_registry
+                    .descriptors()
+                    .into_iter()
+                    .map(|descriptor| {
+                        model_pull_descriptor_to_response(descriptor, Some(active_name.as_str()))
+                    })
+                    .collect::<Vec<_>>();
+                let status = "200 OK";
+                write_json_response(
+                    stream,
+                    status,
+                    &PolicyRegistryListResponse {
+                        active: Some(active_name),
+                        policies,
+                    },
+                )?;
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            ("GET", PolicyApiRoute::Item { name }) => {
+                let active_name = active_model_pull_policy.name();
+                let descriptor = match model_pull_policy_registry.describe(&name) {
+                    Some(descriptor) => descriptor,
+                    None => {
+                        let status = "404 Not Found";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: format!("model pull policy '{}' not found", name),
+                            },
+                        )?;
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                };
+                let status = "200 OK";
+                write_json_response(
+                    stream,
+                    status,
+                    &model_pull_descriptor_to_response(descriptor, Some(active_name.as_str())),
+                )?;
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            ("POST", PolicyApiRoute::Load) => {
+                let payload: RuntimePluginLoadRequest = match serde_json::from_slice(&request.body)
+                {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        let status = "400 Bad Request";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: format!(
+                                    "invalid JSON payload for /model-pull-policies/load: {err}"
+                                ),
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Policy,
+                            "model_pull_policies.load",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            None,
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                };
+                let name = match model_pull_policy_registry
+                    .load_dynamic_policy(PathBuf::from(&payload.path))
+                {
+                    Ok(name) => name,
+                    Err(err) => {
+                        let status = "400 Bad Request";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: err.to_string(),
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Policy,
+                            "model_pull_policies.load",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            None,
+                            Some(serde_json::json!({
+                                "path": payload.path,
+                                "error": err.to_string(),
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                };
+                let active = payload.activate.unwrap_or(false);
+                if active {
+                    let policy = model_pull_policy_registry.get(&name).ok_or_else(|| {
+                        anyhow::anyhow!("model pull policy '{}' missing after load", name)
+                    })?;
+                    active_model_pull_policy.activate(name.clone(), policy);
+                }
+                {
+                    let mut store = model_pull_policy_store
+                        .lock()
+                        .expect("model pull policy registry mutex should not be poisoned");
+                    store.add_plugin_path(PathBuf::from(&payload.path));
+                    if active {
+                        store.set_active(Some(name.clone()));
+                    }
+                    store.persist().map_err(|e| {
+                        anyhow::anyhow!("failed persisting model pull policy registry: {}", e)
+                    })?;
+                }
+                let descriptor = model_pull_policy_registry.describe(&name).ok_or_else(|| {
+                    anyhow::anyhow!("model pull policy '{}' missing after load", name)
+                })?;
+                let status = "200 OK";
+                let source = descriptor
+                    .source
+                    .as_ref()
+                    .map(|path| path.display().to_string());
+                let response = PolicyRegistryMutationResponse {
+                    name,
+                    active,
+                    source: source.clone(),
+                };
+                write_json_response(stream, status, &response)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Policy,
+                    "model_pull_policies.load",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response.name.clone()),
+                    Some(serde_json::json!({
+                        "active": response.active,
+                        "source": source,
+                        "path": payload.path,
+                    })),
+                );
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            ("POST", PolicyApiRoute::Activate { name }) => {
+                let policy = match model_pull_policy_registry.get(&name) {
+                    Some(policy) => policy,
+                    None => {
+                        let status = "404 Not Found";
+                        let error_message = format!("model pull policy '{}' not found", name);
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: error_message.clone(),
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Policy,
+                            "model_pull_policies.activate",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(name.clone()),
+                            Some(serde_json::json!({
+                                "error": error_message,
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                };
+                active_model_pull_policy.activate(name.clone(), policy);
+                {
+                    let mut store = model_pull_policy_store
+                        .lock()
+                        .expect("model pull policy registry mutex should not be poisoned");
+                    store.set_active(Some(name.clone()));
+                    store.persist().map_err(|e| {
+                        anyhow::anyhow!("failed persisting model pull policy registry: {}", e)
+                    })?;
+                }
+                let descriptor = model_pull_policy_registry
+                    .describe(&name)
+                    .ok_or_else(|| anyhow::anyhow!("model pull policy '{}' missing", name))?;
+                let status = "200 OK";
+                let source = descriptor
+                    .source
+                    .as_ref()
+                    .map(|path| path.display().to_string());
+                let response = PolicyRegistryMutationResponse {
+                    name,
+                    active: true,
+                    source: source.clone(),
+                };
+                write_json_response(stream, status, &response)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Policy,
+                    "model_pull_policies.activate",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response.name.clone()),
+                    Some(serde_json::json!({
+                        "active": response.active,
+                        "source": source,
+                    })),
+                );
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            ("POST", PolicyApiRoute::Reload { name }) => {
+                if active_model_pull_policy.name() == name {
+                    let status = "409 Conflict";
+                    let error_message = format!(
+                        "model pull policy '{}' is active; switch to another policy before reload",
+                        name
+                    );
+                    write_json_response(
+                        stream,
+                        status,
+                        &ErrorResponse {
+                            error: error_message.clone(),
+                        },
+                    )?;
+                    publish_runtime_event(
+                        runtime_events,
+                        RuntimeEventCategory::Policy,
+                        "model_pull_policies.reload",
+                        RuntimeEventOutcome::Error,
+                        Some(endpoint),
+                        Some(&request),
+                        Some(status_code_value(status)),
+                        Some(name.clone()),
+                        Some(serde_json::json!({
+                            "error": error_message,
+                        })),
+                    );
+                    metrics.record(
+                        endpoint,
+                        status_code_value(status),
+                        request_started.elapsed(),
+                    );
+                    return Ok(());
+                }
+                match model_pull_policy_registry.reload_dynamic_policy(&name) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        let status = "400 Bad Request";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: err.to_string(),
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Policy,
+                            "model_pull_policies.reload",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(name.clone()),
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                }
+                let descriptor = model_pull_policy_registry.describe(&name).ok_or_else(|| {
+                    anyhow::anyhow!("model pull policy '{}' missing after reload", name)
+                })?;
+                let status = "200 OK";
+                let source = descriptor
+                    .source
+                    .as_ref()
+                    .map(|path| path.display().to_string());
+                let response = PolicyRegistryMutationResponse {
+                    name,
+                    active: false,
+                    source: source.clone(),
+                };
+                write_json_response(stream, status, &response)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Policy,
+                    "model_pull_policies.reload",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response.name.clone()),
+                    Some(serde_json::json!({
+                        "active": response.active,
+                        "source": source,
+                    })),
+                );
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            ("POST", PolicyApiRoute::Unload { name }) => {
+                if active_model_pull_policy.name() == name {
+                    let status = "409 Conflict";
+                    let error_message = format!(
+                        "model pull policy '{}' is active; switch to another policy before unload",
+                        name
+                    );
+                    write_json_response(
+                        stream,
+                        status,
+                        &ErrorResponse {
+                            error: error_message.clone(),
+                        },
+                    )?;
+                    publish_runtime_event(
+                        runtime_events,
+                        RuntimeEventCategory::Policy,
+                        "model_pull_policies.unload",
+                        RuntimeEventOutcome::Error,
+                        Some(endpoint),
+                        Some(&request),
+                        Some(status_code_value(status)),
+                        Some(name.clone()),
+                        Some(serde_json::json!({
+                            "error": error_message,
+                        })),
+                    );
+                    metrics.record(
+                        endpoint,
+                        status_code_value(status),
+                        request_started.elapsed(),
+                    );
+                    return Ok(());
+                }
+                let descriptor = model_pull_policy_registry.describe(&name);
+                match model_pull_policy_registry.unload_dynamic_policy(&name) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        let status = "400 Bad Request";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: err.to_string(),
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Policy,
+                            "model_pull_policies.unload",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(name.clone()),
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                }
+                if let Some(source) = descriptor.as_ref().and_then(|item| item.source.as_ref()) {
+                    let mut store = model_pull_policy_store
+                        .lock()
+                        .expect("model pull policy registry mutex should not be poisoned");
+                    store.remove_plugin_path(source);
+                    store.persist().map_err(|e| {
+                        anyhow::anyhow!("failed persisting model pull policy registry: {}", e)
+                    })?;
+                }
+                let status = "200 OK";
+                let source = descriptor
+                    .as_ref()
+                    .and_then(|item| item.source.as_ref())
+                    .map(|path| path.display().to_string());
+                let response = PolicyRegistryMutationResponse {
+                    name,
+                    active: false,
+                    source: source.clone(),
+                };
+                write_json_response(stream, status, &response)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Policy,
+                    "model_pull_policies.unload",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response.name.clone()),
+                    Some(serde_json::json!({
+                        "active": response.active,
+                        "source": source,
+                    })),
+                );
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(route) = parse_model_pull_verifier_api_route(&request.path) {
+        let endpoint = "model_pull_verifiers";
+        match (request.method.as_str(), route) {
+            ("GET", PolicyApiRoute::Collection) => {
+                let active_name = active_model_pull_verifier.name();
+                let policies = model_pull_verifier_registry
+                    .descriptors()
+                    .into_iter()
+                    .map(|descriptor| {
+                        model_pull_verifier_descriptor_to_response(
+                            descriptor,
+                            Some(active_name.as_str()),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let status = "200 OK";
+                write_json_response(
+                    stream,
+                    status,
+                    &PolicyRegistryListResponse {
+                        active: Some(active_name),
+                        policies,
+                    },
+                )?;
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            ("GET", PolicyApiRoute::Item { name }) => {
+                let active_name = active_model_pull_verifier.name();
+                let descriptor = match model_pull_verifier_registry.describe(&name) {
+                    Some(descriptor) => descriptor,
+                    None => {
+                        let status = "404 Not Found";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: format!("model pull verifier '{}' not found", name),
+                            },
+                        )?;
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                };
+                let status = "200 OK";
+                write_json_response(
+                    stream,
+                    status,
+                    &model_pull_verifier_descriptor_to_response(
+                        descriptor,
+                        Some(active_name.as_str()),
+                    ),
+                )?;
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            ("POST", PolicyApiRoute::Load) => {
+                let payload: RuntimePluginLoadRequest = match serde_json::from_slice(&request.body)
+                {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        let status = "400 Bad Request";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: format!(
+                                    "invalid JSON payload for /model-pull-verifiers/load: {err}"
+                                ),
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Policy,
+                            "model_pull_verifiers.load",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            None,
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                };
+                let name = match model_pull_verifier_registry
+                    .load_dynamic_verifier(PathBuf::from(&payload.path))
+                {
+                    Ok(name) => name,
+                    Err(err) => {
+                        let status = "400 Bad Request";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: err.to_string(),
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Policy,
+                            "model_pull_verifiers.load",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            None,
+                            Some(serde_json::json!({
+                                "path": payload.path,
+                                "error": err.to_string(),
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                };
+                let active = payload.activate.unwrap_or(false);
+                if active {
+                    let verifier = model_pull_verifier_registry.get(&name).ok_or_else(|| {
+                        anyhow::anyhow!("model pull verifier '{}' missing after load", name)
+                    })?;
+                    active_model_pull_verifier.activate(name.clone(), verifier);
+                }
+                {
+                    let mut store = model_pull_verifier_store
+                        .lock()
+                        .expect("model pull verifier registry mutex should not be poisoned");
+                    store.add_plugin_path(PathBuf::from(&payload.path));
+                    if active {
+                        store.set_active(Some(name.clone()));
+                    }
+                    store.persist().map_err(|e| {
+                        anyhow::anyhow!("failed persisting model pull verifier registry: {}", e)
+                    })?;
+                }
+                let descriptor = model_pull_verifier_registry
+                    .describe(&name)
+                    .ok_or_else(|| anyhow::anyhow!("model pull verifier '{}' missing", name))?;
+                let status = "200 OK";
+                let source = descriptor
+                    .source
+                    .as_ref()
+                    .map(|path| path.display().to_string());
+                let response = PolicyRegistryMutationResponse {
+                    name,
+                    active,
+                    source: source.clone(),
+                };
+                write_json_response(stream, status, &response)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Policy,
+                    "model_pull_verifiers.load",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response.name.clone()),
+                    Some(serde_json::json!({
+                        "active": response.active,
+                        "source": source,
+                        "path": payload.path,
+                    })),
+                );
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            ("POST", PolicyApiRoute::Activate { name }) => {
+                let verifier = match model_pull_verifier_registry.get(&name) {
+                    Some(verifier) => verifier,
+                    None => {
+                        let status = "404 Not Found";
+                        let error_message = format!("model pull verifier '{}' not found", name);
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: error_message.clone(),
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Policy,
+                            "model_pull_verifiers.activate",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(name.clone()),
+                            Some(serde_json::json!({
+                                "error": error_message,
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                };
+                active_model_pull_verifier.activate(name.clone(), verifier);
+                {
+                    let mut store = model_pull_verifier_store
+                        .lock()
+                        .expect("model pull verifier registry mutex should not be poisoned");
+                    store.set_active(Some(name.clone()));
+                    store.persist().map_err(|e| {
+                        anyhow::anyhow!("failed persisting model pull verifier registry: {}", e)
+                    })?;
+                }
+                let descriptor = model_pull_verifier_registry
+                    .describe(&name)
+                    .ok_or_else(|| anyhow::anyhow!("model pull verifier '{}' missing", name))?;
+                let status = "200 OK";
+                let source = descriptor
+                    .source
+                    .as_ref()
+                    .map(|path| path.display().to_string());
+                let response = PolicyRegistryMutationResponse {
+                    name,
+                    active: true,
+                    source: source.clone(),
+                };
+                write_json_response(stream, status, &response)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Policy,
+                    "model_pull_verifiers.activate",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response.name.clone()),
+                    Some(serde_json::json!({
+                        "active": response.active,
+                        "source": source,
+                    })),
+                );
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            ("POST", PolicyApiRoute::Reload { name }) => {
+                if active_model_pull_verifier.name() == name {
+                    let status = "409 Conflict";
+                    let error_message = format!(
+                        "model pull verifier '{}' is active; switch to another verifier before reload",
+                        name
+                    );
+                    write_json_response(
+                        stream,
+                        status,
+                        &ErrorResponse {
+                            error: error_message.clone(),
+                        },
+                    )?;
+                    publish_runtime_event(
+                        runtime_events,
+                        RuntimeEventCategory::Policy,
+                        "model_pull_verifiers.reload",
+                        RuntimeEventOutcome::Error,
+                        Some(endpoint),
+                        Some(&request),
+                        Some(status_code_value(status)),
+                        Some(name.clone()),
+                        Some(serde_json::json!({
+                            "error": error_message,
+                        })),
+                    );
+                    metrics.record(
+                        endpoint,
+                        status_code_value(status),
+                        request_started.elapsed(),
+                    );
+                    return Ok(());
+                }
+                match model_pull_verifier_registry.reload_dynamic_verifier(&name) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        let status = "400 Bad Request";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: err.to_string(),
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Policy,
+                            "model_pull_verifiers.reload",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(name.clone()),
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                }
+                let descriptor = model_pull_verifier_registry
+                    .describe(&name)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("model pull verifier '{}' missing after reload", name)
+                    })?;
+                let status = "200 OK";
+                let source = descriptor
+                    .source
+                    .as_ref()
+                    .map(|path| path.display().to_string());
+                let response = PolicyRegistryMutationResponse {
+                    name,
+                    active: false,
+                    source: source.clone(),
+                };
+                write_json_response(stream, status, &response)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Policy,
+                    "model_pull_verifiers.reload",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response.name.clone()),
+                    Some(serde_json::json!({
+                        "active": response.active,
+                        "source": source,
+                    })),
+                );
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            ("POST", PolicyApiRoute::Unload { name }) => {
+                if active_model_pull_verifier.name() == name {
+                    let status = "409 Conflict";
+                    let error_message = format!(
+                        "model pull verifier '{}' is active; switch to another verifier before unload",
+                        name
+                    );
+                    write_json_response(
+                        stream,
+                        status,
+                        &ErrorResponse {
+                            error: error_message.clone(),
+                        },
+                    )?;
+                    publish_runtime_event(
+                        runtime_events,
+                        RuntimeEventCategory::Policy,
+                        "model_pull_verifiers.unload",
+                        RuntimeEventOutcome::Error,
+                        Some(endpoint),
+                        Some(&request),
+                        Some(status_code_value(status)),
+                        Some(name.clone()),
+                        Some(serde_json::json!({
+                            "error": error_message,
+                        })),
+                    );
+                    metrics.record(
+                        endpoint,
+                        status_code_value(status),
+                        request_started.elapsed(),
+                    );
+                    return Ok(());
+                }
+                let descriptor = model_pull_verifier_registry.describe(&name);
+                match model_pull_verifier_registry.unload_dynamic_verifier(&name) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        let status = "400 Bad Request";
+                        write_json_response(
+                            stream,
+                            status,
+                            &ErrorResponse {
+                                error: err.to_string(),
+                            },
+                        )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Policy,
+                            "model_pull_verifiers.unload",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(name.clone()),
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
+                        metrics.record(
+                            endpoint,
+                            status_code_value(status),
+                            request_started.elapsed(),
+                        );
+                        return Ok(());
+                    }
+                }
+                if let Some(source) = descriptor.as_ref().and_then(|item| item.source.as_ref()) {
+                    let mut store = model_pull_verifier_store
+                        .lock()
+                        .expect("model pull verifier registry mutex should not be poisoned");
+                    store.remove_plugin_path(source);
+                    store.persist().map_err(|e| {
+                        anyhow::anyhow!("failed persisting model pull verifier registry: {}", e)
+                    })?;
+                }
+                let status = "200 OK";
+                let source = descriptor
+                    .as_ref()
+                    .and_then(|item| item.source.as_ref())
+                    .map(|path| path.display().to_string());
+                let response = PolicyRegistryMutationResponse {
+                    name,
+                    active: false,
+                    source: source.clone(),
+                };
+                write_json_response(stream, status, &response)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Policy,
+                    "model_pull_verifiers.unload",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response.name.clone()),
+                    Some(serde_json::json!({
+                        "active": response.active,
+                        "source": source,
+                    })),
+                );
+                metrics.record(
+                    endpoint,
+                    status_code_value(status),
+                    request_started.elapsed(),
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     if let Some(route) = parse_session_api_route(&request.path) {
         let endpoint = "sessions";
         match (request.method.as_str(), route) {
@@ -6024,6 +9743,19 @@ fn handle_connection(
                                 error: format!("invalid JSON payload for /sessions create: {err}"),
                             },
                         )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Session,
+                            "sessions.create",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            None,
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
                         metrics.record(
                             endpoint,
                             status_code_value(status),
@@ -6048,6 +9780,19 @@ fn handle_connection(
                                 error: err.to_string(),
                             },
                         )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Session,
+                            "sessions.create",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            payload.model_id.clone().or_else(|| payload.model.clone()),
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
                         metrics.record(
                             endpoint,
                             status_code_value(status),
@@ -6070,17 +9815,30 @@ fn handle_connection(
                         .map_err(|e| anyhow::anyhow!("failed persisting created session: {}", e))?;
                 }
                 let status = "200 OK";
-                write_json_response(
-                    stream,
-                    status,
-                    &SessionCreateResponse {
-                        session_id: session_id.as_u64(),
-                        model_path: model.display().to_string(),
-                        model_id: model_id.as_u64(),
-                        context_size,
-                        persisted,
-                    },
-                )?;
+                let response = SessionCreateResponse {
+                    session_id: session_id.as_u64(),
+                    model_path: model.display().to_string(),
+                    model_id: model_id.as_u64(),
+                    context_size,
+                    persisted,
+                };
+                write_json_response(stream, status, &response)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Session,
+                    "sessions.create",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response.session_id.to_string()),
+                    Some(serde_json::json!({
+                        "model_path": response.model_path,
+                        "model_id": response.model_id,
+                        "context_size": response.context_size,
+                        "persisted": response.persisted,
+                    })),
+                );
                 metrics.record(
                     endpoint,
                     status_code_value(status),
@@ -6160,6 +9918,19 @@ fn handle_connection(
                                 ),
                             },
                         )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Session,
+                            "sessions.generate",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(session_id.as_u64().to_string()),
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
                         metrics.record(
                             endpoint,
                             status_code_value(status),
@@ -6177,6 +9948,19 @@ fn handle_connection(
                             error: err.to_string(),
                         },
                     )?;
+                    publish_runtime_event(
+                        runtime_events,
+                        RuntimeEventCategory::Session,
+                        "sessions.generate",
+                        RuntimeEventOutcome::Error,
+                        Some(endpoint),
+                        Some(&request),
+                        Some(status_code_value(status)),
+                        Some(session_id.as_u64().to_string()),
+                        Some(serde_json::json!({
+                            "error": err.to_string(),
+                        })),
+                    );
                     metrics.record(
                         endpoint,
                         status_code_value(status),
@@ -6188,13 +9972,27 @@ fn handle_connection(
                     Some(handle) => handle,
                     None => {
                         let status = "404 Not Found";
+                        let error_message = format!("session {} not found", session_id.as_u64());
                         write_json_response(
                             stream,
                             status,
                             &ErrorResponse {
-                                error: format!("session {} not found", session_id.as_u64()),
+                                error: error_message.clone(),
                             },
                         )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Session,
+                            "sessions.generate",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(session_id.as_u64().to_string()),
+                            Some(serde_json::json!({
+                                "error": error_message,
+                            })),
+                        );
                         metrics.record(
                             endpoint,
                             status_code_value(status),
@@ -6218,6 +10016,19 @@ fn handle_connection(
                                     error: err.to_string(),
                                 },
                             )?;
+                            publish_runtime_event(
+                                runtime_events,
+                                RuntimeEventCategory::Session,
+                                "sessions.generate",
+                                RuntimeEventOutcome::Error,
+                                Some(endpoint),
+                                Some(&request),
+                                Some(status_code_value(status)),
+                                Some(session_id.as_u64().to_string()),
+                                Some(serde_json::json!({
+                                    "error": err.to_string(),
+                                })),
+                            );
                             metrics.record(
                                 endpoint,
                                 status_code_value(status),
@@ -6248,16 +10059,30 @@ fn handle_connection(
                     .map(|info| format!("{:?}", info.state))
                     .unwrap_or_else(|_| "Unknown".to_string());
                 let status = "200 OK";
-                write_json_response(
-                    stream,
-                    status,
-                    &SessionGenerateResponse {
-                        session_id: session_id.as_u64(),
-                        response,
-                        persisted,
-                        state,
-                    },
-                )?;
+                let response_payload = SessionGenerateResponse {
+                    session_id: session_id.as_u64(),
+                    response,
+                    persisted,
+                    state,
+                };
+                write_json_response(stream, status, &response_payload)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Session,
+                    "sessions.generate",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response_payload.session_id.to_string()),
+                    Some(serde_json::json!({
+                        "persisted": response_payload.persisted,
+                        "state": response_payload.state,
+                        "max_tokens": max_tokens,
+                        "prompt_chars": prompt.chars().count(),
+                        "response_chars": response_payload.response.chars().count(),
+                    })),
+                );
                 metrics.record(
                     endpoint,
                     status_code_value(status),
@@ -6279,6 +10104,19 @@ fn handle_connection(
                                 ),
                             },
                         )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Session,
+                            "sessions.suspend",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(session_id.as_u64().to_string()),
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
                         metrics.record(
                             endpoint,
                             status_code_value(status),
@@ -6296,6 +10134,19 @@ fn handle_connection(
                             error: err.to_string(),
                         },
                     )?;
+                    publish_runtime_event(
+                        runtime_events,
+                        RuntimeEventCategory::Session,
+                        "sessions.suspend",
+                        RuntimeEventOutcome::Error,
+                        Some(endpoint),
+                        Some(&request),
+                        Some(status_code_value(status)),
+                        Some(session_id.as_u64().to_string()),
+                        Some(serde_json::json!({
+                            "error": err.to_string(),
+                        })),
+                    );
                     metrics.record(
                         endpoint,
                         status_code_value(status),
@@ -6320,15 +10171,28 @@ fn handle_connection(
                     .map(|info| format!("{:?}", info.state))
                     .unwrap_or_else(|_| "Unknown".to_string());
                 let status = "200 OK";
-                write_json_response(
-                    stream,
-                    status,
-                    &SessionMutationResponse {
-                        session_id: session_id.as_u64(),
-                        persisted,
-                        state,
-                    },
-                )?;
+                let response = SessionMutationResponse {
+                    session_id: session_id.as_u64(),
+                    persisted,
+                    state,
+                };
+                write_json_response(stream, status, &response)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Session,
+                    "sessions.suspend",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response.session_id.to_string()),
+                    Some(serde_json::json!({
+                        "persisted": response.persisted,
+                        "state": response.state,
+                        "reason": payload.reason,
+                        "has_data": payload.data.is_some(),
+                    })),
+                );
                 metrics.record(
                     endpoint,
                     status_code_value(status),
@@ -6350,6 +10214,19 @@ fn handle_connection(
                                 ),
                             },
                         )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Session,
+                            "sessions.resume",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(session_id.as_u64().to_string()),
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
                         metrics.record(
                             endpoint,
                             status_code_value(status),
@@ -6367,6 +10244,19 @@ fn handle_connection(
                             error: err.to_string(),
                         },
                     )?;
+                    publish_runtime_event(
+                        runtime_events,
+                        RuntimeEventCategory::Session,
+                        "sessions.resume",
+                        RuntimeEventOutcome::Error,
+                        Some(endpoint),
+                        Some(&request),
+                        Some(status_code_value(status)),
+                        Some(session_id.as_u64().to_string()),
+                        Some(serde_json::json!({
+                            "error": err.to_string(),
+                        })),
+                    );
                     metrics.record(
                         endpoint,
                         status_code_value(status),
@@ -6391,15 +10281,27 @@ fn handle_connection(
                     .map(|info| format!("{:?}", info.state))
                     .unwrap_or_else(|_| "Unknown".to_string());
                 let status = "200 OK";
-                write_json_response(
-                    stream,
-                    status,
-                    &SessionMutationResponse {
-                        session_id: session_id.as_u64(),
-                        persisted,
-                        state,
-                    },
-                )?;
+                let response = SessionMutationResponse {
+                    session_id: session_id.as_u64(),
+                    persisted,
+                    state,
+                };
+                write_json_response(stream, status, &response)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Session,
+                    "sessions.resume",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response.session_id.to_string()),
+                    Some(serde_json::json!({
+                        "persisted": response.persisted,
+                        "state": response.state,
+                        "external_data_chars": payload.external_data.chars().count(),
+                    })),
+                );
                 metrics.record(
                     endpoint,
                     status_code_value(status),
@@ -6417,6 +10319,19 @@ fn handle_connection(
                             error: err.to_string(),
                         },
                     )?;
+                    publish_runtime_event(
+                        runtime_events,
+                        RuntimeEventCategory::Session,
+                        "sessions.save",
+                        RuntimeEventOutcome::Error,
+                        Some(endpoint),
+                        Some(&request),
+                        Some(status_code_value(status)),
+                        Some(session_id.as_u64().to_string()),
+                        Some(serde_json::json!({
+                            "error": err.to_string(),
+                        })),
+                    );
                     metrics.record(
                         endpoint,
                         status_code_value(status),
@@ -6432,15 +10347,26 @@ fn handle_connection(
                     .and_then(|handle| handle.info().ok().map(|x| format!("{:?}", x.state)))
                     .unwrap_or_else(|| "Unknown".to_string());
                 let status = "200 OK";
-                write_json_response(
-                    stream,
-                    status,
-                    &SessionMutationResponse {
-                        session_id: session_id.as_u64(),
-                        persisted: true,
-                        state,
-                    },
-                )?;
+                let response = SessionMutationResponse {
+                    session_id: session_id.as_u64(),
+                    persisted: true,
+                    state,
+                };
+                write_json_response(stream, status, &response)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Session,
+                    "sessions.save",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response.session_id.to_string()),
+                    Some(serde_json::json!({
+                        "persisted": response.persisted,
+                        "state": response.state,
+                    })),
+                );
                 metrics.record(
                     endpoint,
                     status_code_value(status),
@@ -6459,6 +10385,19 @@ fn handle_connection(
                                 error: err.to_string(),
                             },
                         )?;
+                        publish_runtime_event(
+                            runtime_events,
+                            RuntimeEventCategory::Session,
+                            "sessions.restore",
+                            RuntimeEventOutcome::Error,
+                            Some(endpoint),
+                            Some(&request),
+                            Some(status_code_value(status)),
+                            Some(session_id.as_u64().to_string()),
+                            Some(serde_json::json!({
+                                "error": err.to_string(),
+                            })),
+                        );
                         metrics.record(
                             endpoint,
                             status_code_value(status),
@@ -6472,15 +10411,26 @@ fn handle_connection(
                     .and_then(|handle| handle.info().ok().map(|x| format!("{:?}", x.state)))
                     .unwrap_or_else(|| "Unknown".to_string());
                 let status = "200 OK";
-                write_json_response(
-                    stream,
-                    status,
-                    &SessionMutationResponse {
-                        session_id: session_id.as_u64(),
-                        persisted: true,
-                        state,
-                    },
-                )?;
+                let response = SessionMutationResponse {
+                    session_id: session_id.as_u64(),
+                    persisted: true,
+                    state,
+                };
+                write_json_response(stream, status, &response)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Session,
+                    "sessions.restore",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response.session_id.to_string()),
+                    Some(serde_json::json!({
+                        "persisted": response.persisted,
+                        "state": response.state,
+                    })),
+                );
                 metrics.record(
                     endpoint,
                     status_code_value(status),
@@ -6505,6 +10455,19 @@ fn handle_connection(
                                     ),
                                 },
                             )?;
+                            publish_runtime_event(
+                                runtime_events,
+                                RuntimeEventCategory::Session,
+                                "sessions.clear",
+                                RuntimeEventOutcome::Error,
+                                Some(endpoint),
+                                Some(&request),
+                                Some(status_code_value(status)),
+                                Some(session_id.as_u64().to_string()),
+                                Some(serde_json::json!({
+                                    "error": err.to_string(),
+                                })),
+                            );
                             metrics.record(
                                 endpoint,
                                 status_code_value(status),
@@ -6523,6 +10486,19 @@ fn handle_connection(
                             error: err.to_string(),
                         },
                     )?;
+                    publish_runtime_event(
+                        runtime_events,
+                        RuntimeEventCategory::Session,
+                        "sessions.clear",
+                        RuntimeEventOutcome::Error,
+                        Some(endpoint),
+                        Some(&request),
+                        Some(status_code_value(status)),
+                        Some(session_id.as_u64().to_string()),
+                        Some(serde_json::json!({
+                            "error": err.to_string(),
+                        })),
+                    );
                     metrics.record(
                         endpoint,
                         status_code_value(status),
@@ -6547,15 +10523,26 @@ fn handle_connection(
                     .map(|info| format!("{:?}", info.state))
                     .unwrap_or_else(|_| "Unknown".to_string());
                 let status = "200 OK";
-                write_json_response(
-                    stream,
-                    status,
-                    &SessionMutationResponse {
-                        session_id: session_id.as_u64(),
-                        persisted,
-                        state,
-                    },
-                )?;
+                let response = SessionMutationResponse {
+                    session_id: session_id.as_u64(),
+                    persisted,
+                    state,
+                };
+                write_json_response(stream, status, &response)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Session,
+                    "sessions.clear",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response.session_id.to_string()),
+                    Some(serde_json::json!({
+                        "persisted": response.persisted,
+                        "state": response.state,
+                    })),
+                );
                 metrics.record(
                     endpoint,
                     status_code_value(status),
@@ -6574,6 +10561,19 @@ fn handle_connection(
                             error: err.to_string(),
                         },
                     )?;
+                    publish_runtime_event(
+                        runtime_events,
+                        RuntimeEventCategory::Session,
+                        "sessions.destroy",
+                        RuntimeEventOutcome::Error,
+                        Some(endpoint),
+                        Some(&request),
+                        Some(status_code_value(status)),
+                        Some(session_id.as_u64().to_string()),
+                        Some(serde_json::json!({
+                            "error": err.to_string(),
+                        })),
+                    );
                     metrics.record(
                         endpoint,
                         status_code_value(status),
@@ -6585,15 +10585,26 @@ fn handle_connection(
                     .destroy_session(session_id)
                     .map_err(|e| anyhow::anyhow!("failed destroying session: {}", e))?;
                 let status = "200 OK";
-                write_json_response(
-                    stream,
-                    status,
-                    &SessionMutationResponse {
-                        session_id: session_id.as_u64(),
-                        persisted: false,
-                        state: "Destroyed".to_string(),
-                    },
-                )?;
+                let response = SessionMutationResponse {
+                    session_id: session_id.as_u64(),
+                    persisted: false,
+                    state: "Destroyed".to_string(),
+                };
+                write_json_response(stream, status, &response)?;
+                publish_runtime_event(
+                    runtime_events,
+                    RuntimeEventCategory::Session,
+                    "sessions.destroy",
+                    RuntimeEventOutcome::Success,
+                    Some(endpoint),
+                    Some(&request),
+                    Some(status_code_value(status)),
+                    Some(response.session_id.to_string()),
+                    Some(serde_json::json!({
+                        "persisted": response.persisted,
+                        "state": response.state,
+                    })),
+                );
                 metrics.record(
                     endpoint,
                     status_code_value(status),
@@ -6856,6 +10867,42 @@ fn write_plain_response(
     Ok(())
 }
 
+fn write_streaming_response_headers(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+) -> anyhow::Result<()> {
+    let header = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nCache-Control: no-cache\r\nX-Accel-Buffering: no\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(header.as_bytes())?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn write_sse_json_event<T: Serialize>(stream: &mut TcpStream, payload: &T) -> anyhow::Result<()> {
+    let body = serde_json::to_string(payload)?;
+    stream.write_all(b"data: ")?;
+    stream.write_all(body.as_bytes())?;
+    stream.write_all(b"\n\n")?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn write_sse_done(stream: &mut TcpStream) -> anyhow::Result<()> {
+    stream.write_all(b"data: [DONE]\n\n")?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn write_ndjson_event<T: Serialize>(stream: &mut TcpStream, payload: &T) -> anyhow::Result<()> {
+    let body = serde_json::to_string(payload)?;
+    stream.write_all(body.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    Ok(())
+}
+
 fn load_plugins(paths: &[PathBuf]) -> anyhow::Result<Option<PluginRegistry>> {
     if paths.is_empty() {
         return Ok(None);
@@ -6901,6 +10948,118 @@ fn apply_on_token(token: &str, plugins: Option<&PluginRegistry>) -> anyhow::Resu
     match plugins {
         Some(registry) => Ok(registry.apply_on_token(token)?),
         None => Ok(token.to_string()),
+    }
+}
+
+fn generate_with_runtime(
+    engine: &Arc<Mutex<InferenceEngine>>,
+    plugins: &Arc<Mutex<Option<PluginRegistry>>>,
+    prompt: &str,
+    params: GenerationParams,
+) -> anyhow::Result<String> {
+    let prompt = {
+        let plugins_guard = plugins
+            .lock()
+            .expect("plugin registry mutex should not be poisoned");
+        apply_pre_generate(prompt, plugins_guard.as_ref())?
+    };
+
+    let response = {
+        let mut engine_guard = engine
+            .lock()
+            .expect("inference engine mutex should not be poisoned");
+        engine_guard.generate(&prompt, params)?
+    };
+
+    let plugins_guard = plugins
+        .lock()
+        .expect("plugin registry mutex should not be poisoned");
+    apply_post_generate(&response, plugins_guard.as_ref())
+}
+
+fn generate_stream_with_runtime<F>(
+    engine: &Arc<Mutex<InferenceEngine>>,
+    plugins: &Arc<Mutex<Option<PluginRegistry>>>,
+    prompt: &str,
+    params: GenerationParams,
+    mut on_chunk: F,
+) -> anyhow::Result<String>
+where
+    F: FnMut(&str) -> anyhow::Result<()>,
+{
+    let supports_streaming = {
+        let engine_guard = engine
+            .lock()
+            .expect("inference engine mutex should not be poisoned");
+        engine_guard.supports_streaming()
+    };
+
+    let plugin_count = {
+        let plugins_guard = plugins
+            .lock()
+            .expect("plugin registry mutex should not be poisoned");
+        plugins_guard.as_ref().map_or(0, PluginRegistry::count)
+    };
+
+    if !supports_streaming || plugin_count > 0 {
+        let response = generate_with_runtime(engine, plugins, prompt, params)?;
+        for chunk in chunk_text_for_streaming(&response) {
+            on_chunk(&chunk)?;
+        }
+        return Ok(response);
+    }
+
+    let plugins_guard = plugins
+        .lock()
+        .expect("plugin registry mutex should not be poisoned");
+    let processed_prompt = apply_pre_generate(prompt, plugins_guard.as_ref())?;
+
+    let mut streamed = String::new();
+    let mut callback_error: Option<anyhow::Error> = None;
+    {
+        let mut engine_guard = engine
+            .lock()
+            .expect("inference engine mutex should not be poisoned");
+        engine_guard.generate_stream(&processed_prompt, params, |token| {
+            let processed_token = match apply_on_token(token, plugins_guard.as_ref()) {
+                Ok(token) => token,
+                Err(err) => {
+                    callback_error = Some(err);
+                    return false;
+                }
+            };
+
+            streamed.push_str(&processed_token);
+            if let Err(err) = on_chunk(&processed_token) {
+                callback_error = Some(err);
+                return false;
+            }
+            true
+        })?;
+    }
+
+    if let Some(err) = callback_error {
+        return Err(err);
+    }
+
+    Ok(streamed)
+}
+
+fn current_runtime_model_name(engine: &Arc<Mutex<InferenceEngine>>) -> String {
+    let guard = engine
+        .lock()
+        .expect("inference engine mutex should not be poisoned");
+    let metadata = guard.model_metadata();
+    format!("loci/{}:{}", guard.backend_name(), metadata.architecture)
+}
+
+fn compatibility_usage(prompt: &str, response: &str) -> OpenAiUsage {
+    let prompt_tokens = estimate_token_count(prompt);
+    let completion_tokens = estimate_token_count(response);
+    OpenAiUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: prompt_tokens.saturating_add(completion_tokens),
     }
 }
 
@@ -7507,6 +11666,52 @@ mod tests {
     }
 
     #[test]
+    fn parse_model_pull_policy_api_routes() {
+        assert!(matches!(
+            parse_model_pull_policy_api_route("/model-pull-policies"),
+            Some(PolicyApiRoute::Collection)
+        ));
+        assert!(matches!(
+            parse_model_pull_policy_api_route("/v1/model-pull-policies/load"),
+            Some(PolicyApiRoute::Load)
+        ));
+        assert!(matches!(
+            parse_model_pull_policy_api_route("/model-pull-policies/allow-all.model.pull"),
+            Some(PolicyApiRoute::Item { ref name }) if name == "allow-all.model.pull"
+        ));
+        assert!(matches!(
+            parse_model_pull_policy_api_route(
+                "/model-pull-policies/checksum-required-remote.model.pull/activate"
+            ),
+            Some(PolicyApiRoute::Activate { ref name })
+                if name == "checksum-required-remote.model.pull"
+        ));
+    }
+
+    #[test]
+    fn parse_model_pull_verifier_api_routes() {
+        assert!(matches!(
+            parse_model_pull_verifier_api_route("/model-pull-verifiers"),
+            Some(PolicyApiRoute::Collection)
+        ));
+        assert!(matches!(
+            parse_model_pull_verifier_api_route("/v1/model-pull-verifiers/load"),
+            Some(PolicyApiRoute::Load)
+        ));
+        assert!(matches!(
+            parse_model_pull_verifier_api_route("/model-pull-verifiers/allow-all.model.verify"),
+            Some(PolicyApiRoute::Item { ref name }) if name == "allow-all.model.verify"
+        ));
+        assert!(matches!(
+            parse_model_pull_verifier_api_route(
+                "/model-pull-verifiers/sidecar-sha256.model.verify/activate"
+            ),
+            Some(PolicyApiRoute::Activate { ref name })
+                if name == "sidecar-sha256.model.verify"
+        ));
+    }
+
+    #[test]
     fn parse_tool_api_routes() {
         assert!(matches!(
             parse_tool_api_route("/tools"),
@@ -7532,6 +11737,19 @@ mod tests {
             parse_tool_api_route("/tools/plugins/browser_tool_plugin/unload"),
             Some(ToolApiRoute::PluginUnload { ref name }) if name == "browser_tool_plugin"
         ));
+    }
+
+    #[test]
+    fn parse_runtime_events_api_routes() {
+        assert!(matches!(
+            parse_runtime_events_api_route("/events"),
+            Some(RuntimeEventsApiRoute::Collection)
+        ));
+        assert!(matches!(
+            parse_runtime_events_api_route("/v1/events/stream"),
+            Some(RuntimeEventsApiRoute::Stream)
+        ));
+        assert!(parse_runtime_events_api_route("/events/live").is_none());
     }
 
     #[test]
@@ -7776,13 +11994,25 @@ mod tests {
         let scope = ManagementAuthScopeConfig::from_args(ManagementAuthScopeArg::ControlPlane, &[])
             .expect("scope");
         assert!(scope.requires_auth("/sessions"));
+        assert!(scope.requires_auth("/models/assets"));
+        assert!(scope.requires_auth("/v1/models/assets/demo"));
         assert!(scope.requires_auth("/v1/execution-policies/default.execution.policy"));
+        assert!(scope.requires_auth("/model-pull-policies/checksum-required-remote.model.pull"));
+        assert!(scope.requires_auth("/model-pull-verifiers/sidecar-sha256.model.verify"));
+        assert!(scope.requires_auth("/events"));
+        assert!(scope.requires_auth("/v1/events/stream"));
+        assert!(scope.requires_auth("/models/plan"));
+        assert!(scope.requires_auth("/v1/models/plan"));
         assert!(scope.requires_auth("/auth-policies"));
         assert!(scope.requires_auth("/tools/open"));
         assert!(scope.requires_auth("/browser/open"));
         assert!(scope.requires_auth("/v1/device/keyboard/type"));
         assert!(!scope.requires_auth("/generate"));
         assert!(!scope.requires_auth("/metrics"));
+        assert!(!scope.requires_auth("/openapi.yaml"));
+        assert!(!scope.requires_auth("/openapi.json"));
+        assert!(!scope.requires_auth("/v1/openapi.yaml"));
+        assert!(!scope.requires_auth("/v1/openapi.json"));
     }
 
     #[test]
@@ -8133,6 +12363,264 @@ mod tests {
     }
 
     #[test]
+    fn parse_tensor_split_accepts_ratio_list() {
+        assert_eq!(parse_tensor_split("3,2,1").unwrap(), vec![3.0, 2.0, 1.0]);
+        assert_eq!(
+            parse_tensor_split("1.5, 0.5 , 0").unwrap(),
+            vec![1.5, 0.5, 0.0]
+        );
+    }
+
+    #[test]
+    fn parse_tensor_split_rejects_invalid_values() {
+        assert!(parse_tensor_split("").is_err());
+        assert!(parse_tensor_split("0,0,0").is_err());
+        assert!(parse_tensor_split("1,-1").is_err());
+        assert!(parse_tensor_split("1,abc").is_err());
+    }
+
+    #[test]
+    fn parse_positive_u32_rejects_zero() {
+        assert_eq!(parse_positive_u32("8").unwrap(), 8);
+        assert!(parse_positive_u32("0").is_err());
+    }
+
+    #[test]
+    fn parse_generate_tiered_loading_flags() {
+        let cli = Cli::try_parse_from([
+            "loci",
+            "generate",
+            "--model",
+            "model.gguf",
+            "--no-mmap",
+            "--mlock",
+            "--no-kv-offload",
+            "--no-op-offload",
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Commands::Generate(cmd)) => {
+                assert!(!cmd.engine.resolved_mmap());
+                assert!(cmd.engine.resolved_mlock());
+                assert!(!cmd.engine.resolved_kv_offload());
+                assert!(!cmd.engine.resolved_op_offload());
+            }
+            _ => panic!("expected generate command"),
+        }
+    }
+
+    #[test]
+    fn parse_generate_multi_gpu_split_flags() {
+        let cli = Cli::try_parse_from([
+            "loci",
+            "generate",
+            "--model",
+            "model.gguf",
+            "--gpu-split-mode",
+            "row",
+            "--main-gpu",
+            "1",
+            "--tensor-split",
+            "3,2,1",
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Commands::Generate(cmd)) => {
+                assert_eq!(cmd.engine.gpu_split_mode, GpuSplitModeArg::Row);
+                assert_eq!(cmd.engine.resolved_gpu_split_mode(), GpuSplitMode::Row);
+                assert_eq!(cmd.engine.main_gpu, 1);
+                assert_eq!(
+                    cmd.engine.resolved_tensor_split(),
+                    Some(vec![3.0, 2.0, 1.0])
+                );
+            }
+            _ => panic!("expected generate command"),
+        }
+    }
+
+    #[test]
+    fn parse_generate_multi_gpu_split_defaults() {
+        let cli = Cli::try_parse_from(["loci", "generate", "--model", "model.gguf"])
+            .expect("parse should succeed");
+
+        match cli.command {
+            Some(Commands::Generate(cmd)) => {
+                assert_eq!(cmd.engine.gpu_split_mode, GpuSplitModeArg::Layer);
+                assert_eq!(cmd.engine.resolved_gpu_split_mode(), GpuSplitMode::Layer);
+                assert_eq!(cmd.engine.main_gpu, 0);
+                assert!(cmd.engine.resolved_tensor_split().is_none());
+            }
+            _ => panic!("expected generate command"),
+        }
+    }
+
+    #[test]
+    fn parse_generate_gpu_fallback_flags() {
+        let cli = Cli::try_parse_from([
+            "loci",
+            "generate",
+            "--model",
+            "model.gguf",
+            "--auto-gpu-fallback",
+            "--gpu-fallback-step",
+            "12",
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Commands::Generate(cmd)) => {
+                assert!(cmd.engine.auto_gpu_fallback);
+                assert_eq!(cmd.engine.gpu_fallback_step, 12);
+                assert_eq!(cmd.engine.resolved_gpu_fallback_step(), Some(12));
+            }
+            _ => panic!("expected generate command"),
+        }
+    }
+
+    #[test]
+    fn parse_generate_auto_resource_plan_flag() {
+        let cli = Cli::try_parse_from([
+            "loci",
+            "generate",
+            "--model",
+            "model.gguf",
+            "--auto-resource-plan",
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Commands::Generate(cmd)) => {
+                assert!(cmd.engine.auto_resource_plan);
+                assert!(cmd.engine.resolved_auto_resource_plan());
+            }
+            _ => panic!("expected generate command"),
+        }
+    }
+
+    #[test]
+    fn parse_model_plan_command() {
+        let cli = Cli::try_parse_from([
+            "loci",
+            "model",
+            "plan",
+            "--model",
+            "model.gguf",
+            "--context-length",
+            "8192",
+            "--json",
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Some(Commands::Model(cmd)) => match cmd.command {
+                ModelAction::Plan {
+                    model,
+                    model_id,
+                    context_size,
+                    json,
+                } => {
+                    assert_eq!(model, Some(PathBuf::from("model.gguf")));
+                    assert_eq!(model_id, None);
+                    assert_eq!(context_size, 8192);
+                    assert!(json);
+                }
+                _ => panic!("expected model plan command"),
+            },
+            _ => panic!("expected model command"),
+        }
+    }
+
+    #[test]
+    fn parse_model_store_api_route_collection_item_and_pull() {
+        assert!(matches!(
+            parse_model_store_api_route("/models/assets"),
+            Some(ModelStoreApiRoute::Collection)
+        ));
+        assert!(matches!(
+            parse_model_store_api_route("/v1/models/assets"),
+            Some(ModelStoreApiRoute::Collection)
+        ));
+        assert!(matches!(
+            parse_model_store_api_route("/models/assets/pull"),
+            Some(ModelStoreApiRoute::Pull)
+        ));
+        assert!(matches!(
+            parse_model_store_api_route("/models/assets/pulls"),
+            Some(ModelStoreApiRoute::PullJobsCollection)
+        ));
+        assert!(matches!(
+            parse_model_store_api_route("/models/assets/pulls/job-1"),
+            Some(ModelStoreApiRoute::PullJobItem { ref id }) if id == "job-1"
+        ));
+        assert!(matches!(
+            parse_model_store_api_route("/models/assets/pulls/job-1/cancel"),
+            Some(ModelStoreApiRoute::PullJobCancel { ref id }) if id == "job-1"
+        ));
+        assert!(matches!(
+            parse_model_store_api_route("/v1/models/assets/pulls/job-1/events"),
+            Some(ModelStoreApiRoute::PullJobEvents { ref id }) if id == "job-1"
+        ));
+        assert!(matches!(
+            parse_model_store_api_route("/v1/models/assets/demo-id"),
+            Some(ModelStoreApiRoute::Item { ref id }) if id == "demo-id"
+        ));
+        assert!(parse_model_store_api_route("/models/assets/demo-id/remove").is_none());
+    }
+
+    #[test]
+    fn request_query_bool_parses_common_values() {
+        assert_eq!(
+            request_query_bool("/models/assets/id?delete_file=true", "delete_file"),
+            Some(true)
+        );
+        assert_eq!(
+            request_query_bool("/models/assets/id?delete_file=1", "delete_file"),
+            Some(true)
+        );
+        assert_eq!(
+            request_query_bool("/models/assets/id?delete_file=false", "delete_file"),
+            Some(false)
+        );
+        assert_eq!(
+            request_query_bool("/models/assets/id?other=x", "delete_file"),
+            None
+        );
+        assert_eq!(
+            request_query_bool("/models/assets/id?delete_file=maybe", "delete_file"),
+            None
+        );
+    }
+
+    #[test]
+    fn request_query_usize_parses_limit_and_replay() {
+        assert_eq!(request_query_usize("/events?limit=50", "limit"), Some(50));
+        assert_eq!(
+            request_query_usize("/events/stream?replay=128&follow=false", "replay"),
+            Some(128)
+        );
+        assert_eq!(request_query_usize("/events?limit=x", "limit"), None);
+        assert_eq!(request_query_usize("/events?other=1", "limit"), None);
+    }
+
+    #[test]
+    fn parse_generate_tiered_loading_defaults() {
+        let cli = Cli::try_parse_from(["loci", "generate", "--model", "model.gguf"])
+            .expect("parse should succeed");
+
+        match cli.command {
+            Some(Commands::Generate(cmd)) => {
+                assert!(cmd.engine.resolved_mmap());
+                assert!(!cmd.engine.resolved_mlock());
+                assert!(cmd.engine.resolved_kv_offload());
+                assert!(cmd.engine.resolved_op_offload());
+            }
+            _ => panic!("expected generate command"),
+        }
+    }
+
+    #[test]
     fn parse_http_request_from_reader_success() {
         let raw = b"POST /generate HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer abc\r\nContent-Length: 18\r\n\r\n{\"prompt\":\"hello\"}";
         let mut reader = BufReader::new(Cursor::new(raw.as_slice()));
@@ -8181,5 +12669,50 @@ mod tests {
             HttpRequestParseError::InvalidContentLength(_)
         ));
         assert_eq!(err.status_code(), "400 Bad Request");
+    }
+
+    #[test]
+    fn openapi_spec_request_matches_base_and_v1_paths() {
+        assert_eq!(
+            requested_openapi_spec_format("/openapi.yaml"),
+            Some(OpenApiSpecFormat::Yaml)
+        );
+        assert_eq!(
+            requested_openapi_spec_format("/v1/openapi.yaml"),
+            Some(OpenApiSpecFormat::Yaml)
+        );
+        assert_eq!(
+            requested_openapi_spec_format("/openapi.yaml?format=yaml"),
+            Some(OpenApiSpecFormat::Yaml)
+        );
+        assert_eq!(
+            requested_openapi_spec_format("/openapi.json"),
+            Some(OpenApiSpecFormat::Json)
+        );
+        assert_eq!(
+            requested_openapi_spec_format("/v1/openapi.json"),
+            Some(OpenApiSpecFormat::Json)
+        );
+        assert_eq!(requested_openapi_spec_format("/openapi.txt"), None);
+    }
+
+    #[test]
+    fn embedded_openapi_spec_contains_core_routes() {
+        assert!(OPENAPI_SPEC_YAML.contains("openapi: 3.0.3"));
+        assert!(OPENAPI_SPEC_YAML.contains("/openapi.yaml:"));
+        assert!(OPENAPI_SPEC_YAML.contains("/openapi.json:"));
+        assert!(OPENAPI_SPEC_YAML.contains("/events:"));
+        assert!(OPENAPI_SPEC_YAML.contains("/models/plan:"));
+        assert!(OPENAPI_SPEC_YAML.contains("/models/assets:"));
+    }
+
+    #[test]
+    fn openapi_json_spec_contains_core_routes() {
+        let json = build_openapi_json_spec().expect("json conversion should succeed");
+        assert!(json.contains("\"openapi\": \"3.0.3\""));
+        assert!(json.contains("\"/openapi.json\""));
+        assert!(json.contains("\"/events\""));
+        assert!(json.contains("\"/models/assets\""));
+        assert!(json.contains("\"/sessions\""));
     }
 }

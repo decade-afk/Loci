@@ -196,11 +196,12 @@ impl ResourceManager {
     /// Acquire a resource slot for an operation
     pub fn acquire(&self) -> Result<ResourceGuard> {
         let mut ops = self.current_ops.lock();
-        
+
         if *ops >= self.limits.max_concurrent_ops {
-            return Err(LociError::ResourceExhausted(
-                format!("Maximum concurrent operations ({}) reached", self.limits.max_concurrent_ops)
-            ));
+            return Err(LociError::ResourceExhausted(format!(
+                "Maximum concurrent operations ({}) reached",
+                self.limits.max_concurrent_ops
+            )));
         }
 
         *ops += 1;
@@ -209,9 +210,7 @@ impl ResourceManager {
         // Check resource limits
         self.check_limits()?;
 
-        Ok(ResourceGuard {
-            ops: self.current_ops.clone(),
-        })
+        Ok(ResourceGuard::new(self.current_ops.clone()))
     }
 
     /// Check if current usage exceeds limits
@@ -219,26 +218,32 @@ impl ResourceManager {
         let stats = self.get_stats();
 
         // Check memory limits
-        if self.limits.max_memory_bytes > 0 && stats.memory.current_usage > self.limits.max_memory_bytes {
-            return Err(LociError::OutOfMemory(
-                format!("Memory usage {} exceeds limit {}", 
-                    stats.memory.current_usage, self.limits.max_memory_bytes)
-            ));
+        if self.limits.max_memory_bytes > 0
+            && stats.memory.current_usage > self.limits.max_memory_bytes
+        {
+            return Err(LociError::OutOfMemory(format!(
+                "Memory usage {} exceeds limit {}",
+                stats.memory.current_usage, self.limits.max_memory_bytes
+            )));
         }
 
-        if self.limits.max_memory_percent > 0.0 && stats.memory.usage_percent > self.limits.max_memory_percent {
-            return Err(LociError::OutOfMemory(
-                format!("Memory usage {:.1}% exceeds limit {:.1}%", 
-                    stats.memory.usage_percent, self.limits.max_memory_percent)
-            ));
+        if self.limits.max_memory_percent > 0.0
+            && stats.memory.usage_percent > self.limits.max_memory_percent
+        {
+            return Err(LociError::OutOfMemory(format!(
+                "Memory usage {:.1}% exceeds limit {:.1}%",
+                stats.memory.usage_percent, self.limits.max_memory_percent
+            )));
         }
 
         // Check CPU limits
-        if self.limits.max_cpu_percent > 0.0 && stats.cpu.usage_percent > self.limits.max_cpu_percent {
-            return Err(LociError::ResourceExhausted(
-                format!("CPU usage {:.1}% exceeds limit {:.1}%", 
-                    stats.cpu.usage_percent, self.limits.max_cpu_percent)
-            ));
+        if self.limits.max_cpu_percent > 0.0
+            && stats.cpu.usage_percent > self.limits.max_cpu_percent
+        {
+            return Err(LociError::ResourceExhausted(format!(
+                "CPU usage {:.1}% exceeds limit {:.1}%",
+                stats.cpu.usage_percent, self.limits.max_cpu_percent
+            )));
         }
 
         Ok(())
@@ -294,7 +299,7 @@ impl ResourceManager {
 
         let now = Instant::now();
         let mut last_update = self.last_update.lock();
-        
+
         if now.duration_since(*last_update) < self.config.update_interval {
             return;
         }
@@ -322,7 +327,10 @@ impl ResourceManager {
         if self.config.track_memory {
             let allocs = self.allocations.lock();
             stats.memory.total_allocated = allocs.values().sum();
-            stats.memory.available = self.limits.max_memory_bytes.saturating_sub(stats.memory.current_usage);
+            stats.memory.available = self
+                .limits
+                .max_memory_bytes
+                .saturating_sub(stats.memory.current_usage);
         }
     }
 
@@ -423,9 +431,8 @@ mod tests {
 
     #[test]
     fn test_acquire_release() {
-        let manager = ResourceManager::with_limits(
-            ResourceLimits::new().with_max_concurrent_ops(2)
-        );
+        let manager =
+            ResourceManager::with_limits(ResourceLimits::new().with_max_concurrent_ops(2));
 
         let guard1 = manager.acquire().unwrap();
         assert_eq!(manager.active_operations(), 1);
@@ -446,7 +453,7 @@ mod tests {
     #[test]
     fn test_memory_tracking() {
         let manager = ResourceManager::new();
-        
+
         manager.register_allocation("test".to_string(), 1024);
         let stats = manager.get_stats();
         assert_eq!(stats.memory.current_usage, 1024);
@@ -459,7 +466,7 @@ mod tests {
     #[test]
     fn test_peak_memory() {
         let manager = ResourceManager::new();
-        
+
         manager.register_allocation("alloc1".to_string(), 1000);
         assert_eq!(manager.peak_memory(), 1000);
 
@@ -475,11 +482,11 @@ mod tests {
         let limits = ResourceLimits::new()
             .with_max_memory_bytes(1024)
             .with_max_concurrent_ops(1);
-        
+
         let manager = ResourceManager::with_limits(limits);
-        
+
         manager.register_allocation("test".to_string(), 1024);
-        
+
         // Should fail due to memory limit
         assert!(manager.acquire().is_err());
     }

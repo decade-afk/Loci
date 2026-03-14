@@ -199,8 +199,8 @@ impl StdioMcpClient {
     }
 
     fn write_message(&mut self, payload: &Value) -> Result<()> {
-        let encoded =
-            serde_json::to_string(payload).map_err(|e| LociError::SerializationError(e.to_string()))?;
+        let encoded = serde_json::to_string(payload)
+            .map_err(|e| LociError::SerializationError(e.to_string()))?;
         if encoded.contains('\n') {
             return Err(LociError::SerializationError(
                 "MCP stdio payload contains embedded newline".to_string(),
@@ -227,7 +227,10 @@ impl StdioMcpClient {
     fn read_message(&mut self) -> Result<Value> {
         loop {
             let mut line = String::new();
-            let read_bytes = self.stdout.read_line(&mut line).map_err(LociError::IoError)?;
+            let read_bytes = self
+                .stdout
+                .read_line(&mut line)
+                .map_err(LociError::IoError)?;
             if read_bytes == 0 {
                 return Err(LociError::NetworkError(format!(
                     "MCP server '{}' closed stdout",
@@ -368,8 +371,9 @@ impl McpClient for StdioMcpClient {
             .and_then(Value::as_bool)
             .unwrap_or(false)
         {
-            let details = extract_mcp_text_content(&result)
-                .unwrap_or_else(|| serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string()));
+            let details = extract_mcp_text_content(&result).unwrap_or_else(|| {
+                serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string())
+            });
             return Err(LociError::Other(format!(
                 "MCP tool '{}' on server '{}' returned error: {}",
                 name, self.server_name, details
@@ -679,12 +683,9 @@ mod tests {
         let mut manager = FunctionCallingManager::new();
         let client: Arc<Mutex<Box<dyn McpClient>>> =
             Arc::new(Mutex::new(Box::new(MockMcpClient::new())));
-        let report = register_mcp_client_tools(
-            &mut manager,
-            client,
-            McpToolRegistrationOptions::default(),
-        )
-        .unwrap();
+        let report =
+            register_mcp_client_tools(&mut manager, client, McpToolRegistrationOptions::default())
+                .unwrap();
 
         assert_eq!(report.server_name, "mock");
         assert_eq!(report.registered_tools.len(), 1);

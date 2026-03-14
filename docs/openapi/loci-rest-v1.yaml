@@ -1,12 +1,12 @@
-﻿openapi: 3.0.3
+openapi: 3.0.3
 info:
   title: Loci REST API
   version: "0.1.0"
   description: |
-    REST endpoints exposed by `loci serve`.
+    Core REST and discovery endpoints exposed by `loci serve`.
     Prompt safety limit is configured at process startup via CLI/env:
     `--max-prompt-bytes` (minimum 1024) or `LOCI_MAX_PROMPT_BYTES`.
-    If both are set, CLI value takes priority.
+    If both are set, the CLI value takes priority.
 servers:
   - url: http://127.0.0.1:8080
 paths:
@@ -34,7 +34,7 @@ paths:
                 $ref: "#/components/schemas/HealthResponse"
   /info:
     get:
-      summary: Runtime model information
+      summary: Runtime model information and integration discovery
       operationId: info
       responses:
         "200":
@@ -45,7 +45,7 @@ paths:
                 $ref: "#/components/schemas/InfoResponse"
   /v1/info:
     get:
-      summary: Runtime model information (versioned path)
+      summary: Runtime model information and integration discovery (versioned path)
       operationId: infoV1
       responses:
         "200":
@@ -54,6 +54,648 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InfoResponse"
+  /metrics:
+    get:
+      summary: Runtime request metrics
+      operationId: metrics
+      responses:
+        "200":
+          description: Metrics snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetricsResponse"
+  /v1/metrics:
+    get:
+      summary: Runtime request metrics (versioned path)
+      operationId: metricsV1
+      responses:
+        "200":
+          description: Metrics snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetricsResponse"
+  /events:
+    get:
+      summary: Read recent runtime control-plane events
+      operationId: listRuntimeEvents
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Return at most the most recent N events.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+      responses:
+        "200":
+          description: Recent runtime events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeEventListResponse"
+  /v1/events:
+    get:
+      summary: Read recent runtime control-plane events (versioned path)
+      operationId: listRuntimeEventsV1
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Return at most the most recent N events.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+      responses:
+        "200":
+          description: Recent runtime events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeEventListResponse"
+  /events/stream:
+    get:
+      summary: Stream runtime control-plane events as NDJSON
+      operationId: streamRuntimeEvents
+      parameters:
+        - name: replay
+          in: query
+          required: false
+          description: Replay at most the most recent N events before following the live stream.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+        - name: follow
+          in: query
+          required: false
+          description: Keep the HTTP connection open and continue streaming new events.
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: NDJSON stream of runtime events
+          content:
+            application/x-ndjson:
+              description: Each line is a JSON object matching `RuntimeEvent`.
+              schema:
+                $ref: "#/components/schemas/RuntimeEvent"
+  /v1/events/stream:
+    get:
+      summary: Stream runtime control-plane events as NDJSON (versioned path)
+      operationId: streamRuntimeEventsV1
+      parameters:
+        - name: replay
+          in: query
+          required: false
+          description: Replay at most the most recent N events before following the live stream.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+        - name: follow
+          in: query
+          required: false
+          description: Keep the HTTP connection open and continue streaming new events.
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: NDJSON stream of runtime events
+          content:
+            application/x-ndjson:
+              description: Each line is a JSON object matching `RuntimeEvent`.
+              schema:
+                $ref: "#/components/schemas/RuntimeEvent"
+  /openapi.yaml:
+    get:
+      summary: Embedded OpenAPI specification
+      operationId: openapiSpec
+      responses:
+        "200":
+          description: YAML OpenAPI document
+          content:
+            application/yaml:
+              schema:
+                type: string
+  /v1/openapi.yaml:
+    get:
+      summary: Embedded OpenAPI specification (versioned path)
+      operationId: openapiSpecV1
+      responses:
+        "200":
+          description: YAML OpenAPI document
+          content:
+            application/yaml:
+              schema:
+                type: string
+  /openapi.json:
+    get:
+      summary: Embedded OpenAPI specification in JSON form
+      operationId: openapiSpecJson
+      responses:
+        "200":
+          description: JSON OpenAPI document
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /v1/openapi.json:
+    get:
+      summary: Embedded OpenAPI specification in JSON form (versioned path)
+      operationId: openapiSpecJsonV1
+      responses:
+        "200":
+          description: JSON OpenAPI document
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /models/plan:
+    post:
+      summary: Inspect model placement and memory plan without loading the runtime model
+      operationId: modelPlan
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelPlanRequest"
+      responses:
+        "200":
+          description: Placement plan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourcePlanReport"
+        "400":
+          description: Invalid request or model reference
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Control-plane auth rejected the request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+        "500":
+          description: Internal planning error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/models/plan:
+    post:
+      summary: Inspect model placement and memory plan (versioned path)
+      operationId: modelPlanV1
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelPlanRequest"
+      responses:
+        "200":
+          description: Placement plan
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourcePlanReport"
+        "400":
+          description: Invalid request or model reference
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Control-plane auth rejected the request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+        "500":
+          description: Internal planning error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /models/assets:
+    get:
+      summary: List registered model assets
+      operationId: listModelAssets
+      responses:
+        "200":
+          description: Model asset inventory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelAssetListResponse"
+    post:
+      summary: Register an existing local model file without copying it
+      operationId: addModelAsset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelAssetRegisterRequest"
+      responses:
+        "200":
+          description: Registered model asset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StoredModel"
+        "400":
+          description: Invalid register request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/models/assets:
+    get:
+      summary: List registered model assets (versioned path)
+      operationId: listModelAssetsV1
+      responses:
+        "200":
+          description: Model asset inventory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelAssetListResponse"
+    post:
+      summary: Register an existing local model file without copying it (versioned path)
+      operationId: addModelAssetV1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelAssetRegisterRequest"
+      responses:
+        "200":
+          description: Registered model asset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StoredModel"
+        "400":
+          description: Invalid register request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /models/assets/pull:
+    post:
+      summary: Import or download a model into the managed store
+      operationId: pullModelAsset
+      parameters:
+        - name: stream
+          in: query
+          required: false
+          description: Return progress as NDJSON events instead of a single JSON response.
+          schema:
+            type: boolean
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelAssetPullRequest"
+      responses:
+        "200":
+          description: Imported model asset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StoredModel"
+            application/x-ndjson:
+              description: Each line is a JSON object matching `ModelAssetPullStreamEvent`.
+              schema:
+                $ref: "#/components/schemas/ModelAssetPullStreamEvent"
+        "400":
+          description: Invalid pull request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/models/assets/pull:
+    post:
+      summary: Import or download a model into the managed store (versioned path)
+      operationId: pullModelAssetV1
+      parameters:
+        - name: stream
+          in: query
+          required: false
+          description: Return progress as NDJSON events instead of a single JSON response.
+          schema:
+            type: boolean
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelAssetPullRequest"
+      responses:
+        "200":
+          description: Imported model asset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StoredModel"
+            application/x-ndjson:
+              description: Each line is a JSON object matching `ModelAssetPullStreamEvent`.
+              schema:
+                $ref: "#/components/schemas/ModelAssetPullStreamEvent"
+        "400":
+          description: Invalid pull request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /models/assets/pulls:
+    get:
+      summary: List background model pull jobs
+      operationId: listModelPullJobs
+      responses:
+        "200":
+          description: Model pull jobs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelPullJobListResponse"
+    post:
+      summary: Start a background model pull job
+      operationId: createModelPullJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelAssetPullRequest"
+      responses:
+        "202":
+          description: Background model pull job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelPullJobSnapshot"
+        "400":
+          description: Invalid pull job request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/models/assets/pulls:
+    get:
+      summary: List background model pull jobs (versioned path)
+      operationId: listModelPullJobsV1
+      responses:
+        "200":
+          description: Model pull jobs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelPullJobListResponse"
+    post:
+      summary: Start a background model pull job (versioned path)
+      operationId: createModelPullJobV1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelAssetPullRequest"
+      responses:
+        "202":
+          description: Background model pull job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelPullJobSnapshot"
+        "400":
+          description: Invalid pull job request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /models/assets/pulls/{job_id}:
+    get:
+      summary: Get one background model pull job
+      operationId: getModelPullJob
+      parameters:
+        - $ref: "#/components/parameters/ModelPullJobId"
+      responses:
+        "200":
+          description: Model pull job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelPullJobSnapshot"
+        "404":
+          description: Model pull job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/models/assets/pulls/{job_id}:
+    get:
+      summary: Get one background model pull job (versioned path)
+      operationId: getModelPullJobV1
+      parameters:
+        - $ref: "#/components/parameters/ModelPullJobId"
+      responses:
+        "200":
+          description: Model pull job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelPullJobSnapshot"
+        "404":
+          description: Model pull job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /models/assets/pulls/{job_id}/cancel:
+    post:
+      summary: Request cancellation for one background model pull job
+      operationId: cancelModelPullJob
+      parameters:
+        - $ref: "#/components/parameters/ModelPullJobId"
+      responses:
+        "200":
+          description: Cancellation accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelPullJobSnapshot"
+        "404":
+          description: Model pull job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Model pull job already finished
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/models/assets/pulls/{job_id}/cancel:
+    post:
+      summary: Request cancellation for one background model pull job (versioned path)
+      operationId: cancelModelPullJobV1
+      parameters:
+        - $ref: "#/components/parameters/ModelPullJobId"
+      responses:
+        "200":
+          description: Cancellation accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelPullJobSnapshot"
+        "404":
+          description: Model pull job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Model pull job already finished
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /models/assets/pulls/{job_id}/events:
+    get:
+      summary: Subscribe to one background model pull job as NDJSON
+      operationId: streamModelPullJobEvents
+      parameters:
+        - $ref: "#/components/parameters/ModelPullJobId"
+      responses:
+        "200":
+          description: Each line is a JSON object matching `ModelPullJobEvent`.
+          content:
+            application/x-ndjson:
+              schema:
+                $ref: "#/components/schemas/ModelPullJobEvent"
+        "404":
+          description: Model pull job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/models/assets/pulls/{job_id}/events:
+    get:
+      summary: Subscribe to one background model pull job as NDJSON (versioned path)
+      operationId: streamModelPullJobEventsV1
+      parameters:
+        - $ref: "#/components/parameters/ModelPullJobId"
+      responses:
+        "200":
+          description: Each line is a JSON object matching `ModelPullJobEvent`.
+          content:
+            application/x-ndjson:
+              schema:
+                $ref: "#/components/schemas/ModelPullJobEvent"
+        "404":
+          description: Model pull job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /models/assets/{id}:
+    get:
+      summary: Get one model asset by id
+      operationId: getModelAsset
+      parameters:
+        - $ref: "#/components/parameters/ModelAssetId"
+      responses:
+        "200":
+          description: Model asset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StoredModel"
+        "404":
+          description: Model asset not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      summary: Remove one model asset record
+      operationId: removeModelAsset
+      parameters:
+        - $ref: "#/components/parameters/ModelAssetId"
+        - name: delete_file
+          in: query
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Removed model asset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelAssetRemoveResponse"
+        "404":
+          description: Model asset not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/models/assets/{id}:
+    get:
+      summary: Get one model asset by id (versioned path)
+      operationId: getModelAssetV1
+      parameters:
+        - $ref: "#/components/parameters/ModelAssetId"
+      responses:
+        "200":
+          description: Model asset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StoredModel"
+        "404":
+          description: Model asset not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      summary: Remove one model asset record (versioned path)
+      operationId: removeModelAssetV1
+      parameters:
+        - $ref: "#/components/parameters/ModelAssetId"
+        - name: delete_file
+          in: query
+          required: false
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Removed model asset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelAssetRemoveResponse"
+        "404":
+          description: Model asset not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /generate:
     post:
       summary: Generate text
@@ -124,7 +766,901 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /v1/models:
+    get:
+      summary: OpenAI-compatible model listing
+      operationId: openAiModels
+      responses:
+        "200":
+          description: Compatibility model list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenAiModelListResponse"
+  /v1/chat/completions:
+    post:
+      summary: OpenAI-compatible chat completions
+      operationId: openAiChatCompletions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OpenAiChatCompletionsRequest"
+      responses:
+        "200":
+          description: Compatibility chat response or stream
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenAiChatCompletionsResponse"
+            text/event-stream:
+              schema:
+                type: string
+  /v1/embeddings:
+    post:
+      summary: OpenAI-compatible embeddings
+      operationId: openAiEmbeddings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OpenAiEmbeddingsRequest"
+      responses:
+        "200":
+          description: Compatibility embeddings response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenAiEmbeddingsResponse"
+  /api/tags:
+    get:
+      summary: Ollama-compatible model tags
+      operationId: ollamaTags
+      responses:
+        "200":
+          description: Compatibility tag list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OllamaTagsResponse"
+  /api/generate:
+    post:
+      summary: Ollama-compatible generation
+      operationId: ollamaGenerate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OllamaGenerateRequest"
+      responses:
+        "200":
+          description: Compatibility generate response or stream
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OllamaGenerateResponse"
+            application/x-ndjson:
+              schema:
+                type: string
+  /sessions:
+    get:
+      summary: List active and persisted sessions
+      operationId: listSessions
+      responses:
+        "200":
+          description: Session inventory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionListResponse"
+        "401":
+          description: Control-plane auth rejected the request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+    post:
+      summary: Create a new persisted or in-memory session
+      operationId: createSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionCreateRequest"
+      responses:
+        "200":
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionCreateResponse"
+        "400":
+          description: Invalid request or model reference
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Control-plane auth rejected the request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+  /sessions/{sessionId}:
+    get:
+      summary: Get one session summary and record history
+      operationId: getSession
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: Session detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionDetailResponse"
+        "401":
+          description: Control-plane auth rejected the request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+        "404":
+          description: Session not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /sessions/{sessionId}/generate:
+    post:
+      summary: Generate in the context of one session
+      operationId: generateSession
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionGenerateRequest"
+      responses:
+        "200":
+          description: Session generation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionGenerateResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Control-plane auth rejected the request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+        "404":
+          description: Session not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /sessions/{sessionId}/suspend:
+    post:
+      summary: Suspend one session with external wait metadata
+      operationId: suspendSession
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionSuspendRequest"
+      responses:
+        "200":
+          description: Session mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionMutationResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Control-plane auth rejected the request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+        "404":
+          description: Session not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /sessions/{sessionId}/resume:
+    post:
+      summary: Resume one suspended session with external data
+      operationId: resumeSession
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionResumeRequest"
+      responses:
+        "200":
+          description: Session mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionMutationResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Control-plane auth rejected the request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+        "404":
+          description: Session not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /sessions/{sessionId}/save:
+    post:
+      summary: Persist one active session into the session store
+      operationId: saveSession
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: Session mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionMutationResponse"
+  /sessions/{sessionId}/restore:
+    post:
+      summary: Restore one persisted session into memory
+      operationId: restoreSession
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: Session mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionMutationResponse"
+  /sessions/{sessionId}/clear:
+    post:
+      summary: Clear one session context/history
+      operationId: clearSession
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionClearRequest"
+      responses:
+        "200":
+          description: Session mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionMutationResponse"
+  /sessions/{sessionId}/destroy:
+    post:
+      summary: Destroy one active session and delete persisted state
+      operationId: destroySessionPost
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: Session mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionMutationResponse"
+    delete:
+      summary: Destroy one active session and delete persisted state
+      operationId: destroySessionDelete
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: Session mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionMutationResponse"
+  /tools:
+    get:
+      summary: List registered callable tools
+      operationId: listTools
+      responses:
+        "200":
+          description: Tool definitions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ToolListResponse"
+  /tools/{name}:
+    get:
+      summary: Get one registered tool definition
+      operationId: getTool
+      parameters:
+        - $ref: "#/components/parameters/ToolName"
+      responses:
+        "200":
+          description: Tool definition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FunctionDefinition"
+        "404":
+          description: Tool not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /tools/invoke:
+    post:
+      summary: Invoke one registered tool directly
+      operationId: invokeTool
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ToolInvokeRequest"
+      responses:
+        "200":
+          description: Tool invocation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ToolInvokeResponse"
+        "400":
+          description: Invalid tool invocation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ToolInvokeResponse"
+  /tools/plugins:
+    get:
+      summary: List loaded runtime tool plugins
+      operationId: listToolPlugins
+      responses:
+        "200":
+          description: Tool plugin descriptors
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ToolPluginRegistryListResponse"
+  /tools/plugins/load:
+    post:
+      summary: Load one runtime tool plugin
+      operationId: loadToolPlugin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimePluginLoadRequest"
+      responses:
+        "200":
+          description: Tool plugin mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ToolPluginRegistryMutationResponse"
+        "400":
+          description: Invalid load request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /tools/plugins/{name}:
+    get:
+      summary: Get one loaded runtime tool plugin
+      operationId: getToolPlugin
+      parameters:
+        - $ref: "#/components/parameters/ToolName"
+      responses:
+        "200":
+          description: Tool plugin descriptor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ToolPluginRegistryMutationResponse"
+        "404":
+          description: Tool plugin not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /tools/plugins/{name}/reload:
+    post:
+      summary: Reload one runtime tool plugin
+      operationId: reloadToolPlugin
+      parameters:
+        - $ref: "#/components/parameters/ToolName"
+      responses:
+        "200":
+          description: Tool plugin mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ToolPluginRegistryMutationResponse"
+  /tools/plugins/{name}/unload:
+    post:
+      summary: Unload one runtime tool plugin
+      operationId: unloadToolPlugin
+      parameters:
+        - $ref: "#/components/parameters/ToolName"
+      responses:
+        "200":
+          description: Tool plugin mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ToolPluginRegistryMutationResponse"
+  /dispatch-policies:
+    get:
+      summary: List serve dispatch policies
+      operationId: listDispatchPolicies
+      responses:
+        "200":
+          description: Dispatch policy descriptors
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryListResponse"
+  /dispatch-policies/{name}:
+    get:
+      summary: Get one serve dispatch policy descriptor
+      operationId: getDispatchPolicy
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Policy descriptor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryEntryResponse"
+  /dispatch-policies/load:
+    post:
+      summary: Load one serve dispatch policy plugin
+      operationId: loadDispatchPolicy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimePluginLoadRequest"
+      responses:
+        "200":
+          description: Policy mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /dispatch-policies/{name}/activate:
+    post:
+      summary: Activate one serve dispatch policy
+      operationId: activateDispatchPolicy
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Policy mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /dispatch-policies/{name}/reload:
+    post:
+      summary: Reload one serve dispatch policy
+      operationId: reloadDispatchPolicy
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Policy mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /dispatch-policies/{name}/unload:
+    post:
+      summary: Unload one serve dispatch policy
+      operationId: unloadDispatchPolicy
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Policy mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /execution-policies:
+    get:
+      summary: List execution policies
+      operationId: listExecutionPolicies
+      responses:
+        "200":
+          description: Execution policy descriptors
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryListResponse"
+  /execution-policies/{name}:
+    get:
+      summary: Get one execution policy descriptor
+      operationId: getExecutionPolicy
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Policy descriptor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryEntryResponse"
+  /execution-policies/load:
+    post:
+      summary: Load one execution policy plugin
+      operationId: loadExecutionPolicy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimePluginLoadRequest"
+      responses:
+        "200":
+          description: Policy mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /execution-policies/{name}/activate:
+    post:
+      summary: Activate one execution policy
+      operationId: activateExecutionPolicy
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Policy mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /execution-policies/{name}/reload:
+    post:
+      summary: Reload one execution policy
+      operationId: reloadExecutionPolicy
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Policy mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /execution-policies/{name}/unload:
+    post:
+      summary: Unload one execution policy
+      operationId: unloadExecutionPolicy
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Policy mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /auth-policies:
+    get:
+      summary: List management auth policies
+      operationId: listAuthPolicies
+      responses:
+        "200":
+          description: Management auth policy descriptors
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryListResponse"
+  /auth-policies/{name}:
+    get:
+      summary: Get one management auth policy descriptor
+      operationId: getAuthPolicy
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Policy descriptor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryEntryResponse"
+  /auth-policies/load:
+    post:
+      summary: Load one management auth policy plugin
+      operationId: loadAuthPolicy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimePluginLoadRequest"
+      responses:
+        "200":
+          description: Policy mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /auth-policies/{name}/activate:
+    post:
+      summary: Activate one management auth policy
+      operationId: activateAuthPolicy
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Policy mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /auth-policies/{name}/reload:
+    post:
+      summary: Reload one management auth policy
+      operationId: reloadAuthPolicy
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Policy mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /auth-policies/{name}/unload:
+    post:
+      summary: Unload one management auth policy
+      operationId: unloadAuthPolicy
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Policy mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /model-pull-policies:
+    get:
+      summary: List model pull policies
+      operationId: listModelPullPolicies
+      responses:
+        "200":
+          description: Model pull policy descriptors
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryListResponse"
+  /model-pull-policies/{name}:
+    get:
+      summary: Get one model pull policy descriptor
+      operationId: getModelPullPolicy
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Policy descriptor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryEntryResponse"
+  /model-pull-policies/load:
+    post:
+      summary: Load one model pull policy plugin
+      operationId: loadModelPullPolicy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimePluginLoadRequest"
+      responses:
+        "200":
+          description: Policy mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /model-pull-policies/{name}/activate:
+    post:
+      summary: Activate one model pull policy
+      operationId: activateModelPullPolicy
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Policy mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /model-pull-policies/{name}/reload:
+    post:
+      summary: Reload one model pull policy
+      operationId: reloadModelPullPolicy
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Policy mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /model-pull-policies/{name}/unload:
+    post:
+      summary: Unload one model pull policy
+      operationId: unloadModelPullPolicy
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Policy mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /model-pull-verifiers:
+    get:
+      summary: List model pull verifiers
+      operationId: listModelPullVerifiers
+      responses:
+        "200":
+          description: Model pull verifier descriptors
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryListResponse"
+  /model-pull-verifiers/{name}:
+    get:
+      summary: Get one model pull verifier descriptor
+      operationId: getModelPullVerifier
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Model pull verifier descriptor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryEntryResponse"
+  /model-pull-verifiers/load:
+    post:
+      summary: Load one model pull verifier plugin
+      operationId: loadModelPullVerifier
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuntimePluginLoadRequest"
+      responses:
+        "200":
+          description: Verifier mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /model-pull-verifiers/{name}/activate:
+    post:
+      summary: Activate one model pull verifier
+      operationId: activateModelPullVerifier
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Verifier mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /model-pull-verifiers/{name}/reload:
+    post:
+      summary: Reload one model pull verifier
+      operationId: reloadModelPullVerifier
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Verifier mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
+  /model-pull-verifiers/{name}/unload:
+    post:
+      summary: Unload one model pull verifier
+      operationId: unloadModelPullVerifier
+      parameters:
+        - $ref: "#/components/parameters/PolicyName"
+      responses:
+        "200":
+          description: Verifier mutation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyRegistryMutationResponse"
 components:
+  parameters:
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    ToolName:
+      name: name
+      in: path
+      required: true
+      schema:
+        type: string
+    PolicyName:
+      name: name
+      in: path
+      required: true
+      schema:
+        type: string
+    ModelAssetId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    ModelPullJobId:
+      name: job_id
+      in: path
+      required: true
+      schema:
+        type: string
   schemas:
     HealthResponse:
       type: object
@@ -133,9 +1669,91 @@ components:
         status:
           type: string
           example: ok
+    BackendInfo:
+      type: object
+      required: [name, version, has_gpu_support, supported_formats]
+      properties:
+        name:
+          type: string
+          example: llama.cpp
+        version:
+          type: string
+          example: 0.0.0
+        has_gpu_support:
+          type: boolean
+        supported_formats:
+          type: array
+          items:
+            type: string
+    EngineCapabilities:
+      type: object
+      required:
+        [streaming, embeddings, multimodal, resource_planning, openai_compat, ollama_compat, plugin_hot_reload]
+      properties:
+        streaming:
+          type: boolean
+        embeddings:
+          type: boolean
+        multimodal:
+          type: boolean
+        resource_planning:
+          type: boolean
+        openai_compat:
+          type: boolean
+        ollama_compat:
+          type: boolean
+        plugin_hot_reload:
+          type: boolean
+    EnginePlugins:
+      type: object
+      required:
+        [text_plugins_total, text_plugins_enabled, text_plugins_dynamic, text_plugins_wasm, tool_plugins_total]
+      properties:
+        text_plugins_total:
+          type: integer
+          format: int32
+        text_plugins_enabled:
+          type: integer
+          format: int32
+        text_plugins_dynamic:
+          type: integer
+          format: int32
+        text_plugins_wasm:
+          type: integer
+          format: int32
+        tool_plugins_total:
+          type: integer
+          format: int32
+    EngineTools:
+      type: object
+      required: [registered_functions, tool_plugin_functions]
+      properties:
+        registered_functions:
+          type: integer
+          format: int32
+        tool_plugin_functions:
+          type: integer
+          format: int32
+    EngineIntegrations:
+      type: object
+      required: [rest, c_api, plugin_upgradeable, openapi_spec_path, openapi_spec_json_path]
+      properties:
+        rest:
+          type: boolean
+        c_api:
+          type: boolean
+        plugin_upgradeable:
+          type: boolean
+        openapi_spec_path:
+          type: string
+          example: /openapi.yaml
+        openapi_spec_json_path:
+          type: string
+          example: /openapi.json
     InfoResponse:
       type: object
-      required: [status, version, n_vocab, n_ctx_train, n_embd]
+      required:
+        [status, version, engine, positioning, runtime_model, backend, capabilities, plugins, tools, integrations, n_vocab, n_ctx_train, n_embd, n_layer, architecture]
       properties:
         status:
           type: string
@@ -143,6 +1761,25 @@ components:
         version:
           type: string
           example: "0.1.0"
+        engine:
+          type: string
+          example: loci
+        positioning:
+          type: string
+          example: embeddable-ai-inference-engine
+        runtime_model:
+          type: string
+          example: loci/llama.cpp:llama
+        backend:
+          $ref: "#/components/schemas/BackendInfo"
+        capabilities:
+          $ref: "#/components/schemas/EngineCapabilities"
+        plugins:
+          $ref: "#/components/schemas/EnginePlugins"
+        tools:
+          $ref: "#/components/schemas/EngineTools"
+        integrations:
+          $ref: "#/components/schemas/EngineIntegrations"
         n_vocab:
           type: integer
           format: int32
@@ -155,13 +1792,1057 @@ components:
           type: integer
           format: int32
           example: 1024
+        n_layer:
+          type: integer
+          format: int32
+          example: 24
+        param_count:
+          type: integer
+          format: int64
+          nullable: true
+        architecture:
+          type: string
+          example: llama
+    MetricsResponse:
+      type: object
+      required:
+        [status, started_at_unix_ms, uptime_ms, total_requests, total_client_errors, total_server_errors, average_latency_ms, endpoint_hits]
+      properties:
+        status:
+          type: string
+          example: ok
+        started_at_unix_ms:
+          type: integer
+          format: int64
+        uptime_ms:
+          type: integer
+          format: int64
+        total_requests:
+          type: integer
+          format: int64
+        total_client_errors:
+          type: integer
+          format: int64
+        total_server_errors:
+          type: integer
+          format: int64
+        average_latency_ms:
+          type: number
+          format: double
+        endpoint_hits:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+    RuntimeEventCategory:
+      type: string
+      enum: [http, auth, session, tool, model_asset, policy, plugin, runtime]
+    RuntimeEventOutcome:
+      type: string
+      enum: [success, error, denied, started, cancelled]
+    RuntimeEvent:
+      type: object
+      required: [sequence, at_unix_ms, category, action, outcome]
+      properties:
+        sequence:
+          type: integer
+          format: int64
+        at_unix_ms:
+          type: integer
+          format: int64
+        category:
+          $ref: "#/components/schemas/RuntimeEventCategory"
+        action:
+          type: string
+        outcome:
+          $ref: "#/components/schemas/RuntimeEventOutcome"
+        endpoint:
+          type: string
+          nullable: true
+        method:
+          type: string
+          nullable: true
+        path:
+          type: string
+          nullable: true
+        status_code:
+          type: integer
+          format: int32
+          nullable: true
+        subject:
+          type: string
+          nullable: true
+        details:
+          type: object
+          nullable: true
+          additionalProperties: true
+    RuntimeEventListResponse:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeEvent"
+    ModelPlanRequest:
+      type: object
+      properties:
+        model:
+          type: string
+          nullable: true
+          example: D:/models/qwen.gguf
+        model_id:
+          type: string
+          nullable: true
+          example: qwen-local
+        context_size:
+          type: integer
+          format: int32
+          minimum: 1
+          example: 8192
+    StoredModel:
+      type: object
+      required:
+        [id, name, path, source, size_bytes, checksum_xxh64, created_at_unix_ms, tags, managed]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        path:
+          type: string
+        source:
+          type: string
+        size_bytes:
+          type: integer
+          format: int64
+        checksum_xxh64:
+          type: string
+        checksum_sha256:
+          type: string
+          nullable: true
+        created_at_unix_ms:
+          type: integer
+          format: int64
+        tags:
+          type: array
+          items:
+            type: string
+        managed:
+          type: boolean
+    ModelAssetRegisterRequest:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+        id:
+          type: string
+          nullable: true
+        name:
+          type: string
+          nullable: true
+        tags:
+          type: array
+          items:
+            type: string
+    ModelAssetPullRequest:
+      type: object
+      required: [source]
+      properties:
+        source:
+          type: string
+        mirrors:
+          type: array
+          items:
+            type: string
+        id:
+          type: string
+          nullable: true
+        name:
+          type: string
+          nullable: true
+        sha256:
+          type: string
+          nullable: true
+        no_resume:
+          type: boolean
+          nullable: true
+        stream:
+          type: boolean
+          nullable: true
+        tags:
+          type: array
+          items:
+            type: string
+    ModelAssetListResponse:
+      type: object
+      required: [models]
+      properties:
+        models:
+          type: array
+          items:
+            $ref: "#/components/schemas/StoredModel"
+    ModelAssetRemoveResponse:
+      type: object
+      required: [model, deleted_file]
+      properties:
+        model:
+          $ref: "#/components/schemas/StoredModel"
+        deleted_file:
+          type: boolean
+    ModelPullJobRequest:
+      type: object
+      required: [source, mirrors, resume, tags]
+      properties:
+        source:
+          type: string
+        mirrors:
+          type: array
+          items:
+            type: string
+        id:
+          type: string
+          nullable: true
+        name:
+          type: string
+          nullable: true
+        sha256:
+          type: string
+          nullable: true
+        resume:
+          type: boolean
+        tags:
+          type: array
+          items:
+            type: string
+    ModelPullJobState:
+      type: string
+      enum: [queued, running, cancel_requested, completed, failed, cancelled]
+    ModelPullJobSnapshot:
+      type: object
+      required: [job_id, state, created_at_unix_ms, request]
+      properties:
+        job_id:
+          type: string
+        state:
+          $ref: "#/components/schemas/ModelPullJobState"
+        created_at_unix_ms:
+          type: integer
+          format: int64
+        started_at_unix_ms:
+          type: integer
+          format: int64
+          nullable: true
+        finished_at_unix_ms:
+          type: integer
+          format: int64
+          nullable: true
+        policy_name:
+          type: string
+          nullable: true
+        verifier_name:
+          type: string
+          nullable: true
+        request:
+          $ref: "#/components/schemas/ModelPullJobRequest"
+        progress:
+          $ref: "#/components/schemas/ModelPullProgress"
+          nullable: true
+        model:
+          $ref: "#/components/schemas/StoredModel"
+          nullable: true
+        error:
+          type: string
+          nullable: true
+    ModelPullJobListResponse:
+      type: object
+      required: [jobs]
+      properties:
+        jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelPullJobSnapshot"
+    ModelPullPhase:
+      type: string
+      enum: [Resolving, Fetching, Verifying, Completed]
+    ModelPullProgress:
+      type: object
+      required:
+        [phase, bytes_transferred, resumed_bytes, done, message]
+      properties:
+        phase:
+          $ref: "#/components/schemas/ModelPullPhase"
+        source:
+          type: string
+          nullable: true
+        model_id:
+          type: string
+          nullable: true
+        destination:
+          type: string
+          nullable: true
+        bytes_transferred:
+          type: integer
+          format: int64
+        total_bytes:
+          type: integer
+          format: int64
+          nullable: true
+        resumed_bytes:
+          type: integer
+          format: int64
+        done:
+          type: boolean
+        message:
+          type: string
+        error:
+          type: string
+          nullable: true
+    ModelAssetPullProgressEvent:
+      type: object
+      required: [kind, progress]
+      properties:
+        kind:
+          type: string
+          enum: [progress]
+        progress:
+          $ref: "#/components/schemas/ModelPullProgress"
+    ModelAssetPullCompleteEvent:
+      type: object
+      required: [kind, model]
+      properties:
+        kind:
+          type: string
+          enum: [complete]
+        model:
+          $ref: "#/components/schemas/StoredModel"
+    ModelAssetPullErrorEvent:
+      type: object
+      required: [kind, error]
+      properties:
+        kind:
+          type: string
+          enum: [error]
+        error:
+          type: string
+    ModelAssetPullStreamEvent:
+      oneOf:
+        - $ref: "#/components/schemas/ModelAssetPullProgressEvent"
+        - $ref: "#/components/schemas/ModelAssetPullCompleteEvent"
+        - $ref: "#/components/schemas/ModelAssetPullErrorEvent"
+      discriminator:
+        propertyName: kind
+    ModelPullJobSnapshotEvent:
+      type: object
+      required: [kind, job]
+      properties:
+        kind:
+          type: string
+          enum: [snapshot]
+        job:
+          $ref: "#/components/schemas/ModelPullJobSnapshot"
+    ModelPullJobProgressEvent:
+      type: object
+      required: [kind, job_id, progress]
+      properties:
+        kind:
+          type: string
+          enum: [progress]
+        job_id:
+          type: string
+        progress:
+          $ref: "#/components/schemas/ModelPullProgress"
+    ModelPullJobCompleteEvent:
+      type: object
+      required: [kind, job]
+      properties:
+        kind:
+          type: string
+          enum: [complete]
+        job:
+          $ref: "#/components/schemas/ModelPullJobSnapshot"
+    ModelPullJobFailedEvent:
+      type: object
+      required: [kind, job]
+      properties:
+        kind:
+          type: string
+          enum: [failed]
+        job:
+          $ref: "#/components/schemas/ModelPullJobSnapshot"
+    ModelPullJobCancelRequestedEvent:
+      type: object
+      required: [kind, job]
+      properties:
+        kind:
+          type: string
+          enum: [cancel_requested]
+        job:
+          $ref: "#/components/schemas/ModelPullJobSnapshot"
+    ModelPullJobCancelledEvent:
+      type: object
+      required: [kind, job]
+      properties:
+        kind:
+          type: string
+          enum: [cancelled]
+        job:
+          $ref: "#/components/schemas/ModelPullJobSnapshot"
+    ModelPullJobEvent:
+      oneOf:
+        - $ref: "#/components/schemas/ModelPullJobSnapshotEvent"
+        - $ref: "#/components/schemas/ModelPullJobProgressEvent"
+        - $ref: "#/components/schemas/ModelPullJobCompleteEvent"
+        - $ref: "#/components/schemas/ModelPullJobFailedEvent"
+        - $ref: "#/components/schemas/ModelPullJobCancelRequestedEvent"
+        - $ref: "#/components/schemas/ModelPullJobCancelledEvent"
+      discriminator:
+        propertyName: kind
+    GgufMetadataSummary:
+      type: object
+      properties:
+        version:
+          type: integer
+          format: int32
+        tensor_count:
+          type: integer
+          format: int64
+        architecture:
+          type: string
+          nullable: true
+        context_length:
+          type: integer
+          format: int32
+          nullable: true
+        embedding_length:
+          type: integer
+          format: int32
+          nullable: true
+        block_count:
+          type: integer
+          format: int32
+          nullable: true
+        vocab_size:
+          type: integer
+          format: int32
+          nullable: true
+        attention_head_count:
+          type: integer
+          format: int32
+          nullable: true
+        attention_head_count_kv:
+          type: integer
+          format: int32
+          nullable: true
+        feed_forward_length:
+          type: integer
+          format: int32
+          nullable: true
+        expert_count:
+          type: integer
+          format: int32
+          nullable: true
+        file_type:
+          type: integer
+          format: int32
+          nullable: true
+    ModelResourceEstimate:
+      type: object
+      required:
+        [model_bytes, kv_cache_bytes, working_set_bytes, total_bytes, context_size, metadata_source]
+      properties:
+        model_bytes:
+          type: integer
+          format: int64
+        kv_cache_bytes:
+          type: integer
+          format: int64
+        working_set_bytes:
+          type: integer
+          format: int64
+        total_bytes:
+          type: integer
+          format: int64
+        context_size:
+          type: integer
+          format: int32
+        metadata_source:
+          type: string
+          enum: [FileSizeOnly, GgufMetadata]
+        gguf_metadata:
+          allOf:
+            - $ref: "#/components/schemas/GgufMetadataSummary"
+          nullable: true
+    ResourcePlan:
+      type: object
+      required:
+        [use_gpu, n_gpu_layers, use_mmap, use_mlock, kv_offload, op_offload, split_mode, main_gpu, rationale]
+      properties:
+        use_gpu:
+          type: boolean
+        n_gpu_layers:
+          type: integer
+          format: int32
+        use_mmap:
+          type: boolean
+        use_mlock:
+          type: boolean
+        kv_offload:
+          type: boolean
+        op_offload:
+          type: boolean
+        split_mode:
+          type: string
+          example: Layer
+        main_gpu:
+          type: integer
+          format: int32
+        tensor_split:
+          type: array
+          nullable: true
+          items:
+            type: number
+            format: float
+        rationale:
+          type: string
+    DeviceInfoResponse:
+      type: object
+      required: [id, name, memory_bytes, device_type, compute_capability, available]
+      properties:
+        id:
+          type: integer
+          format: int32
+        name:
+          type: string
+        memory_bytes:
+          type: integer
+          format: int64
+        device_type:
+          type: string
+        compute_capability:
+          type: number
+          format: float
+        available:
+          type: boolean
+    ResourcePlanReport:
+      type: object
+      required: [model, estimate, plan, devices]
+      properties:
+        model:
+          type: string
+        estimate:
+          $ref: "#/components/schemas/ModelResourceEstimate"
+        plan:
+          $ref: "#/components/schemas/ResourcePlan"
+        devices:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeviceInfoResponse"
+    SessionCreateRequest:
+      type: object
+      properties:
+        model:
+          type: string
+          nullable: true
+        model_id:
+          type: string
+          nullable: true
+        context_size:
+          type: integer
+          format: int32
+          nullable: true
+        save:
+          type: boolean
+          nullable: true
+    SessionGenerateRequest:
+      type: object
+      required: [prompt]
+      properties:
+        prompt:
+          type: string
+        max_tokens:
+          type: integer
+          format: int32
+          nullable: true
+        save:
+          type: boolean
+          nullable: true
+    SessionSuspendRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+        data:
+          type: string
+          nullable: true
+        save:
+          type: boolean
+          nullable: true
+    SessionResumeRequest:
+      type: object
+      required: [external_data]
+      properties:
+        external_data:
+          type: string
+        save:
+          type: boolean
+          nullable: true
+    SessionClearRequest:
+      type: object
+      properties:
+        save:
+          type: boolean
+          nullable: true
+    SessionRecord:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [User, Assistant, Tool]
+        content:
+          type: string
+    SessionSummaryResponse:
+      type: object
+      required: [session_id, model_id, context_length, max_context, state, message_count]
+      properties:
+        session_id:
+          type: integer
+          format: int64
+        model_id:
+          type: integer
+          format: int64
+        context_length:
+          type: integer
+          format: int32
+        max_context:
+          type: integer
+          format: int32
+        state:
+          type: string
+        message_count:
+          type: integer
+          format: int32
+    SessionDetailResponse:
+      type: object
+      required: [session, records]
+      properties:
+        session:
+          $ref: "#/components/schemas/SessionSummaryResponse"
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/SessionRecord"
+    SessionListResponse:
+      type: object
+      required: [active, persisted]
+      properties:
+        active:
+          type: array
+          items:
+            $ref: "#/components/schemas/SessionSummaryResponse"
+        persisted:
+          type: array
+          items:
+            type: integer
+            format: int64
+    SessionMutationResponse:
+      type: object
+      required: [session_id, persisted, state]
+      properties:
+        session_id:
+          type: integer
+          format: int64
+        persisted:
+          type: boolean
+        state:
+          type: string
+    SessionCreateResponse:
+      type: object
+      required: [session_id, model_path, model_id, context_size, persisted]
+      properties:
+        session_id:
+          type: integer
+          format: int64
+        model_path:
+          type: string
+        model_id:
+          type: integer
+          format: int64
+        context_size:
+          type: integer
+          format: int32
+        persisted:
+          type: boolean
+    SessionGenerateResponse:
+      type: object
+      required: [session_id, response, persisted, state]
+      properties:
+        session_id:
+          type: integer
+          format: int64
+        response:
+          type: string
+        persisted:
+          type: boolean
+        state:
+          type: string
+    FunctionParameter:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+        description:
+          type: string
+          nullable: true
+        enum_values:
+          type: array
+          nullable: true
+          items:
+            type: string
+    FunctionDefinition:
+      type: object
+      required: [name, description, parameters, required]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        parameters:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/FunctionParameter"
+        required:
+          type: array
+          items:
+            type: string
+    ToolListResponse:
+      type: object
+      required: [tools]
+      properties:
+        tools:
+          type: array
+          items:
+            $ref: "#/components/schemas/FunctionDefinition"
+    ToolInvokeRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        arguments:
+          type: object
+          additionalProperties: true
+    ToolInvokeResponse:
+      type: object
+      required: [tool, ok]
+      properties:
+        tool:
+          type: string
+        ok:
+          type: boolean
+        result:
+          nullable: true
+        error:
+          type: string
+          nullable: true
+    RuntimePluginLoadRequest:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+        activate:
+          type: boolean
+          nullable: true
+    ToolPluginRegistryEntryResponse:
+      type: object
+      required: [name, version, dynamic, functions]
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+        dynamic:
+          type: boolean
+        source:
+          type: string
+          nullable: true
+        functions:
+          type: array
+          items:
+            type: string
+    ToolPluginRegistryListResponse:
+      type: object
+      required: [plugins]
+      properties:
+        plugins:
+          type: array
+          items:
+            $ref: "#/components/schemas/ToolPluginRegistryEntryResponse"
+    ToolPluginRegistryMutationResponse:
+      allOf:
+        - $ref: "#/components/schemas/ToolPluginRegistryEntryResponse"
+    PolicyRegistryEntryResponse:
+      type: object
+      required: [name, dynamic, active]
+      properties:
+        name:
+          type: string
+        dynamic:
+          type: boolean
+        source:
+          type: string
+          nullable: true
+        active:
+          type: boolean
+    PolicyRegistryListResponse:
+      type: object
+      required: [policies]
+      properties:
+        active:
+          type: string
+          nullable: true
+        policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/PolicyRegistryEntryResponse"
+    PolicyRegistryMutationResponse:
+      type: object
+      required: [name, active]
+      properties:
+        name:
+          type: string
+        active:
+          type: boolean
+        source:
+          type: string
+          nullable: true
+    OpenAiChatMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+        content:
+          type: string
+    OpenAiChatCompletionsRequest:
+      type: object
+      required: [messages]
+      properties:
+        model:
+          type: string
+          nullable: true
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/OpenAiChatMessage"
+        max_tokens:
+          type: integer
+          format: int32
+          nullable: true
+        temperature:
+          type: number
+          format: float
+          nullable: true
+        top_p:
+          type: number
+          format: float
+          nullable: true
+        stream:
+          type: boolean
+          nullable: true
+    OpenAiUsage:
+      type: object
+      required: [prompt_tokens, completion_tokens, total_tokens]
+      properties:
+        prompt_tokens:
+          type: integer
+          format: int32
+        completion_tokens:
+          type: integer
+          format: int32
+        total_tokens:
+          type: integer
+          format: int32
+    OpenAiChatChoice:
+      type: object
+      required: [index, message, finish_reason]
+      properties:
+        index:
+          type: integer
+          format: int32
+        message:
+          $ref: "#/components/schemas/OpenAiChatMessage"
+        finish_reason:
+          type: string
+    OpenAiChatCompletionsResponse:
+      type: object
+      required: [id, object, created, model, choices, usage]
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+        created:
+          type: integer
+          format: int64
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            $ref: "#/components/schemas/OpenAiChatChoice"
+        usage:
+          $ref: "#/components/schemas/OpenAiUsage"
+    OpenAiEmbeddingInput:
+      oneOf:
+        - type: string
+        - type: array
+          items:
+            type: string
+    OpenAiEmbeddingsRequest:
+      type: object
+      required: [input]
+      properties:
+        model:
+          type: string
+          nullable: true
+        input:
+          $ref: "#/components/schemas/OpenAiEmbeddingInput"
+    OpenAiEmbeddingData:
+      type: object
+      required: [object, index, embedding]
+      properties:
+        object:
+          type: string
+        index:
+          type: integer
+          format: int32
+        embedding:
+          type: array
+          items:
+            type: number
+            format: float
+    OpenAiEmbeddingsResponse:
+      type: object
+      required: [object, data, model, usage]
+      properties:
+        object:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/OpenAiEmbeddingData"
+        model:
+          type: string
+        usage:
+          $ref: "#/components/schemas/OpenAiUsage"
+    OpenAiModelDescriptor:
+      type: object
+      required: [id, object, owned_by]
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+        owned_by:
+          type: string
+    OpenAiModelListResponse:
+      type: object
+      required: [object, data]
+      properties:
+        object:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/OpenAiModelDescriptor"
+    OllamaGenerateOptions:
+      type: object
+      properties:
+        num_predict:
+          type: integer
+          format: int32
+          nullable: true
+        temperature:
+          type: number
+          format: float
+          nullable: true
+        top_p:
+          type: number
+          format: float
+          nullable: true
+    OllamaGenerateRequest:
+      type: object
+      required: [prompt]
+      properties:
+        model:
+          type: string
+          nullable: true
+        prompt:
+          type: string
+        stream:
+          type: boolean
+          nullable: true
+        options:
+          $ref: "#/components/schemas/OllamaGenerateOptions"
+    OllamaGenerateResponse:
+      type: object
+      required:
+        [model, created_at, response, done, prompt_eval_count, eval_count]
+      properties:
+        model:
+          type: string
+        created_at:
+          type: string
+        response:
+          type: string
+        done:
+          type: boolean
+        done_reason:
+          type: string
+          nullable: true
+        prompt_eval_count:
+          type: integer
+          format: int32
+        eval_count:
+          type: integer
+          format: int32
+        error:
+          type: string
+          nullable: true
+    OllamaModelTag:
+      type: object
+      required: [name, model, modified_at, size]
+      properties:
+        name:
+          type: string
+        model:
+          type: string
+        modified_at:
+          type: string
+        size:
+          type: integer
+          format: int64
+    OllamaTagsResponse:
+      type: object
+      required: [models]
+      properties:
+        models:
+          type: array
+          items:
+            $ref: "#/components/schemas/OllamaModelTag"
     GenerateRequest:
       type: object
       required: [prompt]
       properties:
         prompt:
           type: string
-          description: UTF-8 prompt text. Effective max bytes is runtime-configured in server process.
+          description: UTF-8 prompt text. Effective max bytes is runtime-configured in the server process.
           example: "Hello, introduce Loci in one sentence."
         max_tokens:
           type: integer
@@ -208,3 +2889,11 @@ components:
         error:
           type: string
           example: "invalid JSON payload for /generate: expected value at line 1 column 1"
+    AuthErrorResponse:
+      type: object
+      required: [error, policy]
+      properties:
+        error:
+          type: string
+        policy:
+          type: string

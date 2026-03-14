@@ -89,17 +89,13 @@ pub enum SessionState {
     /// Session is resuming from suspension with external data
     ///
     /// Contains the external data/tool result that was injected via `resume_session()`
-    Resuming {
-        external_data: String,
-    },
+    Resuming { external_data: String },
 
     /// Session completed successfully
     Completed,
 
     /// Session encountered an error
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }
 
 impl Default for SessionState {
@@ -281,7 +277,9 @@ impl InferenceSession {
                 break;
             }
             let first = self.conversation.remove(0);
-            self.conversation_tokens = self.conversation_tokens.saturating_sub(first.estimated_tokens);
+            self.conversation_tokens = self
+                .conversation_tokens
+                .saturating_sub(first.estimated_tokens);
         }
         self.sync_context_tokens();
     }
@@ -561,7 +559,9 @@ impl SessionManager {
 
     /// Create a new session manager with a SQLite persistence store.
     pub fn with_sqlite_store<P: AsRef<Path>>(db_path: P) -> Result<Self> {
-        Ok(Self::with_store(Arc::new(SqliteSessionStore::new(db_path)?)))
+        Ok(Self::with_store(Arc::new(SqliteSessionStore::new(
+            db_path,
+        )?)))
     }
 
     /// Create a new session manager by resolving a store plugin from builtin registry.
@@ -1016,7 +1016,10 @@ mod tests {
         assert!(session.can_generate());
         assert!(!session.is_suspended());
 
-        session.suspend("tool_call".to_string(), Some("{\"name\":\"weather\"}".to_string()));
+        session.suspend(
+            "tool_call".to_string(),
+            Some("{\"name\":\"weather\"}".to_string()),
+        );
         assert!(session.is_suspended());
 
         session.resume_session("sunny".to_string()).unwrap();

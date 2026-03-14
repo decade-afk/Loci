@@ -39,7 +39,7 @@
 //! let embedding_ref = embedding.clone(); // Just increments Arc refcount
 //! ```
 
-use crate::error::{LociError, Result};
+use crate::error::Result;
 use crate::multimodal::{Image, ImageFormat};
 use std::sync::Arc;
 
@@ -83,7 +83,7 @@ impl Default for CLIPViTL14Config {
             image_size: 224,
             patch_size: 14,
             num_patches_per_dim: 16, // 224 / 14
-            num_patches: 256,         // 16 * 16
+            num_patches: 256,        // 16 * 16
             embedding_dim: 1024,
             num_layers: 24,
             num_heads: 16,
@@ -167,6 +167,7 @@ pub struct CLIPViTL14Encoder {
 
     /// Patch embedding projection (placeholder for actual weights)
     /// In real implementation: [embedding_dim, patch_size * patch_size * 3]
+    #[allow(dead_code)]
     patch_projection: Option<Vec<f32>>,
 
     /// CLS token embedding
@@ -226,7 +227,8 @@ impl CLIPViTL14Encoder {
         let patch_embeddings = self.project_patches(&patches)?;
 
         // 4. Add CLS token and positional embeddings
-        let mut embeddings = Vec::with_capacity((self.config.num_patches + 1) * self.config.embedding_dim);
+        let mut embeddings =
+            Vec::with_capacity((self.config.num_patches + 1) * self.config.embedding_dim);
 
         // CLS token
         embeddings.extend_from_slice(&self.cls_token);
@@ -235,7 +237,6 @@ impl CLIPViTL14Encoder {
         for (i, patch_emb) in patch_embeddings.iter().enumerate() {
             // Add positional encoding
             let pos_start = (i + 1) * self.config.embedding_dim;
-            let pos_end = pos_start + self.config.embedding_dim;
 
             for j in 0..self.config.embedding_dim {
                 embeddings.push(patch_emb[j] + self.positional_embeddings[pos_start + j]);
@@ -279,7 +280,6 @@ impl CLIPViTL14Encoder {
     fn extract_patches(&self, image: &Image) -> Result<Vec<Vec<f32>>> {
         let patch_size = self.config.patch_size;
         let num_patches_per_dim = self.config.num_patches_per_dim;
-        let channels = 3; // RGB
 
         let mut patches = Vec::with_capacity(self.config.num_patches);
 
@@ -352,7 +352,7 @@ impl CLIPViTL14Encoder {
     fn project_patches(&self, patches: &[Vec<f32>]) -> Result<Vec<Vec<f32>>> {
         let mut patch_embeddings = Vec::with_capacity(patches.len());
 
-        for patch in patches {
+        for _patch in patches {
             // Placeholder: Real linear projection
             // embedding = W @ patch + b
             // W shape: [embedding_dim, patch_size * patch_size * 3]
@@ -435,12 +435,7 @@ mod tests {
     fn test_image_encoding() {
         let encoder = CLIPViTL14Encoder::new().unwrap();
 
-        let image = Image::new(
-            vec![128; 224 * 224 * 3],
-            224,
-            224,
-            ImageFormat::RGB,
-        );
+        let image = Image::new(vec![128; 224 * 224 * 3], 224, 224, ImageFormat::RGB);
 
         let embedding = encoder.encode(&image);
         assert!(embedding.is_ok());
@@ -454,12 +449,7 @@ mod tests {
     fn test_zero_copy_embedding() {
         let encoder = CLIPViTL14Encoder::new().unwrap();
 
-        let image = Image::new(
-            vec![128; 224 * 224 * 3],
-            224,
-            224,
-            ImageFormat::RGB,
-        );
+        let image = Image::new(vec![128; 224 * 224 * 3], 224, 224, ImageFormat::RGB);
 
         let embedding1 = encoder.encode(&image).unwrap();
 
@@ -477,12 +467,7 @@ mod tests {
     fn test_cls_token_extraction() {
         let encoder = CLIPViTL14Encoder::new().unwrap();
 
-        let image = Image::new(
-            vec![128; 224 * 224 * 3],
-            224,
-            224,
-            ImageFormat::RGB,
-        );
+        let image = Image::new(vec![128; 224 * 224 * 3], 224, 224, ImageFormat::RGB);
 
         let embedding = encoder.encode(&image).unwrap();
         let cls = embedding.cls_token();
@@ -494,12 +479,7 @@ mod tests {
     fn test_patch_extraction() {
         let encoder = CLIPViTL14Encoder::new().unwrap();
 
-        let image = Image::new(
-            vec![128; 224 * 224 * 3],
-            224,
-            224,
-            ImageFormat::RGB,
-        );
+        let image = Image::new(vec![128; 224 * 224 * 3], 224, 224, ImageFormat::RGB);
 
         let embedding = encoder.encode(&image).unwrap();
 
@@ -512,12 +492,7 @@ mod tests {
     fn test_specific_patch_access() {
         let encoder = CLIPViTL14Encoder::new().unwrap();
 
-        let image = Image::new(
-            vec![128; 224 * 224 * 3],
-            224,
-            224,
-            ImageFormat::RGB,
-        );
+        let image = Image::new(vec![128; 224 * 224 * 3], 224, 224, ImageFormat::RGB);
 
         let embedding = encoder.encode(&image).unwrap();
 
@@ -562,7 +537,7 @@ mod tests {
         for (i, &val) in normalized.iter().enumerate() {
             let channel = i % 3;
             let expected = (128.0 / 255.0 - encoder.config.norm_mean[channel])
-                         / encoder.config.norm_std[channel];
+                / encoder.config.norm_std[channel];
 
             assert!((val - expected).abs() < 0.001);
         }
@@ -572,12 +547,7 @@ mod tests {
     fn test_memory_footprint() {
         let encoder = CLIPViTL14Encoder::new().unwrap();
 
-        let image = Image::new(
-            vec![128; 224 * 224 * 3],
-            224,
-            224,
-            ImageFormat::RGB,
-        );
+        let image = Image::new(vec![128; 224 * 224 * 3], 224, 224, ImageFormat::RGB);
 
         let embedding = encoder.encode(&image).unwrap();
         let footprint = embedding.memory_footprint();

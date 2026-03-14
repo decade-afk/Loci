@@ -238,6 +238,18 @@ impl ChatTemplate {
         all_messages.extend_from_slice(messages);
         self.format(&all_messages)
     }
+
+    pub fn template_type(&self) -> ChatTemplateType {
+        self.template_type
+    }
+
+    pub fn custom_template(&self) -> Option<&str> {
+        self.custom_template.as_deref()
+    }
+
+    pub fn eos_token(&self) -> &str {
+        &self.eos_token
+    }
 }
 
 impl Default for ChatTemplate {

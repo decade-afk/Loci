@@ -111,7 +111,7 @@ where
     /// Process a batch of prompts
     pub fn process_batch(&self, batch: PromptBatch) -> Result<BatchResult> {
         let start_time = std::time::Instant::now();
-        
+
         if batch.is_empty() {
             return Ok(BatchResult {
                 responses: Vec::new(),
@@ -141,11 +141,11 @@ where
 
         for prompt in &batch.prompts {
             let result = (self.inference_fn)(prompt, &batch.params);
-            
+
             if result.is_err() && !self.config.continue_on_error {
                 return Err(result.unwrap_err());
             }
-            
+
             responses.push(result);
         }
 
@@ -153,16 +153,12 @@ where
     }
 
     fn process_parallel(&self, batch: &PromptBatch) -> Result<Vec<Result<String>>> {
-        let responses: Arc<Mutex<Vec<Option<Result<String>>>>> = 
+        let responses: Arc<Mutex<Vec<Option<Result<String>>>>> =
             Arc::new(Mutex::new((0..batch.len()).map(|_| None).collect()));
         let mut handles = Vec::new();
 
         // Process in chunks based on max_concurrent
-        for (chunk_idx, chunk) in batch
-            .prompts
-            .chunks(self.config.max_concurrent)
-            .enumerate()
-        {
+        for (chunk_idx, chunk) in batch.prompts.chunks(self.config.max_concurrent).enumerate() {
             for (idx_in_chunk, prompt) in chunk.iter().enumerate() {
                 let global_idx = chunk_idx * self.config.max_concurrent + idx_in_chunk;
                 let prompt = prompt.clone();
@@ -210,11 +206,11 @@ where
 
         for (idx, prompt) in batch.prompts.iter().enumerate() {
             let result = (self.inference_fn)(prompt, &batch.params);
-            
+
             if result.is_err() && !self.config.continue_on_error {
                 return Err(result.unwrap_err());
             }
-            
+
             responses.push(result);
             progress_callback(idx + 1, batch.len());
         }
@@ -321,10 +317,7 @@ mod tests {
             .continue_on_error(true)
             .build(mock_inference);
 
-        let batch = PromptBatch::new(
-            vec!["Test".to_string()],
-            InferenceParams::default(),
-        );
+        let batch = PromptBatch::new(vec!["Test".to_string()], InferenceParams::default());
 
         let result = processor.process_batch(batch).unwrap();
         assert_eq!(result.successful_count(), 1);

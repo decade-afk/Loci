@@ -66,7 +66,7 @@
 //! let output = processor.process(input)?;
 //! ```
 
-use crate::error::{LociError, Result};
+use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -152,7 +152,8 @@ impl Image {
         // Placeholder: Real implementation would use image::imageops::resize
         self.width = target_width;
         self.height = target_height;
-        self.data.resize(target_width * target_height * self.channels, 0);
+        self.data
+            .resize(target_width * target_height * self.channels, 0);
         Ok(())
     }
 
@@ -187,13 +188,13 @@ impl Image {
     }
 
     /// Extract a patch from the image
-    fn extract_patch(&self, px: usize, py: usize, patch_size: usize) -> Vec<u8> {
+    fn extract_patch(&self, _px: usize, _py: usize, patch_size: usize) -> Vec<u8> {
         // Placeholder implementation
         vec![0; patch_size * patch_size * self.channels]
     }
 
     /// Normalize pixel values to [0, 1] or [-1, 1]
-    pub fn normalize(&self, mean: &[f32], std: &[f32]) -> Vec<f32> {
+    pub fn normalize(&self, _mean: &[f32], _std: &[f32]) -> Vec<f32> {
         // Placeholder: Real normalization
         vec![0.0; self.data.len()]
     }
@@ -518,7 +519,7 @@ impl MultimodalProcessor {
     }
 
     /// Encode text to embeddings
-    fn encode_text(&self, text: &str) -> Result<Vec<f32>> {
+    fn encode_text(&self, _text: &str) -> Result<Vec<f32>> {
         // Placeholder: Real tokenization + embedding
         Ok(vec![0.0; self.config.vision_config.hidden_dim])
     }
@@ -540,7 +541,7 @@ impl MultimodalProcessor {
         // 2. Project patches to embeddings
         let patch_embeddings: Vec<Vec<f32>> = patches
             .iter()
-            .map(|p| {
+            .map(|_patch| {
                 // Placeholder: Real linear projection
                 vec![0.0; self.config.vision_config.hidden_dim]
             })
@@ -576,7 +577,7 @@ impl MultimodalProcessor {
     /// Encode audio using Whisper
     fn encode_audio_whisper(&self, audio: &Audio) -> Result<Vec<f32>> {
         // 1. Convert to mel spectrogram
-        let mel_spec = audio.to_mel_spectrogram(
+        let _mel_spec = audio.to_mel_spectrogram(
             self.config.audio_config.n_mels,
             self.config.audio_config.n_fft,
         );
@@ -636,10 +637,7 @@ pub struct MultimodalModelAdapter {
 
 impl MultimodalModelAdapter {
     /// Create a new multimodal adapter
-    pub fn new(
-        base_model_id: crate::model_registry::ModelId,
-        config: ProcessorConfig,
-    ) -> Self {
+    pub fn new(base_model_id: crate::model_registry::ModelId, config: ProcessorConfig) -> Self {
         Self {
             base_model_id,
             vision_encoder: Some(config.vision_config.clone()),
@@ -651,7 +649,7 @@ impl MultimodalModelAdapter {
     /// Process multimodal input and generate response
     pub fn generate(&self, input: MultimodalInput) -> Result<String> {
         // 1. Process multimodal input
-        let embeddings = self.processor.process(input)?;
+        let _embeddings = self.processor.process(input)?;
 
         // 2. Feed to base LLM (placeholder)
         // In real implementation, this would feed embeddings to the model
@@ -693,7 +691,12 @@ mod tests {
     fn test_multimodal_input() {
         let input = MultimodalInput::new()
             .with_text("Hello")
-            .with_image(Image::new(vec![0; 224 * 224 * 3], 224, 224, ImageFormat::RGB));
+            .with_image(Image::new(
+                vec![0; 224 * 224 * 3],
+                224,
+                224,
+                ImageFormat::RGB,
+            ));
 
         assert_eq!(input.texts.len(), 1);
         assert_eq!(input.images.len(), 1);
@@ -706,7 +709,12 @@ mod tests {
 
         let input = MultimodalInput::new()
             .with_text("Describe this image")
-            .with_image(Image::new(vec![0; 224 * 224 * 3], 224, 224, ImageFormat::RGB));
+            .with_image(Image::new(
+                vec![0; 224 * 224 * 3],
+                224,
+                224,
+                ImageFormat::RGB,
+            ));
 
         let result = processor.process(input);
         assert!(result.is_ok());

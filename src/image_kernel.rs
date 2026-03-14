@@ -4,6 +4,9 @@
 //! provides dynamic loading helpers for runtime integration.
 
 use crate::error::{LociError, Result};
+use crate::plugin_contract::{
+    load_and_validate_plugin_contract, validate_runtime_plugin_identity, PluginContractKind,
+};
 use libloading::{Library, Symbol};
 use std::ffi::c_void;
 use std::path::Path;
@@ -119,6 +122,7 @@ impl DynamicImageKernel {
 /// Load a dynamic image kernel plugin from shared library.
 pub fn load_dynamic_image_plugin<P: AsRef<Path>>(library_path: P) -> Result<DynamicImageKernel> {
     let path = library_path.as_ref();
+    let manifest = load_and_validate_plugin_contract(path, PluginContractKind::ImageKernel)?;
     if !path.exists() {
         return Err(LociError::PluginError(format!(
             "Image kernel library not found: {}",
@@ -172,6 +176,7 @@ pub fn load_dynamic_image_plugin<P: AsRef<Path>>(library_path: P) -> Result<Dyna
     }
 
     plugin.init()?;
+    validate_runtime_plugin_identity(manifest.as_ref(), plugin.name(), plugin.version())?;
 
     Ok(DynamicImageKernel { plugin, library })
 }

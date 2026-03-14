@@ -88,10 +88,10 @@ impl Default for WasmPluginConfig {
             version: "0.1.0".to_string(),
             wasm_path: PathBuf::new(),
             max_memory: 16 * 1024 * 1024, // 16 MB
-            max_fuel: 1_000_000,           // 1M instructions
-            enable_wasi: false,            // Disabled by default for security
-            allow_unsafe_wasi: false,      // Explicit opt-in for privileged mode
-            timeout_ms: 5000,              // 5 seconds
+            max_fuel: 1_000_000,          // 1M instructions
+            enable_wasi: false,           // Disabled by default for security
+            allow_unsafe_wasi: false,     // Explicit opt-in for privileged mode
+            timeout_ms: 5000,             // 5 seconds
         }
     }
 }
@@ -99,7 +99,7 @@ impl Default for WasmPluginConfig {
 /// WASM plugin runtime state
 struct WasmRuntime {
     engine: Engine,
-    module: Module,
+    _module: Module,
     store: Store<WasiCtx>,
     instance: Instance,
 }
@@ -151,20 +151,22 @@ impl WasmPlugin {
         // 4. Create store with resource limits
         let mut store = Store::new(&engine, wasi);
         if config.max_fuel > 0 {
-            store.set_fuel(config.max_fuel)
+            store
+                .set_fuel(config.max_fuel)
                 .map_err(|e| LociError::PluginError(format!("Failed to set fuel: {}", e)))?;
         }
 
         // 5. Instantiate module
-        let instance = Instance::new(&mut store, &module, &[])
-            .map_err(|e| LociError::PluginError(format!("Failed to instantiate WASM module: {}", e)))?;
+        let instance = Instance::new(&mut store, &module, &[]).map_err(|e| {
+            LociError::PluginError(format!("Failed to instantiate WASM module: {}", e))
+        })?;
 
         // 6. Verify required exports
         Self::verify_exports(&instance, &mut store)?;
 
         let runtime = WasmRuntime {
             engine,
-            module,
+            _module: module,
             store,
             instance,
         };
@@ -202,20 +204,30 @@ impl WasmPlugin {
         // Check for plugin metadata exports
         let _name = instance
             .get_typed_func::<(), i32>(&mut *store, "plugin_name")
-            .map_err(|_| LociError::PluginError("Missing required export: plugin_name".to_string()))?;
+            .map_err(|_| {
+                LociError::PluginError("Missing required export: plugin_name".to_string())
+            })?;
 
         let _version = instance
             .get_typed_func::<(), i32>(&mut *store, "plugin_version")
-            .map_err(|_| LociError::PluginError("Missing required export: plugin_version".to_string()))?;
+            .map_err(|_| {
+                LociError::PluginError("Missing required export: plugin_version".to_string())
+            })?;
 
         // Optional: Hook exports (at least one should exist)
-        let has_transform = instance.get_typed_func::<(i32, i32, i32), i32>(&mut *store, "transform_logits").is_ok();
-        let has_post_sample = instance.get_typed_func::<i32, i32>(&mut *store, "post_sample").is_ok();
-        let has_pre_generate = instance.get_typed_func::<i32, i32>(&mut *store, "pre_generate").is_ok();
+        let has_transform = instance
+            .get_typed_func::<(i32, i32, i32), i32>(&mut *store, "transform_logits")
+            .is_ok();
+        let has_post_sample = instance
+            .get_typed_func::<i32, i32>(&mut *store, "post_sample")
+            .is_ok();
+        let has_pre_generate = instance
+            .get_typed_func::<i32, i32>(&mut *store, "pre_generate")
+            .is_ok();
 
         if !has_transform && !has_post_sample && !has_pre_generate {
             return Err(LociError::PluginError(
-                "Plugin must export at least one hook function".to_string()
+                "Plugin must export at least one hook function".to_string(),
             ));
         }
 
@@ -223,12 +235,7 @@ impl WasmPlugin {
     }
 
     /// Call a WASM function with timeout
-    fn call_with_timeout<T, R>(
-        &self,
-        func_name: &str,
-        args: T,
-        timeout_ms: u64,
-    ) -> Result<R>
+    fn call_with_timeout<T, R>(&self, func_name: &str, args: T, timeout_ms: u64) -> Result<R>
     where
         T: WasmParams,
         R: WasmResults,
@@ -237,7 +244,9 @@ impl WasmPlugin {
 
         // Set fuel if configured
         if self.config.max_fuel > 0 {
-            runtime.store.set_fuel(self.config.max_fuel)
+            runtime
+                .store
+                .set_fuel(self.config.max_fuel)
                 .map_err(|e| LociError::PluginError(format!("Fuel error: {}", e)))?;
         }
 
@@ -251,36 +260,38 @@ impl WasmPlugin {
         }
 
         // Split borrows
-        let WasmRuntime { store, instance, .. } = &mut *runtime;
+        let WasmRuntime {
+            store, instance, ..
+        } = &mut *runtime;
 
         // Get typed function
         let func = instance
             .get_typed_func::<T, R>(&mut *store, func_name)
             .map_err(|_| LociError::PluginError(format!("Function {} not found", func_name)))?;
 
-        let result = func
-            .call(&mut *store, args)
-            .map_err(|e| {
-                let message = e.to_string();
-                if message.contains("interrupt")
-                    || message.contains("epoch")
-                    || message.contains("deadline")
-                {
-                    LociError::Timeout(format!("WASM call timed out in {func_name}"))
-                } else {
-                    LociError::PluginError(format!("WASM call failed: {}", message))
-                }
-            })?;
+        let result = func.call(&mut *store, args).map_err(|e| {
+            let message = e.to_string();
+            if message.contains("interrupt")
+                || message.contains("epoch")
+                || message.contains("deadline")
+            {
+                LociError::Timeout(format!("WASM call timed out in {func_name}"))
+            } else {
+                LociError::PluginError(format!("WASM call failed: {}", message))
+            }
+        })?;
 
         Ok(result)
     }
 
     /// Read string from WASM memory
+    #[allow(dead_code)]
     fn read_string(&self, ptr: i32, len: i32) -> Result<String> {
         let mut runtime = self.runtime.lock();
         let runtime = &mut *runtime;
 
-        let memory = runtime.instance
+        let memory = runtime
+            .instance
             .get_memory(&mut runtime.store, "memory")
             .ok_or_else(|| LociError::PluginError("WASM memory not found".to_string()))?;
 
@@ -289,7 +300,9 @@ impl WasmPlugin {
         let end = start + len as usize;
 
         if end > data.len() {
-            return Err(LociError::PluginError("WASM memory access out of bounds".to_string()));
+            return Err(LociError::PluginError(
+                "WASM memory access out of bounds".to_string(),
+            ));
         }
 
         String::from_utf8(data[start..end].to_vec())
@@ -297,13 +310,15 @@ impl WasmPlugin {
     }
 
     /// Write string to WASM memory
+    #[allow(dead_code)]
     fn write_string(&self, s: &str) -> Result<(i32, i32)> {
         let mut runtime = self.runtime.lock();
         let runtime = &mut *runtime;
         let len = s.len() as i32;
 
         // Allocate memory in WASM (call alloc function)
-        let alloc = runtime.instance
+        let alloc = runtime
+            .instance
             .get_typed_func::<i32, i32>(&mut runtime.store, "alloc")
             .map_err(|_| LociError::PluginError("WASM alloc function not found".to_string()))?;
 
@@ -312,7 +327,8 @@ impl WasmPlugin {
             .map_err(|e| LociError::PluginError(format!("WASM alloc failed: {}", e)))?;
 
         // Get memory and write data to allocated memory
-        let memory = runtime.instance
+        let memory = runtime
+            .instance
             .get_memory(&mut runtime.store, "memory")
             .ok_or_else(|| LociError::PluginError("WASM memory not found".to_string()))?;
 
@@ -321,7 +337,9 @@ impl WasmPlugin {
         let end = start + s.len();
 
         if end > data.len() {
-            return Err(LociError::PluginError("WASM memory write out of bounds".to_string()));
+            return Err(LociError::PluginError(
+                "WASM memory write out of bounds".to_string(),
+            ));
         }
 
         data[start..end].copy_from_slice(s.as_bytes());
@@ -353,7 +371,11 @@ impl Plugin for WasmPlugin {
         let mut runtime = self.runtime.lock();
         let runtime = &mut *runtime;
 
-        if runtime.instance.get_typed_func::<i32, i32>(&mut runtime.store, "pre_generate").is_ok() {
+        if runtime
+            .instance
+            .get_typed_func::<i32, i32>(&mut runtime.store, "pre_generate")
+            .is_ok()
+        {
             // Hook exists but we can't call it properly yet
             // Just return the original prompt for now
             Ok(prompt.to_string())
@@ -378,11 +400,7 @@ impl Plugin for WasmPlugin {
     }
 
     fn post_sample(&self, token_id: i32) -> Result<i32> {
-        self.call_with_timeout(
-            "post_sample",
-            token_id,
-            self.config.timeout_ms,
-        )
+        self.call_with_timeout("post_sample", token_id, self.config.timeout_ms)
     }
 
     fn cleanup(&mut self) -> Result<()> {

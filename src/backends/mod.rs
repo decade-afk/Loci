@@ -13,9 +13,9 @@
 //! - `onnx`: ONNX Runtime backend
 //! - WASM backends via wasmtime
 
-pub mod llamacpp;
 pub mod candle;
 pub mod dynamic;
+pub mod llamacpp;
 
 pub use candle::{CandleBackend, CandleModel};
 pub use dynamic::DynamicBackend;

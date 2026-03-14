@@ -142,18 +142,16 @@ impl ModelRegistry {
         }
     }
 
-    fn get_or_init_engine_cell(&self, model_id: ModelId) -> Result<(String, u32, Arc<Mutex<Option<InferenceEngine>>>)> {
+    fn get_or_init_engine_cell(
+        &self,
+        model_id: ModelId,
+    ) -> Result<(String, u32, Arc<Mutex<Option<InferenceEngine>>>)> {
         let models = self.models.read();
         let entry = models.get(&model_id).ok_or(LociError::ModelNotFound)?;
         Ok((entry.path.clone(), entry.n_ctx, Arc::clone(&entry.engine)))
     }
 
-    fn generate_once(
-        &self,
-        model_id: ModelId,
-        prompt: &str,
-        max_tokens: usize,
-    ) -> Result<String> {
+    fn generate_once(&self, model_id: ModelId, prompt: &str, max_tokens: usize) -> Result<String> {
         let (path, n_ctx, engine_cell) = self.get_or_init_engine_cell(model_id)?;
         let mut engine_guard = engine_cell.lock();
         if engine_guard.is_none() {
@@ -166,9 +164,9 @@ impl ModelRegistry {
             ..GenerationParams::default()
         };
 
-        let engine = engine_guard.as_mut().ok_or_else(|| {
-            LociError::InferenceError("engine initialization failed".to_string())
-        })?;
+        let engine = engine_guard
+            .as_mut()
+            .ok_or_else(|| LociError::InferenceError("engine initialization failed".to_string()))?;
         engine.generate(prompt, params)
     }
 
@@ -176,7 +174,8 @@ impl ModelRegistry {
         if candidates.is_empty() {
             return Vec::new();
         }
-        let start = (self.round_robin_cursor.fetch_add(1, Ordering::SeqCst) as usize) % candidates.len();
+        let start =
+            (self.round_robin_cursor.fetch_add(1, Ordering::SeqCst) as usize) % candidates.len();
         (0..candidates.len())
             .map(|offset| candidates[(start + offset) % candidates.len()])
             .collect()
@@ -325,14 +324,11 @@ impl ModelRegistry {
                 ref probe_prompt,
                 probe_max_tokens,
             } => {
-                let mut benches =
-                    self.benchmark_models(candidates, probe_prompt, probe_max_tokens);
-                benches.sort_by(|a, b| {
-                    match (a.success, b.success) {
-                        (true, false) => std::cmp::Ordering::Less,
-                        (false, true) => std::cmp::Ordering::Greater,
-                        _ => a.latency_ms.cmp(&b.latency_ms),
-                    }
+                let mut benches = self.benchmark_models(candidates, probe_prompt, probe_max_tokens);
+                benches.sort_by(|a, b| match (a.success, b.success) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a.latency_ms.cmp(&b.latency_ms),
                 });
                 benches.into_iter().map(|b| b.model_id).collect::<Vec<_>>()
             }
@@ -452,7 +448,10 @@ impl ModelRegistry {
                     "You are an answer synthesizer.\nOriginal user prompt:\n{}\n\nCandidate answers:\n{}\n\nReturn the best final answer only.",
                     prompt, candidates_text
                 );
-                (self.generate_once(judge, &judge_prompt, max_tokens)?, Some(judge))
+                (
+                    self.generate_once(judge, &judge_prompt, max_tokens)?,
+                    Some(judge),
+                )
             }
         };
 
@@ -544,15 +543,40 @@ mod tests {
     #[test]
     fn test_round_robin_order_rotates() {
         let registry = ModelRegistry::new();
-        let candidates = vec![ModelId::from_u64(1), ModelId::from_u64(2), ModelId::from_u64(3)];
+        let candidates = vec![
+            ModelId::from_u64(1),
+            ModelId::from_u64(2),
+            ModelId::from_u64(3),
+        ];
 
         let first = registry.round_robin_order(&candidates);
         let second = registry.round_robin_order(&candidates);
         let third = registry.round_robin_order(&candidates);
 
-        assert_eq!(first, vec![ModelId::from_u64(1), ModelId::from_u64(2), ModelId::from_u64(3)]);
-        assert_eq!(second, vec![ModelId::from_u64(2), ModelId::from_u64(3), ModelId::from_u64(1)]);
-        assert_eq!(third, vec![ModelId::from_u64(3), ModelId::from_u64(1), ModelId::from_u64(2)]);
+        assert_eq!(
+            first,
+            vec![
+                ModelId::from_u64(1),
+                ModelId::from_u64(2),
+                ModelId::from_u64(3)
+            ]
+        );
+        assert_eq!(
+            second,
+            vec![
+                ModelId::from_u64(2),
+                ModelId::from_u64(3),
+                ModelId::from_u64(1)
+            ]
+        );
+        assert_eq!(
+            third,
+            vec![
+                ModelId::from_u64(3),
+                ModelId::from_u64(1),
+                ModelId::from_u64(2)
+            ]
+        );
     }
 
     #[test]
@@ -567,7 +591,9 @@ mod tests {
     #[test]
     fn test_benchmark_models_reports_failure_for_missing_file() {
         let registry = ModelRegistry::new();
-        let model_id = registry.load_model("missing_model_for_benchmark.gguf", 2048).unwrap();
+        let model_id = registry
+            .load_model("missing_model_for_benchmark.gguf", 2048)
+            .unwrap();
 
         let benches = registry.benchmark_models(&[model_id], "probe", 4);
         assert_eq!(benches.len(), 1);

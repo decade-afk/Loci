@@ -70,7 +70,11 @@ pub struct QuantizationReport {
 pub struct QuantizationTool;
 
 impl QuantizationTool {
-    pub fn quantize(values: &[f32], shape: Vec<usize>, scheme: QuantizationScheme) -> Result<QuantizedTensor> {
+    pub fn quantize(
+        values: &[f32],
+        shape: Vec<usize>,
+        scheme: QuantizationScheme,
+    ) -> Result<QuantizedTensor> {
         let expected = shape.iter().product::<usize>();
         if expected != values.len() {
             return Err(LociError::InvalidArgument(format!(
@@ -263,12 +267,9 @@ mod tests {
     #[test]
     fn test_shape_validation() {
         let values = vec![1.0, 2.0, 3.0];
-        let error = QuantizationTool::quantize(
-            &values,
-            vec![2, 2],
-            QuantizationScheme::Int8Symmetric,
-        )
-        .unwrap_err();
+        let error =
+            QuantizationTool::quantize(&values, vec![2, 2], QuantizationScheme::Int8Symmetric)
+                .unwrap_err();
         assert!(matches!(error, LociError::InvalidArgument(_)));
     }
 }

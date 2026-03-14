@@ -177,7 +177,8 @@ impl SkillRegistry {
 
         // Generic reasoning profile; no hard tool restrictions.
         let mut reasoner = Skill::new("reasoner");
-        reasoner.description = Some("General-purpose reasoning skill for tool-augmented agents.".to_string());
+        reasoner.description =
+            Some("General-purpose reasoning skill for tool-augmented agents.".to_string());
         reasoner.system_prompt = Some(
             "Think step by step when needed. Use tools when they improve factual precision, \
              and keep final answers concise and grounded in tool outputs."
@@ -230,7 +231,10 @@ impl SkillRegistry {
         if self.skills.remove(name).is_some() {
             Ok(())
         } else {
-            Err(LociError::PluginError(format!("Skill '{}' not found", name)))
+            Err(LociError::PluginError(format!(
+                "Skill '{}' not found",
+                name
+            )))
         }
     }
 
@@ -359,8 +363,8 @@ fn parse_skill_pack_toml(content: &str) -> Result<Vec<Skill>> {
             return Ok(pack.skills);
         }
     }
-    let single =
-        toml::from_str::<Skill>(content).map_err(|e| LociError::SerializationError(e.to_string()))?;
+    let single = toml::from_str::<Skill>(content)
+        .map_err(|e| LociError::SerializationError(e.to_string()))?;
     Ok(vec![single])
 }
 
