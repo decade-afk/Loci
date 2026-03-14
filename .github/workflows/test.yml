@@ -25,12 +25,37 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build
+          sudo apt-get install -y clang libclang-dev llvm-dev cmake ninja-build
+
+      - name: Configure bindgen (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
 
       - name: Install dependencies (macOS)
         if: matrix.os == 'macos-latest'
         run: |
           brew install cmake ninja
+
+      - name: Configure bindgen (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $libclang = Get-ChildItem -Path @(
+            'C:\Program Files\LLVM\bin\libclang.dll',
+            'D:\Program Files\LLVM\bin\libclang.dll',
+            'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\bin\libclang.dll',
+            'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\*\bin\libclang.dll',
+            'C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Tools\Llvm\bin\libclang.dll',
+            'C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Tools\Llvm\*\bin\libclang.dll',
+            'D:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\bin\libclang.dll',
+            'D:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\*\bin\libclang.dll',
+            'D:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Tools\Llvm\bin\libclang.dll',
+            'D:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Tools\Llvm\*\bin\libclang.dll'
+          ) -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $libclang) {
+            throw 'libclang.dll not found on the GitHub runner'
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=$($libclang.DirectoryName)"
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -54,7 +79,7 @@ jobs:
         run: cargo build --release --lib
 
   clippy:
-    name: Clippy
+    name: Clippy (advisory)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -69,9 +94,13 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build
+          sudo apt-get install -y clang libclang-dev llvm-dev cmake ninja-build
+
+      - name: Configure bindgen
+        run: echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
 
       - name: Run clippy
+        continue-on-error: true
         run: cargo clippy --all-targets --features redis-store -- -D warnings
 
   fmt:

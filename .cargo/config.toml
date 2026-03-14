@@ -1,7 +1,3 @@
 [target.x86_64-pc-windows-gnu]
 linker = "gcc"
 rustflags = ["-C", "link-args=-Wl,--allow-multiple-definition"]
-
-[env]
-# Set CLANG include path for bindgen
-BINDGEN_EXTRA_CLANG_ARGS = "-ID:/mingw64/x86_64-w64-mingw32/include"

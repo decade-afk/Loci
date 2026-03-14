@@ -47,11 +47,36 @@ jobs:
       if: matrix.os == 'ubuntu-latest'
       run: |
         sudo apt-get update
-        sudo apt-get install -y cmake build-essential
+        sudo apt-get install -y clang libclang-dev llvm-dev cmake build-essential
+
+    - name: Configure bindgen (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
 
     - name: Install CMake (macOS)
       if: matrix.os == 'macos-latest'
       run: brew install cmake
+
+    - name: Configure bindgen (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: pwsh
+      run: |
+        $libclang = Get-ChildItem -Path @(
+          'C:\Program Files\LLVM\bin\libclang.dll',
+          'D:\Program Files\LLVM\bin\libclang.dll',
+          'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\bin\libclang.dll',
+          'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\*\bin\libclang.dll',
+          'C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Tools\Llvm\bin\libclang.dll',
+          'C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Tools\Llvm\*\bin\libclang.dll',
+          'D:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\bin\libclang.dll',
+          'D:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\*\bin\libclang.dll',
+          'D:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Tools\Llvm\bin\libclang.dll',
+          'D:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Tools\Llvm\*\bin\libclang.dll'
+        ) -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $libclang) {
+          throw 'libclang.dll not found on the GitHub runner'
+        }
+        Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=$($libclang.DirectoryName)"
 
     - name: Build
       run: cargo build --release --target ${{ matrix.target }}
@@ -85,7 +110,10 @@ jobs:
     - name: Install CMake
       run: |
         sudo apt-get update
-        sudo apt-get install -y cmake build-essential
+        sudo apt-get install -y clang libclang-dev llvm-dev cmake build-essential
+
+    - name: Configure bindgen
+      run: echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
 
     - name: Publish to crates.io
       run: cargo publish --token ${{ secrets.CARGO_TOKEN }}

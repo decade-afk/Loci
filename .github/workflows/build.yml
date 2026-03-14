@@ -35,6 +35,36 @@ jobs:
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-ninja
 
+      - name: Configure bindgen (Windows)
+        shell: pwsh
+        run: |
+          $libclang = Get-ChildItem -Path @(
+            'C:\Program Files\LLVM\bin\libclang.dll',
+            'D:\Program Files\LLVM\bin\libclang.dll',
+            'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\bin\libclang.dll',
+            'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\*\bin\libclang.dll',
+            'C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Tools\Llvm\bin\libclang.dll',
+            'C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Tools\Llvm\*\bin\libclang.dll',
+            'D:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\bin\libclang.dll',
+            'D:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\*\bin\libclang.dll',
+            'D:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Tools\Llvm\bin\libclang.dll',
+            'D:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Tools\Llvm\*\bin\libclang.dll'
+          ) -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $libclang) {
+            throw 'libclang.dll not found on the GitHub runner'
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=$($libclang.DirectoryName)"
+
+      - name: Configure bindgen headers (Windows GNU)
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        shell: pwsh
+        run: |
+          $mingwInclude = 'C:/msys64/mingw64/x86_64-w64-mingw32/include'
+          if (-not (Test-Path $mingwInclude)) {
+            throw "MinGW include directory not found: $mingwInclude"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "BINDGEN_EXTRA_CLANG_ARGS=-I$mingwInclude"
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -98,7 +128,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build
+          sudo apt-get install -y clang libclang-dev llvm-dev cmake ninja-build
+
+      - name: Configure bindgen
+        run: echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
 
       - name: Install cross-compilation tools
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -278,6 +311,14 @@ jobs:
         with:
           ndk-version: r25c
           add-to-path: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev llvm-dev cmake ninja-build
+
+      - name: Configure bindgen
+        run: echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
 
       - name: Set up Android environment
         run: |
