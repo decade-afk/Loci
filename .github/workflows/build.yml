@@ -240,10 +240,7 @@ jobs:
           name: loci-macos-${{ matrix.target }}
           path: loci-macos-${{ matrix.target }}.tar.gz
 
-  # Temporarily disabled: wasmtime doesn't support iOS yet
-  # Re-enable when wasmtime adds iOS support or we make WASM plugins optional
   build-ios:
-    if: false
     name: Build iOS
     runs-on: macos-latest
     strategy:
@@ -266,8 +263,64 @@ jobs:
         run: |
           brew install cmake ninja
 
+      - name: Configure Apple mobile toolchain
+        shell: bash
+        run: |
+          case "${{ matrix.target }}" in
+            aarch64-apple-ios)
+              SDK=iphoneos
+              ARCH=arm64
+              LINKER_VAR=CARGO_TARGET_AARCH64_APPLE_IOS_LINKER
+              CC_VAR=CC_aarch64_apple_ios
+              CXX_VAR=CXX_aarch64_apple_ios
+              AR_VAR=AR_aarch64_apple_ios
+              CFLAGS_VAR=CFLAGS_aarch64_apple_ios
+              CXXFLAGS_VAR=CXXFLAGS_aarch64_apple_ios
+              DEPLOYMENT_FLAG=-miphoneos-version-min=13.0
+              ;;
+            aarch64-apple-ios-sim)
+              SDK=iphonesimulator
+              ARCH=arm64
+              LINKER_VAR=CARGO_TARGET_AARCH64_APPLE_IOS_SIM_LINKER
+              CC_VAR=CC_aarch64_apple_ios_sim
+              CXX_VAR=CXX_aarch64_apple_ios_sim
+              AR_VAR=AR_aarch64_apple_ios_sim
+              CFLAGS_VAR=CFLAGS_aarch64_apple_ios_sim
+              CXXFLAGS_VAR=CXXFLAGS_aarch64_apple_ios_sim
+              DEPLOYMENT_FLAG=-mios-simulator-version-min=13.0
+              ;;
+            x86_64-apple-ios)
+              SDK=iphonesimulator
+              ARCH=x86_64
+              LINKER_VAR=CARGO_TARGET_X86_64_APPLE_IOS_LINKER
+              CC_VAR=CC_x86_64_apple_ios
+              CXX_VAR=CXX_x86_64_apple_ios
+              AR_VAR=AR_x86_64_apple_ios
+              CFLAGS_VAR=CFLAGS_x86_64_apple_ios
+              CXXFLAGS_VAR=CXXFLAGS_x86_64_apple_ios
+              DEPLOYMENT_FLAG=-mios-simulator-version-min=13.0
+              ;;
+          esac
+
+          SDKROOT=$(xcrun --sdk "$SDK" --show-sdk-path)
+          CLANG=$(xcrun --sdk "$SDK" --find clang)
+          CLANGXX=$(xcrun --sdk "$SDK" --find clang++)
+          AR=$(xcrun --sdk "$SDK" --find ar)
+
+          echo "SDKROOT=$SDKROOT" >> $GITHUB_ENV
+          echo "CMAKE_OSX_SYSROOT=$SDKROOT" >> $GITHUB_ENV
+          echo "CMAKE_OSX_ARCHITECTURES=$ARCH" >> $GITHUB_ENV
+          echo "CMAKE_OSX_DEPLOYMENT_TARGET=13.0" >> $GITHUB_ENV
+          echo "IPHONEOS_DEPLOYMENT_TARGET=13.0" >> $GITHUB_ENV
+          echo "$LINKER_VAR=$CLANG" >> $GITHUB_ENV
+          echo "$CC_VAR=$CLANG" >> $GITHUB_ENV
+          echo "$CXX_VAR=$CLANGXX" >> $GITHUB_ENV
+          echo "$AR_VAR=$AR" >> $GITHUB_ENV
+          echo "$CFLAGS_VAR=$DEPLOYMENT_FLAG -isysroot $SDKROOT" >> $GITHUB_ENV
+          echo "$CXXFLAGS_VAR=$DEPLOYMENT_FLAG -isysroot $SDKROOT" >> $GITHUB_ENV
+
       - name: Build library (iOS doesn't support executables)
-        run: cargo build --release --lib --target ${{ matrix.target }}
+        run: cargo build --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect
 
       - name: Package artifacts
         run: |
@@ -283,10 +336,7 @@ jobs:
           name: loci-ios-${{ matrix.target }}
           path: loci-ios-${{ matrix.target }}.tar.gz
 
-  # Temporarily disabled: wasmtime/cranelift doesn't support ARMv7 yet
-  # Re-enable when wasmtime adds ARMv7 support or we make WASM plugins optional
   build-android:
-    if: false
     name: Build Android
     runs-on: ubuntu-latest
     strategy:
@@ -320,35 +370,77 @@ jobs:
       - name: Configure bindgen
         run: echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
 
-      - name: Set up Android environment
+      - name: Configure Android toolchain
+        shell: bash
         run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_ROOT" >> $GITHUB_ENV
-
-          # Set environment for all targets
           TOOLCHAIN=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
 
-          # aarch64
-          echo "CC_aarch64_linux_android=${TOOLCHAIN}/aarch64-linux-android21-clang" >> $GITHUB_ENV
-          echo "CXX_aarch64_linux_android=${TOOLCHAIN}/aarch64-linux-android21-clang++" >> $GITHUB_ENV
-          echo "AR_aarch64_linux_android=${TOOLCHAIN}/llvm-ar" >> $GITHUB_ENV
+          case "${{ matrix.target }}" in
+            aarch64-linux-android)
+              ABI=arm64-v8a
+              API=24
+              CLANG_TRIPLE=aarch64-linux-android
+              LINKER_VAR=CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER
+              CC_VAR=CC_aarch64_linux_android
+              CXX_VAR=CXX_aarch64_linux_android
+              AR_VAR=AR_aarch64_linux_android
+              CFLAGS_VAR=CFLAGS_aarch64_linux_android
+              CXXFLAGS_VAR=CXXFLAGS_aarch64_linux_android
+              ;;
+            armv7-linux-androideabi)
+              ABI=armeabi-v7a
+              API=24
+              CLANG_TRIPLE=armv7a-linux-androideabi
+              LINKER_VAR=CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER
+              CC_VAR=CC_armv7_linux_androideabi
+              CXX_VAR=CXX_armv7_linux_androideabi
+              AR_VAR=AR_armv7_linux_androideabi
+              CFLAGS_VAR=CFLAGS_armv7_linux_androideabi
+              CXXFLAGS_VAR=CXXFLAGS_armv7_linux_androideabi
+              ;;
+            x86_64-linux-android)
+              ABI=x86_64
+              API=24
+              CLANG_TRIPLE=x86_64-linux-android
+              LINKER_VAR=CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER
+              CC_VAR=CC_x86_64_linux_android
+              CXX_VAR=CXX_x86_64_linux_android
+              AR_VAR=AR_x86_64_linux_android
+              CFLAGS_VAR=CFLAGS_x86_64_linux_android
+              CXXFLAGS_VAR=CXXFLAGS_x86_64_linux_android
+              ;;
+            i686-linux-android)
+              ABI=x86
+              API=24
+              CLANG_TRIPLE=i686-linux-android
+              LINKER_VAR=CARGO_TARGET_I686_LINUX_ANDROID_LINKER
+              CC_VAR=CC_i686_linux_android
+              CXX_VAR=CXX_i686_linux_android
+              AR_VAR=AR_i686_linux_android
+              CFLAGS_VAR=CFLAGS_i686_linux_android
+              CXXFLAGS_VAR=CXXFLAGS_i686_linux_android
+              ;;
+          esac
 
-          # armv7
-          echo "CC_armv7_linux_androideabi=${TOOLCHAIN}/armv7a-linux-androideabi21-clang" >> $GITHUB_ENV
-          echo "CXX_armv7_linux_androideabi=${TOOLCHAIN}/armv7a-linux-androideabi21-clang++" >> $GITHUB_ENV
-          echo "AR_armv7_linux_androideabi=${TOOLCHAIN}/llvm-ar" >> $GITHUB_ENV
+          CLANG="$TOOLCHAIN/${CLANG_TRIPLE}${API}-clang"
+          CLANGXX="$TOOLCHAIN/${CLANG_TRIPLE}${API}-clang++"
+          AR="$TOOLCHAIN/llvm-ar"
 
-          # x86_64
-          echo "CC_x86_64_linux_android=${TOOLCHAIN}/x86_64-linux-android21-clang" >> $GITHUB_ENV
-          echo "CXX_x86_64_linux_android=${TOOLCHAIN}/x86_64-linux-android21-clang++" >> $GITHUB_ENV
-          echo "AR_x86_64_linux_android=${TOOLCHAIN}/llvm-ar" >> $GITHUB_ENV
-
-          # i686
-          echo "CC_i686_linux_android=${TOOLCHAIN}/i686-linux-android21-clang" >> $GITHUB_ENV
-          echo "CXX_i686_linux_android=${TOOLCHAIN}/i686-linux-android21-clang++" >> $GITHUB_ENV
-          echo "AR_i686_linux_android=${TOOLCHAIN}/llvm-ar" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_ROOT" >> $GITHUB_ENV
+          echo "CMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" >> $GITHUB_ENV
+          echo "ANDROID_ABI=$ABI" >> $GITHUB_ENV
+          echo "ANDROID_PLATFORM=android-$API" >> $GITHUB_ENV
+          echo "ANDROID_STL=c++_shared" >> $GITHUB_ENV
+          echo "CMAKE_ANDROID_STL_TYPE=c++_shared" >> $GITHUB_ENV
+          echo "$LINKER_VAR=$CLANG" >> $GITHUB_ENV
+          echo "$CC_VAR=$CLANG" >> $GITHUB_ENV
+          echo "$CXX_VAR=$CLANGXX" >> $GITHUB_ENV
+          echo "$AR_VAR=$AR" >> $GITHUB_ENV
+          echo "$CFLAGS_VAR=-fPIC" >> $GITHUB_ENV
+          echo "$CXXFLAGS_VAR=-fPIC" >> $GITHUB_ENV
 
       - name: Build library
-        run: cargo build --release --lib --target ${{ matrix.target }}
+        run: cargo build --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect
 
       - name: Package artifacts
         run: |
@@ -367,8 +459,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build-windows, build-linux, build-macos]
-    # TODO: Add build-ios and build-android when wasmtime supports these platforms
+    needs: [build-windows, build-linux, build-macos, build-ios, build-android]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:

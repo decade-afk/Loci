@@ -101,11 +101,13 @@ rustup target add aarch64-apple-ios
 rustup target add x86_64-apple-ios
 rustup target add aarch64-apple-ios-sim
 
+# Mobile builds disable the optional WASM plugin runtime.
+
 # Build for device
-cargo build --release --lib --target aarch64-apple-ios
+cargo build --release --lib --target aarch64-apple-ios --no-default-features --features auto-detect
 
 # Build for simulator
-cargo build --release --lib --target aarch64-apple-ios-sim
+cargo build --release --lib --target aarch64-apple-ios-sim --no-default-features --features auto-detect
 ```
 
 ### Building for Android
@@ -123,9 +125,13 @@ rustup target add i686-linux-android
 # Set up environment variables
 export CC_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
 export AR_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+export CMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake
+export ANDROID_ABI=arm64-v8a
+export ANDROID_PLATFORM=android-24
+export ANDROID_STL=c++_shared
 
 # Build
-cargo build --release --lib --target aarch64-linux-android
+cargo build --release --lib --target aarch64-linux-android --no-default-features --features auto-detect
 ```
 
 ## Using the C API

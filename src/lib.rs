@@ -83,6 +83,10 @@ pub mod skills;
 pub mod timeout_controller;
 pub mod tool_plugin;
 pub mod vision_clip;
+#[cfg(feature = "wasm-plugins")]
+pub mod wasm_plugin;
+#[cfg(not(feature = "wasm-plugins"))]
+#[path = "wasm_plugin_stub.rs"]
 pub mod wasm_plugin;
 
 // Plugin examples (compiled as a feature)

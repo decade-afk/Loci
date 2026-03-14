@@ -19,18 +19,75 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: loci
             asset_name: loci-linux-x86_64
+            cargo_args: ""
+            artifact_kind: binary
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: loci.exe
             asset_name: loci-windows-x86_64.exe
+            cargo_args: ""
+            artifact_kind: binary
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: loci
             asset_name: loci-macos-x86_64
+            cargo_args: ""
+            artifact_kind: binary
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: loci
             asset_name: loci-macos-aarch64
+            cargo_args: ""
+            artifact_kind: binary
+          - os: macos-latest
+            target: aarch64-apple-ios
+            artifact_name: libloci.a
+            asset_name: loci-ios-aarch64-apple-ios.a
+            cargo_args: "--lib --no-default-features --features auto-detect"
+            artifact_kind: library
+            mobile: ios
+          - os: macos-latest
+            target: x86_64-apple-ios
+            artifact_name: libloci.a
+            asset_name: loci-ios-x86_64-apple-ios.a
+            cargo_args: "--lib --no-default-features --features auto-detect"
+            artifact_kind: library
+            mobile: ios
+          - os: macos-latest
+            target: aarch64-apple-ios-sim
+            artifact_name: libloci.a
+            asset_name: loci-ios-aarch64-apple-ios-sim.a
+            cargo_args: "--lib --no-default-features --features auto-detect"
+            artifact_kind: library
+            mobile: ios
+          - os: ubuntu-latest
+            target: aarch64-linux-android
+            artifact_name: libloci.so
+            asset_name: loci-android-aarch64-linux-android.so
+            cargo_args: "--lib --no-default-features --features auto-detect"
+            artifact_kind: library
+            mobile: android
+          - os: ubuntu-latest
+            target: armv7-linux-androideabi
+            artifact_name: libloci.so
+            asset_name: loci-android-armv7-linux-androideabi.so
+            cargo_args: "--lib --no-default-features --features auto-detect"
+            artifact_kind: library
+            mobile: android
+          - os: ubuntu-latest
+            target: x86_64-linux-android
+            artifact_name: libloci.so
+            asset_name: loci-android-x86_64-linux-android.so
+            cargo_args: "--lib --no-default-features --features auto-detect"
+            artifact_kind: library
+            mobile: android
+          - os: ubuntu-latest
+            target: i686-linux-android
+            artifact_name: libloci.so
+            asset_name: loci-android-i686-linux-android.so
+            cargo_args: "--lib --no-default-features --features auto-detect"
+            artifact_kind: library
+            mobile: android
 
     steps:
     - name: Checkout code
@@ -57,6 +114,140 @@ jobs:
       if: matrix.os == 'macos-latest'
       run: brew install cmake
 
+    - name: Setup Android NDK
+      if: matrix.mobile == 'android'
+      uses: nttld/setup-ndk@v1
+      with:
+        ndk-version: r25c
+        add-to-path: true
+
+    - name: Configure Android toolchain
+      if: matrix.mobile == 'android'
+      shell: bash
+      run: |
+        TOOLCHAIN=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
+
+        case "${{ matrix.target }}" in
+          aarch64-linux-android)
+            ABI=arm64-v8a
+            API=24
+            CLANG_TRIPLE=aarch64-linux-android
+            LINKER_VAR=CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER
+            CC_VAR=CC_aarch64_linux_android
+            CXX_VAR=CXX_aarch64_linux_android
+            AR_VAR=AR_aarch64_linux_android
+            CFLAGS_VAR=CFLAGS_aarch64_linux_android
+            CXXFLAGS_VAR=CXXFLAGS_aarch64_linux_android
+            ;;
+          armv7-linux-androideabi)
+            ABI=armeabi-v7a
+            API=24
+            CLANG_TRIPLE=armv7a-linux-androideabi
+            LINKER_VAR=CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER
+            CC_VAR=CC_armv7_linux_androideabi
+            CXX_VAR=CXX_armv7_linux_androideabi
+            AR_VAR=AR_armv7_linux_androideabi
+            CFLAGS_VAR=CFLAGS_armv7_linux_androideabi
+            CXXFLAGS_VAR=CXXFLAGS_armv7_linux_androideabi
+            ;;
+          x86_64-linux-android)
+            ABI=x86_64
+            API=24
+            CLANG_TRIPLE=x86_64-linux-android
+            LINKER_VAR=CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER
+            CC_VAR=CC_x86_64_linux_android
+            CXX_VAR=CXX_x86_64_linux_android
+            AR_VAR=AR_x86_64_linux_android
+            CFLAGS_VAR=CFLAGS_x86_64_linux_android
+            CXXFLAGS_VAR=CXXFLAGS_x86_64_linux_android
+            ;;
+          i686-linux-android)
+            ABI=x86
+            API=24
+            CLANG_TRIPLE=i686-linux-android
+            LINKER_VAR=CARGO_TARGET_I686_LINUX_ANDROID_LINKER
+            CC_VAR=CC_i686_linux_android
+            CXX_VAR=CXX_i686_linux_android
+            AR_VAR=AR_i686_linux_android
+            CFLAGS_VAR=CFLAGS_i686_linux_android
+            CXXFLAGS_VAR=CXXFLAGS_i686_linux_android
+            ;;
+        esac
+
+        CLANG="$TOOLCHAIN/${CLANG_TRIPLE}${API}-clang"
+        CLANGXX="$TOOLCHAIN/${CLANG_TRIPLE}${API}-clang++"
+        AR="$TOOLCHAIN/llvm-ar"
+
+        echo "ANDROID_NDK_HOME=$ANDROID_NDK_ROOT" >> $GITHUB_ENV
+        echo "CMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" >> $GITHUB_ENV
+        echo "ANDROID_ABI=$ABI" >> $GITHUB_ENV
+        echo "ANDROID_PLATFORM=android-$API" >> $GITHUB_ENV
+        echo "ANDROID_STL=c++_shared" >> $GITHUB_ENV
+        echo "CMAKE_ANDROID_STL_TYPE=c++_shared" >> $GITHUB_ENV
+        echo "$LINKER_VAR=$CLANG" >> $GITHUB_ENV
+        echo "$CC_VAR=$CLANG" >> $GITHUB_ENV
+        echo "$CXX_VAR=$CLANGXX" >> $GITHUB_ENV
+        echo "$AR_VAR=$AR" >> $GITHUB_ENV
+        echo "$CFLAGS_VAR=-fPIC" >> $GITHUB_ENV
+        echo "$CXXFLAGS_VAR=-fPIC" >> $GITHUB_ENV
+
+    - name: Configure Apple mobile toolchain
+      if: matrix.mobile == 'ios'
+      shell: bash
+      run: |
+        case "${{ matrix.target }}" in
+          aarch64-apple-ios)
+            SDK=iphoneos
+            ARCH=arm64
+            LINKER_VAR=CARGO_TARGET_AARCH64_APPLE_IOS_LINKER
+            CC_VAR=CC_aarch64_apple_ios
+            CXX_VAR=CXX_aarch64_apple_ios
+            AR_VAR=AR_aarch64_apple_ios
+            CFLAGS_VAR=CFLAGS_aarch64_apple_ios
+            CXXFLAGS_VAR=CXXFLAGS_aarch64_apple_ios
+            DEPLOYMENT_FLAG=-miphoneos-version-min=13.0
+            ;;
+          aarch64-apple-ios-sim)
+            SDK=iphonesimulator
+            ARCH=arm64
+            LINKER_VAR=CARGO_TARGET_AARCH64_APPLE_IOS_SIM_LINKER
+            CC_VAR=CC_aarch64_apple_ios_sim
+            CXX_VAR=CXX_aarch64_apple_ios_sim
+            AR_VAR=AR_aarch64_apple_ios_sim
+            CFLAGS_VAR=CFLAGS_aarch64_apple_ios_sim
+            CXXFLAGS_VAR=CXXFLAGS_aarch64_apple_ios_sim
+            DEPLOYMENT_FLAG=-mios-simulator-version-min=13.0
+            ;;
+          x86_64-apple-ios)
+            SDK=iphonesimulator
+            ARCH=x86_64
+            LINKER_VAR=CARGO_TARGET_X86_64_APPLE_IOS_LINKER
+            CC_VAR=CC_x86_64_apple_ios
+            CXX_VAR=CXX_x86_64_apple_ios
+            AR_VAR=AR_x86_64_apple_ios
+            CFLAGS_VAR=CFLAGS_x86_64_apple_ios
+            CXXFLAGS_VAR=CXXFLAGS_x86_64_apple_ios
+            DEPLOYMENT_FLAG=-mios-simulator-version-min=13.0
+            ;;
+        esac
+
+        SDKROOT=$(xcrun --sdk "$SDK" --show-sdk-path)
+        CLANG=$(xcrun --sdk "$SDK" --find clang)
+        CLANGXX=$(xcrun --sdk "$SDK" --find clang++)
+        AR=$(xcrun --sdk "$SDK" --find ar)
+
+        echo "SDKROOT=$SDKROOT" >> $GITHUB_ENV
+        echo "CMAKE_OSX_SYSROOT=$SDKROOT" >> $GITHUB_ENV
+        echo "CMAKE_OSX_ARCHITECTURES=$ARCH" >> $GITHUB_ENV
+        echo "CMAKE_OSX_DEPLOYMENT_TARGET=13.0" >> $GITHUB_ENV
+        echo "IPHONEOS_DEPLOYMENT_TARGET=13.0" >> $GITHUB_ENV
+        echo "$LINKER_VAR=$CLANG" >> $GITHUB_ENV
+        echo "$CC_VAR=$CLANG" >> $GITHUB_ENV
+        echo "$CXX_VAR=$CLANGXX" >> $GITHUB_ENV
+        echo "$AR_VAR=$AR" >> $GITHUB_ENV
+        echo "$CFLAGS_VAR=$DEPLOYMENT_FLAG -isysroot $SDKROOT" >> $GITHUB_ENV
+        echo "$CXXFLAGS_VAR=$DEPLOYMENT_FLAG -isysroot $SDKROOT" >> $GITHUB_ENV
+
     - name: Configure bindgen (Windows)
       if: matrix.os == 'windows-latest'
       shell: pwsh
@@ -79,10 +270,10 @@ jobs:
         Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=$($libclang.DirectoryName)"
 
     - name: Build
-      run: cargo build --release --target ${{ matrix.target }}
+      run: cargo build --release --target ${{ matrix.target }} ${{ matrix.cargo_args }}
 
     - name: Strip binary (Linux/macOS)
-      if: matrix.os != 'windows-latest'
+      if: matrix.os != 'windows-latest' && matrix.artifact_kind == 'binary'
       run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
 
     - name: Upload binaries to release

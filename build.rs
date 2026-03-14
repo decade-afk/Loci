@@ -12,6 +12,18 @@ fn main() {
     println!("cargo:rerun-if-changed=src/ffi_shim.c");
     println!("cargo:rerun-if-env-changed=LOCI_CPU_OPT");
     println!("cargo:rerun-if-env-changed=LOCI_CMAKE_BUILD_JOBS");
+    for env_var in [
+        "CMAKE_TOOLCHAIN_FILE",
+        "ANDROID_ABI",
+        "ANDROID_PLATFORM",
+        "ANDROID_STL",
+        "CMAKE_ANDROID_STL_TYPE",
+        "CMAKE_OSX_SYSROOT",
+        "CMAKE_OSX_ARCHITECTURES",
+        "CMAKE_OSX_DEPLOYMENT_TARGET",
+    ] {
+        println!("cargo:rerun-if-env-changed={env_var}");
+    }
 
     // Get the output directory where generated files should be placed
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -92,6 +104,8 @@ fn main() {
             }
         }
     }
+
+    apply_cross_cmake_defines(&mut config);
 
     // Configure GPU backends based on feature flags
     #[cfg(feature = "cuda")]
@@ -186,6 +200,35 @@ fn resolve_cmake_build_jobs(target: &str) -> Option<String> {
         Ok(raw) if !raw.trim().is_empty() => Some(raw),
         _ if target.contains("windows-msvc") => Some("1".to_string()),
         _ => None,
+    }
+}
+
+fn apply_cross_cmake_defines(config: &mut cmake::Config) {
+    for (key, value) in [
+        (
+            "CMAKE_TOOLCHAIN_FILE",
+            env::var("CMAKE_TOOLCHAIN_FILE").ok(),
+        ),
+        ("ANDROID_ABI", env::var("ANDROID_ABI").ok()),
+        ("ANDROID_PLATFORM", env::var("ANDROID_PLATFORM").ok()),
+        ("ANDROID_STL", env::var("ANDROID_STL").ok()),
+        (
+            "CMAKE_ANDROID_STL_TYPE",
+            env::var("CMAKE_ANDROID_STL_TYPE").ok(),
+        ),
+        ("CMAKE_OSX_SYSROOT", env::var("CMAKE_OSX_SYSROOT").ok()),
+        (
+            "CMAKE_OSX_ARCHITECTURES",
+            env::var("CMAKE_OSX_ARCHITECTURES").ok(),
+        ),
+        (
+            "CMAKE_OSX_DEPLOYMENT_TARGET",
+            env::var("CMAKE_OSX_DEPLOYMENT_TARGET").ok(),
+        ),
+    ] {
+        if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+            config.define(key, value);
+        }
     }
 }
 
@@ -421,6 +464,14 @@ fn link_system_libraries(target: &str) {
         // MSVC specific libraries
         println!("cargo:rustc-link-lib=dylib=advapi32");
         // Note: MSVC uses its own C++ runtime and doesn't need explicit stdc++/gomp/winpthread
+    } else if target.contains("apple") {
+        // Apple platforms ship libc++, not libstdc++.
+        println!("cargo:rustc-link-lib=dylib=c++");
+        println!("cargo:rustc-link-lib=dylib=m");
+    } else if target.contains("android") {
+        // Android NDK uses libc++ instead of libstdc++.
+        println!("cargo:rustc-link-lib=dylib=c++_shared");
+        println!("cargo:rustc-link-lib=dylib=m");
     } else {
         // Unix-like systems (Linux, macOS, etc.)
         println!("cargo:rustc-link-lib=dylib=stdc++");
