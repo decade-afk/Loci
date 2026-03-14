@@ -1,6 +1,7 @@
 # Rust
 /target
-Cargo.lock
+# Keep the root lockfile for CI reproducibility; example crates stay ignored.
+/examples/**/Cargo.lock
 **/*.rs.bk
 
 # IDE
