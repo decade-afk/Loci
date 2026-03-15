@@ -1,10 +1,21 @@
 name: Build and Release
 
 on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
   workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_HTTP_TIMEOUT: "600"
+  CARGO_NET_RETRY: "10"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   build-windows:
@@ -63,53 +74,73 @@ jobs:
         if: matrix.target == 'x86_64-pc-windows-gnu'
         shell: pwsh
         run: |
-          $roots = @(
-            $env:MSYS2_LOCATION
-            'D:/msys64'
-            'C:/msys64'
-            'D:/a/_temp/msys64'
-          ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
-
-          if (-not $roots) {
-            throw 'MSYS2 root directory not found on the GitHub runner'
-          }
-
-          $mingwBin = $null
-          $includeDirs = [System.Collections.Generic.List[string]]::new()
-
-          foreach ($root in $roots) {
-            $binCandidate = Join-Path $root 'mingw64/bin'
-            if (-not $mingwBin -and (Test-Path $binCandidate)) {
-              $mingwBin = $binCandidate
-            }
-
-            foreach ($includeCandidate in @(
-              (Join-Path $root 'mingw64/x86_64-w64-mingw32/include'),
-              (Join-Path $root 'mingw64/include')
-            )) {
-              if (Test-Path $includeCandidate) {
-                $includeDirs.Add($includeCandidate)
-              }
+          $candidateBins = [System.Collections.Generic.List[string]]::new()
+          foreach ($candidate in @(
+            $(if ($env:MSYSTEM_PREFIX) { Join-Path $env:MSYSTEM_PREFIX 'bin' }),
+            $(if ($env:MSYS2_LOCATION) { Join-Path $env:MSYS2_LOCATION 'mingw64/bin' })
+          )) {
+            if ($candidate -and (Test-Path (Join-Path $candidate 'gcc.exe'))) {
+              $candidateBins.Add((Resolve-Path $candidate).Path)
             }
           }
 
+          if ($candidateBins.Count -eq 0) {
+            $gccCommand = @(
+              (Get-Command x86_64-w64-mingw32-gcc.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source,
+              (Get-Command gcc.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+            ) | Where-Object { $_ } | Select-Object -First 1
+            if ($gccCommand) {
+              $candidateBins.Add((Split-Path $gccCommand -Parent))
+            }
+          }
+
+          $mingwBin = $candidateBins | Select-Object -First 1
           if (-not $mingwBin) {
-            throw 'MinGW bin directory not found on the GitHub runner'
+            throw 'MinGW bin directory not found after MSYS2 setup'
+          }
+
+          $gcc = @(
+            (Join-Path $mingwBin 'x86_64-w64-mingw32-gcc.exe'),
+            (Join-Path $mingwBin 'gcc.exe')
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $gxx = @(
+            (Join-Path $mingwBin 'x86_64-w64-mingw32-g++.exe'),
+            (Join-Path $mingwBin 'g++.exe')
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $ar = @(
+            (Join-Path $mingwBin 'x86_64-w64-mingw32-ar.exe'),
+            (Join-Path $mingwBin 'ar.exe')
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $ranlib = @(
+            (Join-Path $mingwBin 'x86_64-w64-mingw32-ranlib.exe'),
+            (Join-Path $mingwBin 'ranlib.exe')
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          foreach ($tool in @($gcc, $gxx, $ar, $ranlib)) {
+            if (-not $tool) {
+              throw 'Required MinGW tool not found on PATH after MSYS2 setup'
+            }
+          }
+
+          $mingwRoot = Split-Path $mingwBin -Parent
+          $includeDirs = [System.Collections.Generic.List[string]]::new()
+          $gccBuiltinInclude = & $gcc -print-file-name=include 2>$null
+          if ($LASTEXITCODE -eq 0 -and $gccBuiltinInclude -and (Test-Path $gccBuiltinInclude)) {
+            $includeDirs.Add((Resolve-Path $gccBuiltinInclude).Path)
+          }
+
+          foreach ($includeCandidate in @(
+            (Join-Path $mingwRoot 'x86_64-w64-mingw32/include'),
+            (Join-Path $mingwRoot 'include'),
+            (Join-Path $mingwRoot 'lib/gcc/x86_64-w64-mingw32/include')
+          )) {
+            if (Test-Path $includeCandidate) {
+              $includeDirs.Add((Resolve-Path $includeCandidate).Path)
+            }
           }
 
           if ($includeDirs.Count -eq 0) {
             throw 'MinGW include directories not found on the GitHub runner'
-          }
-
-          $gcc = Join-Path $mingwBin 'gcc.exe'
-          $gxx = Join-Path $mingwBin 'g++.exe'
-          $ar = Join-Path $mingwBin 'ar.exe'
-          $ranlib = Join-Path $mingwBin 'ranlib.exe'
-
-          foreach ($tool in @($gcc, $gxx, $ar, $ranlib)) {
-            if (-not (Test-Path $tool)) {
-              throw "Required MinGW tool not found: $tool"
-            }
           }
 
           $clangArgs = @('--target=x86_64-w64-windows-gnu')
@@ -211,16 +242,23 @@ jobs:
         run: |
           SYSROOT=$(aarch64-linux-gnu-gcc -print-sysroot)
           TARGET_INCLUDE_DIR=/usr/aarch64-linux-gnu/include
+          GCC_INCLUDE_DIR=$(aarch64-linux-gnu-gcc -print-file-name=include)
           CLANG_ARGS=(--target=aarch64-linux-gnu)
+          CFLAGS=()
 
           if [ -n "$SYSROOT" ] && [ "$SYSROOT" != "/" ] && [ -d "$SYSROOT" ]; then
             CLANG_ARGS+=(--sysroot="$SYSROOT")
-            echo "CFLAGS_aarch64_unknown_linux_gnu=--sysroot=$SYSROOT" >> $GITHUB_ENV
-            echo "CXXFLAGS_aarch64_unknown_linux_gnu=--sysroot=$SYSROOT" >> $GITHUB_ENV
+            CFLAGS+=(--sysroot="$SYSROOT")
           fi
 
           if [ -d "$TARGET_INCLUDE_DIR" ]; then
             CLANG_ARGS+=("-I$TARGET_INCLUDE_DIR")
+            CFLAGS+=("-I$TARGET_INCLUDE_DIR")
+          fi
+
+          if [ -n "$GCC_INCLUDE_DIR" ] && [ -d "$GCC_INCLUDE_DIR" ]; then
+            CLANG_ARGS+=("-I$GCC_INCLUDE_DIR")
+            CFLAGS+=("-I$GCC_INCLUDE_DIR")
           fi
 
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
@@ -228,13 +266,18 @@ jobs:
           echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
           echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar" >> $GITHUB_ENV
           echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
+          echo "PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig" >> $GITHUB_ENV
+          echo "PKG_CONFIG_SYSROOT_DIR=$SYSROOT" >> $GITHUB_ENV
           echo "LOCI_CMAKE_BUILD_JOBS=2" >> $GITHUB_ENV
           echo "CMAKE_SYSTEM_NAME=Linux" >> $GITHUB_ENV
           echo "CMAKE_SYSTEM_PROCESSOR=aarch64" >> $GITHUB_ENV
+          echo "CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY" >> $GITHUB_ENV
           echo "CMAKE_C_COMPILER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
           echo "CMAKE_CXX_COMPILER=aarch64-linux-gnu-g++" >> $GITHUB_ENV
           echo "CMAKE_AR=aarch64-linux-gnu-ar" >> $GITHUB_ENV
           echo "CMAKE_RANLIB=aarch64-linux-gnu-ranlib" >> $GITHUB_ENV
+          echo "CFLAGS_aarch64_unknown_linux_gnu=${CFLAGS[*]}" >> $GITHUB_ENV
+          echo "CXXFLAGS_aarch64_unknown_linux_gnu=${CFLAGS[*]}" >> $GITHUB_ENV
           echo "BINDGEN_EXTRA_CLANG_ARGS=${CLANG_ARGS[*]}" >> $GITHUB_ENV
 
       - name: Cache cargo registry
@@ -310,6 +353,8 @@ jobs:
               CC_VAR=CC_aarch64_apple_darwin
               CXX_VAR=CXX_aarch64_apple_darwin
               AR_VAR=AR_aarch64_apple_darwin
+              CFLAGS_VAR=CFLAGS_aarch64_apple_darwin
+              CXXFLAGS_VAR=CXXFLAGS_aarch64_apple_darwin
               ;;
             x86_64-apple-darwin)
               ARCH=x86_64
@@ -317,6 +362,8 @@ jobs:
               CC_VAR=CC_x86_64_apple_darwin
               CXX_VAR=CXX_x86_64_apple_darwin
               AR_VAR=AR_x86_64_apple_darwin
+              CFLAGS_VAR=CFLAGS_x86_64_apple_darwin
+              CXXFLAGS_VAR=CXXFLAGS_x86_64_apple_darwin
               ;;
           esac
 
@@ -332,6 +379,7 @@ jobs:
           echo "CMAKE_OSX_SYSROOT=$SDKROOT" >> $GITHUB_ENV
           echo "CMAKE_OSX_ARCHITECTURES=$ARCH" >> $GITHUB_ENV
           echo "CMAKE_OSX_DEPLOYMENT_TARGET=$DEPLOYMENT_TARGET" >> $GITHUB_ENV
+          echo "CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY" >> $GITHUB_ENV
           echo "CMAKE_C_COMPILER=$CLANG" >> $GITHUB_ENV
           echo "CMAKE_CXX_COMPILER=$CLANGXX" >> $GITHUB_ENV
           echo "CMAKE_AR=$AR" >> $GITHUB_ENV
@@ -341,6 +389,8 @@ jobs:
           echo "$CC_VAR=$CLANG" >> $GITHUB_ENV
           echo "$CXX_VAR=$CLANGXX" >> $GITHUB_ENV
           echo "$AR_VAR=$AR" >> $GITHUB_ENV
+          echo "$CFLAGS_VAR=$CFLAGS" >> $GITHUB_ENV
+          echo "$CXXFLAGS_VAR=$CFLAGS" >> $GITHUB_ENV
           echo "BINDGEN_EXTRA_CLANG_ARGS=-arch $ARCH -isysroot $SDKROOT -mmacosx-version-min=$DEPLOYMENT_TARGET" >> $GITHUB_ENV
 
       - name: Cache cargo registry
@@ -418,6 +468,8 @@ jobs:
               CC_VAR=CC_aarch64_apple_ios
               CXX_VAR=CXX_aarch64_apple_ios
               AR_VAR=AR_aarch64_apple_ios
+              CFLAGS_VAR=CFLAGS_aarch64_apple_ios
+              CXXFLAGS_VAR=CXXFLAGS_aarch64_apple_ios
               DEPLOYMENT_FLAG=-miphoneos-version-min=13.0
               ;;
             aarch64-apple-ios-sim)
@@ -427,6 +479,8 @@ jobs:
               CC_VAR=CC_aarch64_apple_ios_sim
               CXX_VAR=CXX_aarch64_apple_ios_sim
               AR_VAR=AR_aarch64_apple_ios_sim
+              CFLAGS_VAR=CFLAGS_aarch64_apple_ios_sim
+              CXXFLAGS_VAR=CXXFLAGS_aarch64_apple_ios_sim
               DEPLOYMENT_FLAG=-mios-simulator-version-min=13.0
               ;;
             x86_64-apple-ios)
@@ -436,6 +490,8 @@ jobs:
               CC_VAR=CC_x86_64_apple_ios
               CXX_VAR=CXX_x86_64_apple_ios
               AR_VAR=AR_x86_64_apple_ios
+              CFLAGS_VAR=CFLAGS_x86_64_apple_ios
+              CXXFLAGS_VAR=CXXFLAGS_x86_64_apple_ios
               DEPLOYMENT_FLAG=-mios-simulator-version-min=13.0
               ;;
           esac
@@ -452,6 +508,7 @@ jobs:
           echo "CMAKE_OSX_SYSROOT=$SDKROOT" >> $GITHUB_ENV
           echo "CMAKE_OSX_ARCHITECTURES=$ARCH" >> $GITHUB_ENV
           echo "CMAKE_OSX_DEPLOYMENT_TARGET=13.0" >> $GITHUB_ENV
+          echo "CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY" >> $GITHUB_ENV
           echo "IPHONEOS_DEPLOYMENT_TARGET=13.0" >> $GITHUB_ENV
           echo "CMAKE_C_COMPILER=$CLANG" >> $GITHUB_ENV
           echo "CMAKE_CXX_COMPILER=$CLANGXX" >> $GITHUB_ENV
@@ -462,10 +519,12 @@ jobs:
           echo "$CC_VAR=$CLANG" >> $GITHUB_ENV
           echo "$CXX_VAR=$CLANGXX" >> $GITHUB_ENV
           echo "$AR_VAR=$AR" >> $GITHUB_ENV
+          echo "$CFLAGS_VAR=$CFLAGS" >> $GITHUB_ENV
+          echo "$CXXFLAGS_VAR=$CFLAGS" >> $GITHUB_ENV
           echo "BINDGEN_EXTRA_CLANG_ARGS=-arch $ARCH -isysroot $SDKROOT $DEPLOYMENT_FLAG" >> $GITHUB_ENV
 
       - name: Build library (iOS doesn't support executables)
-        run: cargo build --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect
+        run: cargo rustc --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect -- --crate-type staticlib
 
       - name: Package artifacts
         run: |
@@ -532,6 +591,8 @@ jobs:
               CC_VAR=CC_aarch64_linux_android
               CXX_VAR=CXX_aarch64_linux_android
               AR_VAR=AR_aarch64_linux_android
+              CFLAGS_VAR=CFLAGS_aarch64_linux_android
+              CXXFLAGS_VAR=CXXFLAGS_aarch64_linux_android
               ;;
             armv7-linux-androideabi)
               ABI=armeabi-v7a
@@ -542,6 +603,8 @@ jobs:
               CC_VAR=CC_armv7_linux_androideabi
               CXX_VAR=CXX_armv7_linux_androideabi
               AR_VAR=AR_armv7_linux_androideabi
+              CFLAGS_VAR=CFLAGS_armv7_linux_androideabi
+              CXXFLAGS_VAR=CXXFLAGS_armv7_linux_androideabi
               ;;
             x86_64-linux-android)
               ABI=x86_64
@@ -552,6 +615,8 @@ jobs:
               CC_VAR=CC_x86_64_linux_android
               CXX_VAR=CXX_x86_64_linux_android
               AR_VAR=AR_x86_64_linux_android
+              CFLAGS_VAR=CFLAGS_x86_64_linux_android
+              CXXFLAGS_VAR=CXXFLAGS_x86_64_linux_android
               ;;
             i686-linux-android)
               ABI=x86
@@ -562,6 +627,8 @@ jobs:
               CC_VAR=CC_i686_linux_android
               CXX_VAR=CXX_i686_linux_android
               AR_VAR=AR_i686_linux_android
+              CFLAGS_VAR=CFLAGS_i686_linux_android
+              CXXFLAGS_VAR=CXXFLAGS_i686_linux_android
               ;;
           esac
 
@@ -575,6 +642,7 @@ jobs:
           echo "CMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" >> $GITHUB_ENV
           echo "CMAKE_SYSTEM_NAME=Android" >> $GITHUB_ENV
           echo "CMAKE_SYSTEM_PROCESSOR=$ARCH" >> $GITHUB_ENV
+          echo "CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY" >> $GITHUB_ENV
           echo "ANDROID_ABI=$ABI" >> $GITHUB_ENV
           echo "ANDROID_PLATFORM=android-$API" >> $GITHUB_ENV
           echo "ANDROID_STL=c++_shared" >> $GITHUB_ENV
@@ -589,10 +657,15 @@ jobs:
           echo "$CC_VAR=$CLANG" >> $GITHUB_ENV
           echo "$CXX_VAR=$CLANGXX" >> $GITHUB_ENV
           echo "$AR_VAR=$AR" >> $GITHUB_ENV
+          echo "$CFLAGS_VAR=$CFLAGS" >> $GITHUB_ENV
+          echo "$CXXFLAGS_VAR=$CFLAGS" >> $GITHUB_ENV
           echo "BINDGEN_EXTRA_CLANG_ARGS=--target=${CLANG_TRIPLE}${API} --sysroot=$SYSROOT" >> $GITHUB_ENV
 
       - name: Build library
-        run: cargo build --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect
+        shell: bash
+        run: |
+          cargo rustc --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect -- --crate-type cdylib
+          cargo rustc --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect -- --crate-type staticlib
 
       - name: Package artifacts
         run: |

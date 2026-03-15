@@ -7,6 +7,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_HTTP_TIMEOUT: "600"
+  CARGO_NET_RETRY: "10"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   build-release:
@@ -126,6 +129,8 @@ jobs:
             CC_VAR=CC_aarch64_apple_darwin
             CXX_VAR=CXX_aarch64_apple_darwin
             AR_VAR=AR_aarch64_apple_darwin
+            CFLAGS_VAR=CFLAGS_aarch64_apple_darwin
+            CXXFLAGS_VAR=CXXFLAGS_aarch64_apple_darwin
             ;;
           x86_64-apple-darwin)
             ARCH=x86_64
@@ -133,6 +138,8 @@ jobs:
             CC_VAR=CC_x86_64_apple_darwin
             CXX_VAR=CXX_x86_64_apple_darwin
             AR_VAR=AR_x86_64_apple_darwin
+            CFLAGS_VAR=CFLAGS_x86_64_apple_darwin
+            CXXFLAGS_VAR=CXXFLAGS_x86_64_apple_darwin
             ;;
         esac
 
@@ -148,6 +155,7 @@ jobs:
         echo "CMAKE_OSX_SYSROOT=$SDKROOT" >> $GITHUB_ENV
         echo "CMAKE_OSX_ARCHITECTURES=$ARCH" >> $GITHUB_ENV
         echo "CMAKE_OSX_DEPLOYMENT_TARGET=$DEPLOYMENT_TARGET" >> $GITHUB_ENV
+        echo "CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY" >> $GITHUB_ENV
         echo "CMAKE_C_COMPILER=$CLANG" >> $GITHUB_ENV
         echo "CMAKE_CXX_COMPILER=$CLANGXX" >> $GITHUB_ENV
         echo "CMAKE_AR=$AR" >> $GITHUB_ENV
@@ -157,6 +165,8 @@ jobs:
         echo "$CC_VAR=$CLANG" >> $GITHUB_ENV
         echo "$CXX_VAR=$CLANGXX" >> $GITHUB_ENV
         echo "$AR_VAR=$AR" >> $GITHUB_ENV
+        echo "$CFLAGS_VAR=$CFLAGS" >> $GITHUB_ENV
+        echo "$CXXFLAGS_VAR=$CFLAGS" >> $GITHUB_ENV
         echo "BINDGEN_EXTRA_CLANG_ARGS=-arch $ARCH -isysroot $SDKROOT -mmacosx-version-min=$DEPLOYMENT_TARGET" >> $GITHUB_ENV
 
     - name: Setup Android NDK
@@ -183,6 +193,8 @@ jobs:
             CC_VAR=CC_aarch64_linux_android
             CXX_VAR=CXX_aarch64_linux_android
             AR_VAR=AR_aarch64_linux_android
+            CFLAGS_VAR=CFLAGS_aarch64_linux_android
+            CXXFLAGS_VAR=CXXFLAGS_aarch64_linux_android
             ;;
           armv7-linux-androideabi)
             ABI=armeabi-v7a
@@ -193,6 +205,8 @@ jobs:
             CC_VAR=CC_armv7_linux_androideabi
             CXX_VAR=CXX_armv7_linux_androideabi
             AR_VAR=AR_armv7_linux_androideabi
+            CFLAGS_VAR=CFLAGS_armv7_linux_androideabi
+            CXXFLAGS_VAR=CXXFLAGS_armv7_linux_androideabi
             ;;
           x86_64-linux-android)
             ABI=x86_64
@@ -203,6 +217,8 @@ jobs:
             CC_VAR=CC_x86_64_linux_android
             CXX_VAR=CXX_x86_64_linux_android
             AR_VAR=AR_x86_64_linux_android
+            CFLAGS_VAR=CFLAGS_x86_64_linux_android
+            CXXFLAGS_VAR=CXXFLAGS_x86_64_linux_android
             ;;
           i686-linux-android)
             ABI=x86
@@ -213,6 +229,8 @@ jobs:
             CC_VAR=CC_i686_linux_android
             CXX_VAR=CXX_i686_linux_android
             AR_VAR=AR_i686_linux_android
+            CFLAGS_VAR=CFLAGS_i686_linux_android
+            CXXFLAGS_VAR=CXXFLAGS_i686_linux_android
             ;;
         esac
 
@@ -226,6 +244,7 @@ jobs:
         echo "CMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" >> $GITHUB_ENV
         echo "CMAKE_SYSTEM_NAME=Android" >> $GITHUB_ENV
         echo "CMAKE_SYSTEM_PROCESSOR=$ARCH" >> $GITHUB_ENV
+        echo "CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY" >> $GITHUB_ENV
         echo "ANDROID_ABI=$ABI" >> $GITHUB_ENV
         echo "ANDROID_PLATFORM=android-$API" >> $GITHUB_ENV
         echo "ANDROID_STL=c++_shared" >> $GITHUB_ENV
@@ -240,6 +259,8 @@ jobs:
         echo "$CC_VAR=$CLANG" >> $GITHUB_ENV
         echo "$CXX_VAR=$CLANGXX" >> $GITHUB_ENV
         echo "$AR_VAR=$AR" >> $GITHUB_ENV
+        echo "$CFLAGS_VAR=$CFLAGS" >> $GITHUB_ENV
+        echo "$CXXFLAGS_VAR=$CFLAGS" >> $GITHUB_ENV
         echo "BINDGEN_EXTRA_CLANG_ARGS=--target=${CLANG_TRIPLE}${API} --sysroot=$SYSROOT" >> $GITHUB_ENV
 
     - name: Configure Apple mobile toolchain
@@ -254,6 +275,8 @@ jobs:
             CC_VAR=CC_aarch64_apple_ios
             CXX_VAR=CXX_aarch64_apple_ios
             AR_VAR=AR_aarch64_apple_ios
+            CFLAGS_VAR=CFLAGS_aarch64_apple_ios
+            CXXFLAGS_VAR=CXXFLAGS_aarch64_apple_ios
             DEPLOYMENT_FLAG=-miphoneos-version-min=13.0
             ;;
           aarch64-apple-ios-sim)
@@ -263,6 +286,8 @@ jobs:
             CC_VAR=CC_aarch64_apple_ios_sim
             CXX_VAR=CXX_aarch64_apple_ios_sim
             AR_VAR=AR_aarch64_apple_ios_sim
+            CFLAGS_VAR=CFLAGS_aarch64_apple_ios_sim
+            CXXFLAGS_VAR=CXXFLAGS_aarch64_apple_ios_sim
             DEPLOYMENT_FLAG=-mios-simulator-version-min=13.0
             ;;
           x86_64-apple-ios)
@@ -272,6 +297,8 @@ jobs:
             CC_VAR=CC_x86_64_apple_ios
             CXX_VAR=CXX_x86_64_apple_ios
             AR_VAR=AR_x86_64_apple_ios
+            CFLAGS_VAR=CFLAGS_x86_64_apple_ios
+            CXXFLAGS_VAR=CXXFLAGS_x86_64_apple_ios
             DEPLOYMENT_FLAG=-mios-simulator-version-min=13.0
             ;;
         esac
@@ -288,6 +315,7 @@ jobs:
         echo "CMAKE_OSX_SYSROOT=$SDKROOT" >> $GITHUB_ENV
         echo "CMAKE_OSX_ARCHITECTURES=$ARCH" >> $GITHUB_ENV
         echo "CMAKE_OSX_DEPLOYMENT_TARGET=13.0" >> $GITHUB_ENV
+        echo "CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY" >> $GITHUB_ENV
         echo "IPHONEOS_DEPLOYMENT_TARGET=13.0" >> $GITHUB_ENV
         echo "CMAKE_C_COMPILER=$CLANG" >> $GITHUB_ENV
         echo "CMAKE_CXX_COMPILER=$CLANGXX" >> $GITHUB_ENV
@@ -298,6 +326,8 @@ jobs:
         echo "$CC_VAR=$CLANG" >> $GITHUB_ENV
         echo "$CXX_VAR=$CLANGXX" >> $GITHUB_ENV
         echo "$AR_VAR=$AR" >> $GITHUB_ENV
+        echo "$CFLAGS_VAR=$CFLAGS" >> $GITHUB_ENV
+        echo "$CXXFLAGS_VAR=$CFLAGS" >> $GITHUB_ENV
         echo "BINDGEN_EXTRA_CLANG_ARGS=-arch $ARCH -isysroot $SDKROOT $DEPLOYMENT_FLAG" >> $GITHUB_ENV
 
     - name: Configure bindgen (Windows)
@@ -322,7 +352,15 @@ jobs:
         Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=$($libclang.DirectoryName)"
 
     - name: Build
-      run: cargo build --release --target ${{ matrix.target }} ${{ matrix.cargo_args }}
+      shell: bash
+      run: |
+        if [ "${{ matrix.mobile }}" = "ios" ]; then
+          cargo rustc --release --target ${{ matrix.target }} --lib --no-default-features --features auto-detect -- --crate-type staticlib
+        elif [ "${{ matrix.mobile }}" = "android" ]; then
+          cargo rustc --release --target ${{ matrix.target }} --lib --no-default-features --features auto-detect -- --crate-type cdylib
+        else
+          cargo build --release --target ${{ matrix.target }} ${{ matrix.cargo_args }}
+        fi
 
     - name: Strip binary (Linux/macOS)
       if: matrix.os != 'windows-latest' && matrix.artifact_kind == 'binary'

@@ -20,11 +20,14 @@ fn main() {
         "CMAKE_ANDROID_STL_TYPE",
         "CMAKE_SYSTEM_NAME",
         "CMAKE_SYSTEM_PROCESSOR",
+        "CMAKE_TRY_COMPILE_TARGET_TYPE",
         "CMAKE_OSX_SYSROOT",
         "CMAKE_OSX_ARCHITECTURES",
         "CMAKE_OSX_DEPLOYMENT_TARGET",
         "CMAKE_C_COMPILER",
+        "CMAKE_C_COMPILER_TARGET",
         "CMAKE_CXX_COMPILER",
+        "CMAKE_CXX_COMPILER_TARGET",
         "CMAKE_AR",
         "CMAKE_RANLIB",
         "CMAKE_C_FLAGS",
@@ -65,6 +68,18 @@ fn main() {
         .define("GGML_NATIVE", "OFF")
         // Disable OpenMP for better Windows MinGW runtime stability.
         .define("GGML_OPENMP", "OFF");
+
+    if target.contains("apple") {
+        // Keep CPU builds portable across Apple CI targets unless the crate
+        // explicitly opts into the Metal backend.
+        config.define("GGML_ACCELERATE", "ON");
+        #[cfg(not(feature = "metal"))]
+        {
+            config
+                .define("GGML_METAL", "OFF")
+                .define("GGML_METAL_EMBED_LIBRARY", "OFF");
+        }
+    }
 
     // Windows MinGW optimization tiers (stability first):
     // - safe : disable SIMD extensions
@@ -236,6 +251,10 @@ fn apply_cross_cmake_defines(config: &mut cmake::Config) {
             "CMAKE_SYSTEM_PROCESSOR",
             env::var("CMAKE_SYSTEM_PROCESSOR").ok(),
         ),
+        (
+            "CMAKE_TRY_COMPILE_TARGET_TYPE",
+            env::var("CMAKE_TRY_COMPILE_TARGET_TYPE").ok(),
+        ),
         ("CMAKE_OSX_SYSROOT", env::var("CMAKE_OSX_SYSROOT").ok()),
         (
             "CMAKE_OSX_ARCHITECTURES",
@@ -246,7 +265,15 @@ fn apply_cross_cmake_defines(config: &mut cmake::Config) {
             env::var("CMAKE_OSX_DEPLOYMENT_TARGET").ok(),
         ),
         ("CMAKE_C_COMPILER", env::var("CMAKE_C_COMPILER").ok()),
+        (
+            "CMAKE_C_COMPILER_TARGET",
+            env::var("CMAKE_C_COMPILER_TARGET").ok(),
+        ),
         ("CMAKE_CXX_COMPILER", env::var("CMAKE_CXX_COMPILER").ok()),
+        (
+            "CMAKE_CXX_COMPILER_TARGET",
+            env::var("CMAKE_CXX_COMPILER_TARGET").ok(),
+        ),
         ("CMAKE_AR", env::var("CMAKE_AR").ok()),
         ("CMAKE_RANLIB", env::var("CMAKE_RANLIB").ok()),
         ("CMAKE_C_FLAGS", env::var("CMAKE_C_FLAGS").ok()),
@@ -491,6 +518,10 @@ fn link_libraries(target: &str) {
         println!("cargo:rustc-link-lib=static=ggml");
         println!("cargo:rustc-link-lib=static=ggml-cpu");
         println!("cargo:rustc-link-lib=static=ggml-base");
+        #[cfg(feature = "metal")]
+        if target.contains("apple") {
+            println!("cargo:rustc-link-lib=static=ggml-metal");
+        }
     }
 }
 
@@ -508,6 +539,13 @@ fn link_system_libraries(target: &str) {
         // Apple platforms ship libc++, not libstdc++.
         println!("cargo:rustc-link-lib=dylib=c++");
         println!("cargo:rustc-link-lib=dylib=m");
+        println!("cargo:rustc-link-lib=framework=Accelerate");
+        #[cfg(feature = "metal")]
+        {
+            println!("cargo:rustc-link-lib=framework=Foundation");
+            println!("cargo:rustc-link-lib=framework=Metal");
+            println!("cargo:rustc-link-lib=framework=MetalKit");
+        }
     } else if target.contains("android") {
         // Android NDK uses libc++ instead of libstdc++.
         println!("cargo:rustc-link-lib=dylib=c++_shared");
@@ -516,5 +554,7 @@ fn link_system_libraries(target: &str) {
         // Unix-like systems (Linux, macOS, etc.)
         println!("cargo:rustc-link-lib=dylib=stdc++");
         println!("cargo:rustc-link-lib=dylib=m");
+        println!("cargo:rustc-link-lib=dylib=dl");
+        println!("cargo:rustc-link-lib=dylib=pthread");
     }
 }
