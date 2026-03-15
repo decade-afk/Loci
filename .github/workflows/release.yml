@@ -13,6 +13,7 @@ jobs:
     name: Build Release
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -112,7 +113,51 @@ jobs:
 
     - name: Install CMake (macOS)
       if: matrix.os == 'macos-latest'
-      run: brew install cmake
+      run: brew install cmake ninja
+
+    - name: Configure Apple desktop toolchain
+      if: matrix.os == 'macos-latest' && matrix.mobile != 'ios'
+      shell: bash
+      run: |
+        case "${{ matrix.target }}" in
+          aarch64-apple-darwin)
+            ARCH=arm64
+            LINKER_VAR=CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER
+            CC_VAR=CC_aarch64_apple_darwin
+            CXX_VAR=CXX_aarch64_apple_darwin
+            AR_VAR=AR_aarch64_apple_darwin
+            ;;
+          x86_64-apple-darwin)
+            ARCH=x86_64
+            LINKER_VAR=CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER
+            CC_VAR=CC_x86_64_apple_darwin
+            CXX_VAR=CXX_x86_64_apple_darwin
+            AR_VAR=AR_x86_64_apple_darwin
+            ;;
+        esac
+
+        SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
+        CLANG=$(xcrun --sdk macosx --find clang)
+        CLANGXX=$(xcrun --sdk macosx --find clang++)
+        AR=$(xcrun --sdk macosx --find ar)
+        DEPLOYMENT_TARGET=12.0
+        CFLAGS="-arch $ARCH -isysroot $SDKROOT -mmacosx-version-min=$DEPLOYMENT_TARGET"
+
+        echo "SDKROOT=$SDKROOT" >> $GITHUB_ENV
+        echo "MACOSX_DEPLOYMENT_TARGET=$DEPLOYMENT_TARGET" >> $GITHUB_ENV
+        echo "CMAKE_OSX_SYSROOT=$SDKROOT" >> $GITHUB_ENV
+        echo "CMAKE_OSX_ARCHITECTURES=$ARCH" >> $GITHUB_ENV
+        echo "CMAKE_OSX_DEPLOYMENT_TARGET=$DEPLOYMENT_TARGET" >> $GITHUB_ENV
+        echo "CMAKE_C_COMPILER=$CLANG" >> $GITHUB_ENV
+        echo "CMAKE_CXX_COMPILER=$CLANGXX" >> $GITHUB_ENV
+        echo "CMAKE_AR=$AR" >> $GITHUB_ENV
+        echo "CMAKE_C_FLAGS=$CFLAGS" >> $GITHUB_ENV
+        echo "CMAKE_CXX_FLAGS=$CFLAGS" >> $GITHUB_ENV
+        echo "$LINKER_VAR=$CLANG" >> $GITHUB_ENV
+        echo "$CC_VAR=$CLANG" >> $GITHUB_ENV
+        echo "$CXX_VAR=$CLANGXX" >> $GITHUB_ENV
+        echo "$AR_VAR=$AR" >> $GITHUB_ENV
+        echo "BINDGEN_EXTRA_CLANG_ARGS=-arch $ARCH -isysroot $SDKROOT -mmacosx-version-min=$DEPLOYMENT_TARGET" >> $GITHUB_ENV
 
     - name: Setup Android NDK
       if: matrix.mobile == 'android'
@@ -126,70 +171,76 @@ jobs:
       shell: bash
       run: |
         TOOLCHAIN=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
+        SYSROOT=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot
 
         case "${{ matrix.target }}" in
           aarch64-linux-android)
             ABI=arm64-v8a
             API=24
             CLANG_TRIPLE=aarch64-linux-android
+            ARCH=arm64
             LINKER_VAR=CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER
             CC_VAR=CC_aarch64_linux_android
             CXX_VAR=CXX_aarch64_linux_android
             AR_VAR=AR_aarch64_linux_android
-            CFLAGS_VAR=CFLAGS_aarch64_linux_android
-            CXXFLAGS_VAR=CXXFLAGS_aarch64_linux_android
             ;;
           armv7-linux-androideabi)
             ABI=armeabi-v7a
             API=24
             CLANG_TRIPLE=armv7a-linux-androideabi
+            ARCH=armv7-a
             LINKER_VAR=CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER
             CC_VAR=CC_armv7_linux_androideabi
             CXX_VAR=CXX_armv7_linux_androideabi
             AR_VAR=AR_armv7_linux_androideabi
-            CFLAGS_VAR=CFLAGS_armv7_linux_androideabi
-            CXXFLAGS_VAR=CXXFLAGS_armv7_linux_androideabi
             ;;
           x86_64-linux-android)
             ABI=x86_64
             API=24
             CLANG_TRIPLE=x86_64-linux-android
+            ARCH=x86_64
             LINKER_VAR=CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER
             CC_VAR=CC_x86_64_linux_android
             CXX_VAR=CXX_x86_64_linux_android
             AR_VAR=AR_x86_64_linux_android
-            CFLAGS_VAR=CFLAGS_x86_64_linux_android
-            CXXFLAGS_VAR=CXXFLAGS_x86_64_linux_android
             ;;
           i686-linux-android)
             ABI=x86
             API=24
             CLANG_TRIPLE=i686-linux-android
+            ARCH=x86
             LINKER_VAR=CARGO_TARGET_I686_LINUX_ANDROID_LINKER
             CC_VAR=CC_i686_linux_android
             CXX_VAR=CXX_i686_linux_android
             AR_VAR=AR_i686_linux_android
-            CFLAGS_VAR=CFLAGS_i686_linux_android
-            CXXFLAGS_VAR=CXXFLAGS_i686_linux_android
             ;;
         esac
 
         CLANG="$TOOLCHAIN/${CLANG_TRIPLE}${API}-clang"
         CLANGXX="$TOOLCHAIN/${CLANG_TRIPLE}${API}-clang++"
         AR="$TOOLCHAIN/llvm-ar"
+        RANLIB="$TOOLCHAIN/llvm-ranlib"
+        CFLAGS="--sysroot=$SYSROOT -fPIC"
 
         echo "ANDROID_NDK_HOME=$ANDROID_NDK_ROOT" >> $GITHUB_ENV
         echo "CMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" >> $GITHUB_ENV
+        echo "CMAKE_SYSTEM_NAME=Android" >> $GITHUB_ENV
+        echo "CMAKE_SYSTEM_PROCESSOR=$ARCH" >> $GITHUB_ENV
         echo "ANDROID_ABI=$ABI" >> $GITHUB_ENV
         echo "ANDROID_PLATFORM=android-$API" >> $GITHUB_ENV
         echo "ANDROID_STL=c++_shared" >> $GITHUB_ENV
         echo "CMAKE_ANDROID_STL_TYPE=c++_shared" >> $GITHUB_ENV
+        echo "CMAKE_C_COMPILER=$CLANG" >> $GITHUB_ENV
+        echo "CMAKE_CXX_COMPILER=$CLANGXX" >> $GITHUB_ENV
+        echo "CMAKE_AR=$AR" >> $GITHUB_ENV
+        echo "CMAKE_RANLIB=$RANLIB" >> $GITHUB_ENV
+        echo "CMAKE_C_FLAGS=$CFLAGS" >> $GITHUB_ENV
+        echo "CMAKE_CXX_FLAGS=$CFLAGS" >> $GITHUB_ENV
         echo "$LINKER_VAR=$CLANG" >> $GITHUB_ENV
         echo "$CC_VAR=$CLANG" >> $GITHUB_ENV
         echo "$CXX_VAR=$CLANGXX" >> $GITHUB_ENV
         echo "$AR_VAR=$AR" >> $GITHUB_ENV
-        echo "$CFLAGS_VAR=-fPIC" >> $GITHUB_ENV
-        echo "$CXXFLAGS_VAR=-fPIC" >> $GITHUB_ENV
+        echo "BINDGEN_EXTRA_CLANG_ARGS=--target=${CLANG_TRIPLE}${API} --sysroot=$SYSROOT" >> $GITHUB_ENV
 
     - name: Configure Apple mobile toolchain
       if: matrix.mobile == 'ios'
@@ -203,8 +254,6 @@ jobs:
             CC_VAR=CC_aarch64_apple_ios
             CXX_VAR=CXX_aarch64_apple_ios
             AR_VAR=AR_aarch64_apple_ios
-            CFLAGS_VAR=CFLAGS_aarch64_apple_ios
-            CXXFLAGS_VAR=CXXFLAGS_aarch64_apple_ios
             DEPLOYMENT_FLAG=-miphoneos-version-min=13.0
             ;;
           aarch64-apple-ios-sim)
@@ -214,8 +263,6 @@ jobs:
             CC_VAR=CC_aarch64_apple_ios_sim
             CXX_VAR=CXX_aarch64_apple_ios_sim
             AR_VAR=AR_aarch64_apple_ios_sim
-            CFLAGS_VAR=CFLAGS_aarch64_apple_ios_sim
-            CXXFLAGS_VAR=CXXFLAGS_aarch64_apple_ios_sim
             DEPLOYMENT_FLAG=-mios-simulator-version-min=13.0
             ;;
           x86_64-apple-ios)
@@ -225,8 +272,6 @@ jobs:
             CC_VAR=CC_x86_64_apple_ios
             CXX_VAR=CXX_x86_64_apple_ios
             AR_VAR=AR_x86_64_apple_ios
-            CFLAGS_VAR=CFLAGS_x86_64_apple_ios
-            CXXFLAGS_VAR=CXXFLAGS_x86_64_apple_ios
             DEPLOYMENT_FLAG=-mios-simulator-version-min=13.0
             ;;
         esac
@@ -235,18 +280,25 @@ jobs:
         CLANG=$(xcrun --sdk "$SDK" --find clang)
         CLANGXX=$(xcrun --sdk "$SDK" --find clang++)
         AR=$(xcrun --sdk "$SDK" --find ar)
+        CFLAGS="$DEPLOYMENT_FLAG -arch $ARCH -isysroot $SDKROOT"
 
         echo "SDKROOT=$SDKROOT" >> $GITHUB_ENV
+        echo "CMAKE_SYSTEM_NAME=iOS" >> $GITHUB_ENV
+        echo "CMAKE_SYSTEM_PROCESSOR=$ARCH" >> $GITHUB_ENV
         echo "CMAKE_OSX_SYSROOT=$SDKROOT" >> $GITHUB_ENV
         echo "CMAKE_OSX_ARCHITECTURES=$ARCH" >> $GITHUB_ENV
         echo "CMAKE_OSX_DEPLOYMENT_TARGET=13.0" >> $GITHUB_ENV
         echo "IPHONEOS_DEPLOYMENT_TARGET=13.0" >> $GITHUB_ENV
+        echo "CMAKE_C_COMPILER=$CLANG" >> $GITHUB_ENV
+        echo "CMAKE_CXX_COMPILER=$CLANGXX" >> $GITHUB_ENV
+        echo "CMAKE_AR=$AR" >> $GITHUB_ENV
+        echo "CMAKE_C_FLAGS=$CFLAGS" >> $GITHUB_ENV
+        echo "CMAKE_CXX_FLAGS=$CFLAGS" >> $GITHUB_ENV
         echo "$LINKER_VAR=$CLANG" >> $GITHUB_ENV
         echo "$CC_VAR=$CLANG" >> $GITHUB_ENV
         echo "$CXX_VAR=$CLANGXX" >> $GITHUB_ENV
         echo "$AR_VAR=$AR" >> $GITHUB_ENV
-        echo "$CFLAGS_VAR=$DEPLOYMENT_FLAG -isysroot $SDKROOT" >> $GITHUB_ENV
-        echo "$CXXFLAGS_VAR=$DEPLOYMENT_FLAG -isysroot $SDKROOT" >> $GITHUB_ENV
+        echo "BINDGEN_EXTRA_CLANG_ARGS=-arch $ARCH -isysroot $SDKROOT $DEPLOYMENT_FLAG" >> $GITHUB_ENV
 
     - name: Configure bindgen (Windows)
       if: matrix.os == 'windows-latest'

@@ -18,9 +18,18 @@ fn main() {
         "ANDROID_PLATFORM",
         "ANDROID_STL",
         "CMAKE_ANDROID_STL_TYPE",
+        "CMAKE_SYSTEM_NAME",
+        "CMAKE_SYSTEM_PROCESSOR",
         "CMAKE_OSX_SYSROOT",
         "CMAKE_OSX_ARCHITECTURES",
         "CMAKE_OSX_DEPLOYMENT_TARGET",
+        "CMAKE_C_COMPILER",
+        "CMAKE_CXX_COMPILER",
+        "CMAKE_AR",
+        "CMAKE_RANLIB",
+        "CMAKE_C_FLAGS",
+        "CMAKE_CXX_FLAGS",
+        "BINDGEN_EXTRA_CLANG_ARGS",
     ] {
         println!("cargo:rerun-if-env-changed={env_var}");
     }
@@ -178,6 +187,12 @@ fn main() {
         .clang_arg(format!("-I{}/include", dst.display()))
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
 
+    if let Ok(extra_args) = env::var("BINDGEN_EXTRA_CLANG_ARGS") {
+        for arg in extra_args.split_whitespace().filter(|arg| !arg.is_empty()) {
+            bindings = bindings.clang_arg(arg);
+        }
+    }
+
     if target.contains("windows-gnu") && env::var_os("BINDGEN_EXTRA_CLANG_ARGS").is_none() {
         if let Some(mingw_include_dir) = resolve_mingw_include_dir() {
             println!(
@@ -216,6 +231,11 @@ fn apply_cross_cmake_defines(config: &mut cmake::Config) {
             "CMAKE_ANDROID_STL_TYPE",
             env::var("CMAKE_ANDROID_STL_TYPE").ok(),
         ),
+        ("CMAKE_SYSTEM_NAME", env::var("CMAKE_SYSTEM_NAME").ok()),
+        (
+            "CMAKE_SYSTEM_PROCESSOR",
+            env::var("CMAKE_SYSTEM_PROCESSOR").ok(),
+        ),
         ("CMAKE_OSX_SYSROOT", env::var("CMAKE_OSX_SYSROOT").ok()),
         (
             "CMAKE_OSX_ARCHITECTURES",
@@ -225,6 +245,12 @@ fn apply_cross_cmake_defines(config: &mut cmake::Config) {
             "CMAKE_OSX_DEPLOYMENT_TARGET",
             env::var("CMAKE_OSX_DEPLOYMENT_TARGET").ok(),
         ),
+        ("CMAKE_C_COMPILER", env::var("CMAKE_C_COMPILER").ok()),
+        ("CMAKE_CXX_COMPILER", env::var("CMAKE_CXX_COMPILER").ok()),
+        ("CMAKE_AR", env::var("CMAKE_AR").ok()),
+        ("CMAKE_RANLIB", env::var("CMAKE_RANLIB").ok()),
+        ("CMAKE_C_FLAGS", env::var("CMAKE_C_FLAGS").ok()),
+        ("CMAKE_CXX_FLAGS", env::var("CMAKE_CXX_FLAGS").ok()),
     ] {
         if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
             config.define(key, value);
@@ -373,13 +399,27 @@ fn resolve_macos_libclang_dir() -> Option<PathBuf> {
 }
 
 fn resolve_mingw_include_dir() -> Option<PathBuf> {
-    [
+    let mut candidates = Vec::new();
+
+    if let Some(msys2_location) = env::var_os("MSYS2_LOCATION") {
+        let root = PathBuf::from(msys2_location);
+        candidates.push(root.join("mingw64/x86_64-w64-mingw32/include"));
+        candidates.push(root.join("mingw64/include"));
+    }
+
+    candidates.extend([
         PathBuf::from("C:/msys64/mingw64/x86_64-w64-mingw32/include"),
+        PathBuf::from("C:/msys64/mingw64/include"),
+        PathBuf::from("D:/msys64/mingw64/x86_64-w64-mingw32/include"),
+        PathBuf::from("D:/msys64/mingw64/include"),
         PathBuf::from("D:/mingw64/x86_64-w64-mingw32/include"),
+        PathBuf::from("D:/mingw64/include"),
         PathBuf::from("/usr/x86_64-w64-mingw32/include"),
-    ]
-    .into_iter()
-    .find(|dir| dir.join("stddef.h").exists() || dir.join("stdio.h").exists())
+    ]);
+
+    candidates
+        .into_iter()
+        .find(|dir| dir.join("stddef.h").exists() || dir.join("stdio.h").exists())
 }
 
 fn llvm_config_libdir() -> Option<PathBuf> {
