@@ -72,7 +72,14 @@ fn main() {
     if target.contains("apple") {
         // Keep CPU builds portable across Apple CI targets unless the crate
         // explicitly opts into the Metal backend.
-        config.define("GGML_ACCELERATE", "ON");
+        config
+            .define("GGML_ACCELERATE", "ON")
+            // Upstream enables the BLAS backend by default on Apple, and the
+            // ggml registry will reference ggml_backend_blas_reg() when it is
+            // compiled in. Make that expectation explicit so our Rust-side
+            // linker inputs stay aligned with the CMake build output.
+            .define("GGML_BLAS", "ON")
+            .define("GGML_BLAS_VENDOR", "Apple");
         #[cfg(not(feature = "metal"))]
         {
             config
@@ -184,9 +191,12 @@ fn main() {
         .include("deps/llama.cpp/ggml/include")
         .compile("loci_ffi_shim");
 
-    // Specify library search paths for linking
-    println!("cargo:rustc-link-search=native={}/lib", dst.display());
-    println!("cargo:rustc-link-search=native={}/lib64", dst.display());
+    // Specify library search paths for linking.
+    for lib_dir in [dst.join("lib"), dst.join("lib64")] {
+        if lib_dir.exists() {
+            println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        }
+    }
 
     // Link llama.cpp libraries based on the target platform
     link_libraries(&target);
@@ -533,6 +543,9 @@ fn link_libraries(target: &str) {
         println!("cargo:rustc-link-lib=static=llama");
         println!("cargo:rustc-link-lib=static=ggml");
         println!("cargo:rustc-link-lib=static=ggml-cpu");
+        if target.contains("apple") {
+            println!("cargo:rustc-link-lib=static=ggml-blas");
+        }
         println!("cargo:rustc-link-lib=static=ggml-base");
         #[cfg(feature = "metal")]
         if target.contains("apple") {
