@@ -13,7 +13,7 @@ mod bindings {
 
 pub use bindings::*;
 
-use std::ffi::CString;
+use std::ffi::{c_char, CString};
 use std::mem::MaybeUninit;
 use std::ptr;
 use std::sync::{Mutex, OnceLock};
@@ -22,7 +22,7 @@ unsafe extern "C" {
     fn loci_llama_model_default_params(out_params: *mut llama_model_params);
     fn loci_llama_context_default_params(out_params: *mut llama_context_params);
     fn loci_llama_model_load_from_file(
-        path: *const i8,
+        path: *const c_char,
         params: *const llama_model_params,
     ) -> *mut llama_model;
     fn loci_llama_init_from_model(
@@ -35,7 +35,7 @@ unsafe extern "C" {
     fn loci_llama_decode(ctx: *mut llama_context, batch: *const llama_batch) -> i32;
     fn loci_llama_tokenize(
         vocab: *const llama_vocab,
-        text: *const i8,
+        text: *const c_char,
         text_len: i32,
         tokens: *mut llama_token,
         n_tokens_max: i32,
@@ -115,7 +115,7 @@ impl LlamaModel {
 
         let mut capacity = (text_len.max(1) as usize) + 16;
         let mut tokens = vec![0i32; capacity];
-        let text_ptr = text.as_ptr() as *const i8;
+        let text_ptr = text.as_ptr().cast::<c_char>();
 
         loop {
             let n_tokens = unsafe {
@@ -155,7 +155,7 @@ impl LlamaModel {
                     self.get_vocab(),
                     &token,
                     1,
-                    buffer.as_mut_ptr() as *mut i8,
+                    buffer.as_mut_ptr().cast::<c_char>(),
                     buffer.len() as i32,
                     false, // remove_special
                     false, // unparse_special
