@@ -88,6 +88,13 @@ fn main() {
         }
     }
 
+    if target.contains("android") {
+        // Upstream documents GGML_LLAMAFILE as unsupported on Android.
+        // Leaving it enabled pulls in sgemm.cpp, which currently breaks
+        // armv7 Android builds due to unsupported FP16 intrinsics.
+        config.define("GGML_LLAMAFILE", "OFF");
+    }
+
     // Windows MinGW optimization tiers (stability first):
     // - safe : disable SIMD extensions
     // - sse42: enable only SSE4.2

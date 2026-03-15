@@ -39,6 +39,8 @@ use std::time::{Duration, Instant};
 /// Number of tokens per KV cache block
 pub const BLOCK_SIZE: usize = 32;
 
+const DEFAULT_MEMORY_BUDGET_BYTES: u64 = 8_u64 * 1024 * 1024 * 1024;
+
 /// Physical block ID
 pub type BlockId = u64;
 
@@ -118,7 +120,7 @@ pub struct MemoryBudgetConfig {
 impl Default for MemoryBudgetConfig {
     fn default() -> Self {
         Self {
-            total_memory: 8 * 1024 * 1024 * 1024,       // 8 GB default
+            total_memory: usize::try_from(DEFAULT_MEMORY_BUDGET_BYTES).unwrap_or(usize::MAX), // 8 GiB default, clamped on 32-bit targets
             floor_percentage: 0.10,                     // 10% floor
             eviction_threshold: 0.85,                   // 85% threshold
             cool_down_duration: Duration::from_secs(3), // 3s cool-down
