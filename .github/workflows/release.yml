@@ -35,13 +35,13 @@ jobs:
             target: x86_64-apple-darwin
             artifact_name: loci
             asset_name: loci-macos-x86_64
-            cargo_args: ""
+            cargo_args: "--no-default-features --features auto-detect"
             artifact_kind: binary
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: loci
             asset_name: loci-macos-aarch64
-            cargo_args: ""
+            cargo_args: "--no-default-features --features auto-detect"
             artifact_kind: binary
           - os: macos-latest
             target: aarch64-apple-ios

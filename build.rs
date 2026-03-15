@@ -550,11 +550,16 @@ fn link_system_libraries(target: &str) {
         // Android NDK uses libc++ instead of libstdc++.
         println!("cargo:rustc-link-lib=dylib=c++_shared");
         println!("cargo:rustc-link-lib=dylib=m");
+        println!("cargo:rustc-link-lib=dylib=dl");
+        println!("cargo:rustc-link-lib=dylib=atomic");
     } else {
         // Unix-like systems (Linux, macOS, etc.)
         println!("cargo:rustc-link-lib=dylib=stdc++");
         println!("cargo:rustc-link-lib=dylib=m");
         println!("cargo:rustc-link-lib=dylib=dl");
         println!("cargo:rustc-link-lib=dylib=pthread");
+        if target.contains("linux") {
+            println!("cargo:rustc-link-lib=dylib=atomic");
+        }
     }
 }
