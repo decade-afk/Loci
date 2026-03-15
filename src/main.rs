@@ -11073,7 +11073,8 @@ fn compatibility_usage(prompt: &str, response: &str) -> OpenAiUsage {
 mod tests {
     use super::*;
     use std::fs;
-    use std::io::Cursor;
+    use std::io::{Cursor, Read};
+    use std::net::{Shutdown, TcpListener, TcpStream};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn write_temp_file(ext: &str, content: &str) -> PathBuf {
@@ -11084,6 +11085,28 @@ mod tests {
         let path = std::env::temp_dir().join(format!("loci-cli-config-{nonce}.{ext}"));
         fs::write(&path, content).expect("write temp config");
         path
+    }
+
+    fn tcp_stream_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback listener");
+        let addr = listener.local_addr().expect("listener address");
+        let client = TcpStream::connect(addr).expect("connect loopback client");
+        let (server, _) = listener.accept().expect("accept loopback connection");
+        (server, client)
+    }
+
+    fn capture_tcp_output<F>(writer: F) -> String
+    where
+        F: FnOnce(&mut TcpStream),
+    {
+        let (mut server, mut client) = tcp_stream_pair();
+        writer(&mut server);
+        server
+            .shutdown(Shutdown::Write)
+            .expect("shutdown server write");
+        let mut output = String::new();
+        client.read_to_string(&mut output).expect("read tcp output");
+        output
     }
 
     #[test]
@@ -12675,6 +12698,47 @@ mod tests {
             HttpRequestParseError::InvalidContentLength(_)
         ));
         assert_eq!(err.status_code(), "400 Bad Request");
+    }
+
+    #[test]
+    fn write_plain_response_over_tcp_emits_complete_http_payload() {
+        let raw = capture_tcp_output(|stream| {
+            write_plain_response(stream, "200 OK", "text/plain", "pong")
+                .expect("write plain response");
+        });
+
+        assert!(raw.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(raw.contains("Content-Type: text/plain\r\n"));
+        assert!(raw.contains("Content-Length: 4\r\n"));
+        assert!(raw.ends_with("\r\n\r\npong"));
+    }
+
+    #[test]
+    fn write_streaming_headers_and_sse_frames_over_tcp() {
+        let raw = capture_tcp_output(|stream| {
+            write_streaming_response_headers(stream, "200 OK", "text/event-stream")
+                .expect("write stream headers");
+            write_sse_json_event(stream, &serde_json::json!({ "delta": "hi" }))
+                .expect("write sse event");
+            write_sse_done(stream).expect("write sse done");
+        });
+
+        assert!(raw.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(raw.contains("Content-Type: text/event-stream\r\n"));
+        assert!(raw.contains("Cache-Control: no-cache\r\n"));
+        assert!(raw.contains("X-Accel-Buffering: no\r\n"));
+        assert!(raw.contains("data: {\"delta\":\"hi\"}\n\n"));
+        assert!(raw.ends_with("data: [DONE]\n\n"));
+    }
+
+    #[test]
+    fn write_ndjson_event_over_tcp_uses_single_line_json() {
+        let raw = capture_tcp_output(|stream| {
+            write_ndjson_event(stream, &serde_json::json!({ "event": "tick", "seq": 1 }))
+                .expect("write ndjson event");
+        });
+
+        assert_eq!(raw, "{\"event\":\"tick\",\"seq\":1}\n");
     }
 
     #[test]

@@ -5,8 +5,13 @@
 #![allow(non_snake_case)]
 #![allow(dead_code)]
 
-// Include the generated bindings
-include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+// Keep bindgen-generated items isolated so clippy can focus on hand-written code.
+#[allow(clippy::all)]
+mod bindings {
+    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+}
+
+pub use bindings::*;
 
 use std::ffi::CString;
 use std::mem::MaybeUninit;

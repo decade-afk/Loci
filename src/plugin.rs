@@ -275,10 +275,10 @@ impl PluginManager {
     }
 
     /// Get a plugin by name (returns None if disabled)
-    pub fn get(&self, name: &str) -> Option<&Box<dyn Plugin>> {
+    pub fn get(&self, name: &str) -> Option<&dyn Plugin> {
         self.plugins.get(name).and_then(|entry| {
             if entry.enabled {
-                Some(&entry.plugin)
+                Some(entry.plugin.as_ref())
             } else {
                 None
             }
