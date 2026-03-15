@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*.*.*'
 
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_HTTP_TIMEOUT: "600"
@@ -12,8 +15,24 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+    - name: Create or update release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ github.ref_name }}
+        name: ${{ github.ref_name }}
+        draft: false
+        prerelease: false
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   build-release:
     name: Build Release
+    needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -380,6 +399,7 @@ jobs:
         file: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
         asset_name: ${{ matrix.asset_name }}
         tag: ${{ github.ref }}
+        overwrite: true
 
   build-android-sdk-release:
     name: Build Android SDK Release Assets
@@ -485,6 +505,7 @@ jobs:
         file: android-sdk/loci-sdk/build/outputs/aar/loci-sdk-release.aar
         asset_name: loci-android-sdk-${{ github.ref_name }}.aar
         tag: ${{ github.ref }}
+        overwrite: true
 
     - name: Upload sample APK to release
       uses: svenstaro/upload-release-action@v2
@@ -493,6 +514,7 @@ jobs:
         file: android-sdk/sample-app/build/outputs/apk/debug/sample-app-debug.apk
         asset_name: loci-android-sample-${{ github.ref_name }}.apk
         tag: ${{ github.ref }}
+        overwrite: true
 
   publish-crate:
     name: Publish to crates.io
