@@ -82,7 +82,7 @@ jobs:
         run: cargo test --locked --bin loci -- --nocapture
 
       - name: Run OpenClaw adapter plugin tests
-        run: cargo test --manifest-path examples/openclaw_adapter_plugin/Cargo.toml -- --nocapture
+        run: cargo test --locked --manifest-path examples/openclaw_adapter_plugin/Cargo.toml -- --nocapture
 
   windows-artifacts:
     name: Build Windows Artifacts
@@ -126,9 +126,9 @@ jobs:
 
       - name: Build plugin examples
         run: |
-          cargo build --release --manifest-path examples/openclaw_adapter_plugin/Cargo.toml
-          cargo build --release --manifest-path examples/backend_kernel_plugin/Cargo.toml
-          cargo build --release --manifest-path examples/image_kernel_plugin/Cargo.toml
+          cargo build --locked --release --manifest-path examples/openclaw_adapter_plugin/Cargo.toml
+          cargo build --locked --release --manifest-path examples/backend_kernel_plugin/Cargo.toml
+          cargo build --locked --release --manifest-path examples/image_kernel_plugin/Cargo.toml
 
       - name: Package artifacts
         shell: pwsh

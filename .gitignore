@@ -43,3 +43,6 @@ dist/
 outputs/
 examples/**/target/
 target-ninja/
+android-sdk/.gradle/
+android-sdk/local.properties
+android-sdk/**/build/

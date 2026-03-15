@@ -179,18 +179,18 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.target }}" = "x86_64-pc-windows-gnu" ]; then
-            cargo build --release --target ${{ matrix.target }} --no-default-features --features auto-detect
+            cargo build --locked --release --target ${{ matrix.target }} --no-default-features --features auto-detect
           else
-            cargo build --release --target ${{ matrix.target }}
+            cargo build --locked --release --target ${{ matrix.target }}
           fi
 
       - name: Build libraries
         shell: bash
         run: |
           if [ "${{ matrix.target }}" = "x86_64-pc-windows-gnu" ]; then
-            cargo build --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect
+            cargo build --locked --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect
           else
-            cargo build --release --lib --target ${{ matrix.target }}
+            cargo build --locked --release --lib --target ${{ matrix.target }}
           fi
 
       - name: Package artifacts
@@ -319,18 +319,18 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-            cargo build --release --target ${{ matrix.target }} --no-default-features --features auto-detect
+            cargo build --locked --release --target ${{ matrix.target }} --no-default-features --features auto-detect
           else
-            cargo build --release --target ${{ matrix.target }}
+            cargo build --locked --release --target ${{ matrix.target }}
           fi
 
       - name: Build libraries
         shell: bash
         run: |
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-            cargo build --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect
+            cargo build --locked --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect
           else
-            cargo build --release --lib --target ${{ matrix.target }}
+            cargo build --locked --release --lib --target ${{ matrix.target }}
           fi
 
       - name: Package artifacts
@@ -441,10 +441,10 @@ jobs:
           key: ${{ runner.os }}-target-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build executable
-        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features auto-detect
+        run: cargo build --locked --release --target ${{ matrix.target }} --no-default-features --features auto-detect
 
       - name: Build libraries
-        run: cargo build --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect
+        run: cargo build --locked --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect
 
       - name: Package artifacts
         run: |
@@ -553,7 +553,7 @@ jobs:
           echo "BINDGEN_EXTRA_CLANG_ARGS=-arch $ARCH -isysroot $SDKROOT $DEPLOYMENT_FLAG" >> $GITHUB_ENV
 
       - name: Build library (iOS doesn't support executables)
-        run: cargo rustc --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect -- --crate-type staticlib
+        run: cargo rustc --locked --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect -- --crate-type staticlib
 
       - name: Package artifacts
         run: |
@@ -693,8 +693,8 @@ jobs:
       - name: Build library
         shell: bash
         run: |
-          cargo rustc --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect -- --crate-type cdylib
-          cargo rustc --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect -- --crate-type staticlib
+          cargo rustc --locked --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect -- --crate-type cdylib
+          cargo rustc --locked --release --lib --target ${{ matrix.target }} --no-default-features --features auto-detect -- --crate-type staticlib
 
       - name: Package artifacts
         run: |
@@ -711,9 +711,108 @@ jobs:
           name: loci-android-${{ matrix.target }}
           path: loci-android-${{ matrix.target }}.tar.gz
 
+  build-android-sdk:
+    name: Build Android SDK
+    needs: build-android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download Android arm64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: loci-android-aarch64-linux-android
+          path: android-native-artifacts/aarch64-linux-android
+
+      - name: Download Android armv7 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: loci-android-armv7-linux-androideabi
+          path: android-native-artifacts/armv7-linux-androideabi
+
+      - name: Download Android x86_64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: loci-android-x86_64-linux-android
+          path: android-native-artifacts/x86_64-linux-android
+
+      - name: Download Android x86 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: loci-android-i686-linux-android
+          path: android-native-artifacts/i686-linux-android
+
+      - name: Extract Android native libraries
+        shell: bash
+        run: |
+          declare -A ABI_MAP=(
+            [aarch64-linux-android]=arm64-v8a
+            [armv7-linux-androideabi]=armeabi-v7a
+            [x86_64-linux-android]=x86_64
+            [i686-linux-android]=x86
+          )
+
+          for target in "${!ABI_MAP[@]}"; do
+            archive="android-native-artifacts/${target}/loci-android-${target}.tar.gz"
+            abi="${ABI_MAP[$target]}"
+            test -f "$archive"
+            mkdir -p "android-sdk/loci-sdk/src/main/jniLibs/$abi"
+            tmpdir="$(mktemp -d)"
+            tar xzf "$archive" -C "$tmpdir"
+            cp "$tmpdir/libloci.so" "android-sdk/loci-sdk/src/main/jniLibs/$abi/libloci.so"
+            rm -rf "$tmpdir"
+          done
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
+          test -n "$SDK_ROOT"
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "cmake;3.22.1" \
+            "ndk;27.3.13750724"
+          printf "sdk.dir=%s\n" "$SDK_ROOT" > android-sdk/local.properties
+
+      - name: Assemble Android SDK
+        env:
+          LOCI_ANDROID_SDK_VERSION: 0.1.0-dev.${{ github.run_number }}
+        run: gradle --no-daemon --stacktrace -p android-sdk :loci-sdk:assembleRelease :sample-app:assembleDebug
+
+      - name: Upload Android SDK AAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: loci-android-sdk-aar
+          path: android-sdk/loci-sdk/build/outputs/aar/loci-sdk-release.aar
+
+      - name: Upload Android sample APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: loci-android-sample-apk
+          path: android-sdk/sample-app/build/outputs/apk/debug/sample-app-debug.apk
+
   release:
     name: Create Release
-    needs: [build-windows, build-linux, build-macos, build-ios, build-android]
+    needs: [build-windows, build-linux, build-macos, build-ios, build-android, build-android-sdk]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:

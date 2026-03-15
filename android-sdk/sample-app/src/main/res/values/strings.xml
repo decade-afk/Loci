@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">Loci Sample</string>
+    <string name="title">Loci Android SDK Sample</string>
+    <string name="status_idle">Idle.</string>
+    <string name="no_model_selected">No model selected.</string>
+    <string name="pick_model">Pick GGUF Model</string>
+    <string name="load_model">Load Engine</string>
+    <string name="context_size">Context size</string>
+    <string name="max_tokens">Max tokens</string>
+    <string name="temperature">Temperature</string>
+    <string name="prompt_hint">Prompt</string>
+    <string name="default_prompt">Explain what Loci does on Android.</string>
+    <string name="generate">Generate</string>
+    <string name="stream_generate">Stream Generate</string>
+    <string name="output_placeholder">Model output will appear here.</string>
+</resources>

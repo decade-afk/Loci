@@ -355,12 +355,19 @@ jobs:
       shell: bash
       run: |
         if [ "${{ matrix.mobile }}" = "ios" ]; then
-          cargo rustc --release --target ${{ matrix.target }} --lib --no-default-features --features auto-detect -- --crate-type staticlib
+          cargo rustc --locked --release --target ${{ matrix.target }} --lib --no-default-features --features auto-detect -- --crate-type staticlib
         elif [ "${{ matrix.mobile }}" = "android" ]; then
-          cargo rustc --release --target ${{ matrix.target }} --lib --no-default-features --features auto-detect -- --crate-type cdylib
+          cargo rustc --locked --release --target ${{ matrix.target }} --lib --no-default-features --features auto-detect -- --crate-type cdylib
         else
-          cargo build --release --target ${{ matrix.target }} ${{ matrix.cargo_args }}
+          cargo build --locked --release --target ${{ matrix.target }} ${{ matrix.cargo_args }}
         fi
+
+    - name: Upload Android workflow artifact
+      if: matrix.mobile == 'android'
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-android-native-${{ matrix.target }}
+        path: target/${{ matrix.target }}/release/libloci.so
 
     - name: Strip binary (Linux/macOS)
       if: matrix.os != 'windows-latest' && matrix.artifact_kind == 'binary'
@@ -374,10 +381,119 @@ jobs:
         asset_name: ${{ matrix.asset_name }}
         tag: ${{ github.ref }}
 
+  build-android-sdk-release:
+    name: Build Android SDK Release Assets
+    runs-on: ubuntu-latest
+    needs: build-release
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Download Android arm64 native artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: release-android-native-aarch64-linux-android
+        path: android-native-artifacts/aarch64-linux-android
+
+    - name: Download Android armv7 native artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: release-android-native-armv7-linux-androideabi
+        path: android-native-artifacts/armv7-linux-androideabi
+
+    - name: Download Android x86_64 native artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: release-android-native-x86_64-linux-android
+        path: android-native-artifacts/x86_64-linux-android
+
+    - name: Download Android x86 native artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: release-android-native-i686-linux-android
+        path: android-native-artifacts/i686-linux-android
+
+    - name: Copy Android native libraries into SDK project
+      shell: bash
+      run: |
+        declare -A ABI_MAP=(
+          [aarch64-linux-android]=arm64-v8a
+          [armv7-linux-androideabi]=armeabi-v7a
+          [x86_64-linux-android]=x86_64
+          [i686-linux-android]=x86
+        )
+
+        for target in "${!ABI_MAP[@]}"; do
+          abi="${ABI_MAP[$target]}"
+          source="android-native-artifacts/${target}/libloci.so"
+          test -f "$source"
+          mkdir -p "android-sdk/loci-sdk/src/main/jniLibs/$abi"
+          cp "$source" "android-sdk/loci-sdk/src/main/jniLibs/$abi/libloci.so"
+        done
+
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: "17"
+
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: "8.10"
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Install Android SDK packages
+      shell: bash
+      run: |
+        SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
+        test -n "$SDK_ROOT"
+        yes | sdkmanager --licenses >/dev/null
+        sdkmanager \
+          "platform-tools" \
+          "platforms;android-35" \
+          "build-tools;35.0.0" \
+          "cmake;3.22.1" \
+          "ndk;27.3.13750724"
+        printf "sdk.dir=%s\n" "$SDK_ROOT" > android-sdk/local.properties
+
+    - name: Assemble Android SDK assets
+      env:
+        LOCI_ANDROID_SDK_VERSION: ${{ github.ref_name }}
+      run: gradle --no-daemon --stacktrace -p android-sdk :loci-sdk:assembleRelease :sample-app:assembleDebug
+
+    - name: Upload Android SDK workflow artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: loci-android-sdk-release-assets
+        path: |
+          android-sdk/loci-sdk/build/outputs/aar/loci-sdk-release.aar
+          android-sdk/sample-app/build/outputs/apk/debug/sample-app-debug.apk
+
+    - name: Upload AAR to release
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+        file: android-sdk/loci-sdk/build/outputs/aar/loci-sdk-release.aar
+        asset_name: loci-android-sdk-${{ github.ref_name }}.aar
+        tag: ${{ github.ref }}
+
+    - name: Upload sample APK to release
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+        file: android-sdk/sample-app/build/outputs/apk/debug/sample-app-debug.apk
+        asset_name: loci-android-sample-${{ github.ref_name }}.apk
+        tag: ${{ github.ref }}
+
   publish-crate:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    needs: build-release
+    needs: [build-release, build-android-sdk-release]
 
     steps:
     - name: Checkout code
