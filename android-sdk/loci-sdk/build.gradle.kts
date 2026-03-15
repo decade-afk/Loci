@@ -13,6 +13,26 @@ version = providers.gradleProperty("lociSdkVersion")
     .orElse("0.1.0-SNAPSHOT")
     .get()
 
+val supportedLociAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+val availableLociAbis = supportedLociAbis.filter { abi ->
+    layout.projectDirectory.file("src/main/jniLibs/$abi/libloci.so").asFile.exists()
+}
+val configuredLociAbis = providers.gradleProperty("lociAbiFilters")
+    .orNull
+    ?.split(',')
+    ?.map { it.trim() }
+    ?.filter { it.isNotEmpty() }
+    ?.distinct()
+    ?: availableLociAbis
+
+val unsupportedConfiguredAbis = configuredLociAbis.filterNot(supportedLociAbis::contains)
+if (unsupportedConfiguredAbis.isNotEmpty()) {
+    throw GradleException(
+        "Unsupported Android ABI values in lociAbiFilters: ${unsupportedConfiguredAbis.joinToString(", ")}. " +
+            "Supported values: ${supportedLociAbis.joinToString(", ")}"
+    )
+}
+
 android {
     namespace = "io.github.decadeafk.loci.sdk"
     compileSdk = 35
@@ -21,6 +41,11 @@ android {
     defaultConfig {
         minSdk = 24
         consumerProguardFiles("consumer-rules.pro")
+        ndk {
+            if (configuredLociAbis.isNotEmpty()) {
+                abiFilters += configuredLociAbis
+            }
+        }
         externalNativeBuild {
             cmake {
                 cppFlags += "-std=c++17"
@@ -62,14 +87,22 @@ android {
     }
 }
 
-val requiredArm64Lib = layout.projectDirectory.file("src/main/jniLibs/arm64-v8a/libloci.so")
-
 tasks.register("verifyLociPrebuilt") {
     doLast {
-        if (!requiredArm64Lib.asFile.exists()) {
+        if (configuredLociAbis.isEmpty()) {
             throw GradleException(
-                "Missing prebuilt Android native library: ${requiredArm64Lib.asFile}. " +
+                "No prebuilt Android native libraries were found under src/main/jniLibs. " +
                     "Run android-sdk/scripts/sync-prebuilt-loci.ps1 or .sh after building libloci.so from the repository root."
+            )
+        }
+
+        val missingLibs = configuredLociAbis.filter { abi ->
+            !layout.projectDirectory.file("src/main/jniLibs/$abi/libloci.so").asFile.exists()
+        }
+        if (missingLibs.isNotEmpty()) {
+            throw GradleException(
+                "Missing prebuilt Android native libraries for ABI(s): ${missingLibs.joinToString(", ")}. " +
+                    "Expected files under src/main/jniLibs/<abi>/libloci.so."
             )
         }
     }

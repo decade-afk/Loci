@@ -87,6 +87,10 @@ into:
 
 - `android-sdk/loci-sdk/src/main/jniLibs/<abi>/libloci.so`
 
+The SDK module automatically builds JNI variants only for the ABI directories
+that currently contain `libloci.so`. The sample app still requires
+`arm64-v8a/libloci.so`.
+
 ## 3. Open the Android project
 
 Open the `android-sdk` directory in Android Studio.

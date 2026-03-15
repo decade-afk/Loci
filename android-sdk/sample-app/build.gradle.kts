@@ -1,7 +1,12 @@
+import org.gradle.api.GradleException
+
 plugins {
     id("com.android.application")
     kotlin("android")
 }
+
+val requiredSampleAbi = "arm64-v8a"
+val requiredSampleLib = rootProject.layout.projectDirectory.file("loci-sdk/src/main/jniLibs/$requiredSampleAbi/libloci.so")
 
 android {
     namespace = "io.github.decadeafk.loci.sample"
@@ -50,4 +55,19 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")
     implementation("com.google.android.material:material:1.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+}
+
+tasks.register("verifySampleLociPrebuilt") {
+    doLast {
+        if (!requiredSampleLib.asFile.exists()) {
+            throw GradleException(
+                "Missing required sample-app native library: ${requiredSampleLib.asFile}. " +
+                    "The sample app currently targets arm64-v8a only."
+            )
+        }
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn("verifySampleLociPrebuilt")
 }

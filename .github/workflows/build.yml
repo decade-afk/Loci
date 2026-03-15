@@ -800,7 +800,7 @@ jobs:
       - name: Assemble Android SDK
         env:
           LOCI_ANDROID_SDK_VERSION: 0.1.0-dev.${{ github.run_number }}
-        run: gradle --no-daemon --stacktrace -p android-sdk :loci-sdk:assembleRelease :sample-app:assembleDebug
+        run: gradle --no-daemon --stacktrace -PlociAbiFilters=arm64-v8a,armeabi-v7a,x86_64,x86 -p android-sdk :loci-sdk:assembleRelease :sample-app:assembleDebug
 
       - name: Upload Android SDK AAR
         uses: actions/upload-artifact@v4

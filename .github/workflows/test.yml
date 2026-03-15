@@ -219,4 +219,4 @@ jobs:
         run: bash android-sdk/scripts/sync-prebuilt-loci.sh
 
       - name: Assemble Android SDK and sample app
-        run: gradle --no-daemon --stacktrace -p android-sdk :loci-sdk:assembleRelease :sample-app:assembleDebug
+        run: gradle --no-daemon --stacktrace -PlociAbiFilters=arm64-v8a -p android-sdk :loci-sdk:assembleRelease :sample-app:assembleDebug
