@@ -161,8 +161,12 @@ jobs:
         run: |
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
           test -n "$SDK_ROOT"
-          yes | sdkmanager --licenses >/dev/null
-          sdkmanager \
+          set +o pipefail
+          yes | sdkmanager --sdk_root="$SDK_ROOT" --licenses >/dev/null
+          license_status=$?
+          set -o pipefail
+          test "$license_status" -eq 0
+          sdkmanager --sdk_root="$SDK_ROOT" \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0" \
