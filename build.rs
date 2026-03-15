@@ -204,6 +204,13 @@ fn main() {
 
     if let Ok(extra_args) = env::var("BINDGEN_EXTRA_CLANG_ARGS") {
         for arg in extra_args.split_whitespace().filter(|arg| !arg.is_empty()) {
+            if should_skip_bindgen_clang_arg(&target, arg) {
+                println!(
+                    "cargo:warning=Skipping problematic bindgen clang arg for {}: {}",
+                    target, arg
+                );
+                continue;
+            }
             bindings = bindings.clang_arg(arg);
         }
     }
@@ -486,6 +493,15 @@ fn command_output(command: &str, args: &[&str]) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn should_skip_bindgen_clang_arg(target: &str, arg: &str) -> bool {
+    if !target.contains("windows-gnu") {
+        return false;
+    }
+
+    let normalized = arg.replace('\\', "/").to_ascii_lowercase();
+    normalized.starts_with("-i") && normalized.contains("/lib/gcc/")
 }
 
 fn first_dir_with_any_file(candidates: Vec<PathBuf>, filenames: &[&str]) -> Option<PathBuf> {
