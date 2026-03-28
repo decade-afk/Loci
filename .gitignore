@@ -41,6 +41,10 @@ dist/
 .pip_cache/
 .hf_cache/
 outputs/
+runtime/
+sessions/
+tmp/
+examples/**/output/
 examples/**/target/
 target-ninja/
 android-sdk/.gradle/

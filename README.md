@@ -1,7 +1,18 @@
 # Loci
-Loci is an embeddable AI inference engine and control plane built in Rust.
+Loci is a general-purpose, embeddable AI inference runtime and control plane built in Rust.
 
 It is designed for teams that need to integrate local model execution into their own software, not for shipping yet another end-user chat shell. Loci focuses on runtime execution, host integration, plugin-based upgrades, model asset governance, and tool/session control surfaces that can sit behind desktop apps, IDE copilots, local automation products, and custom agents.
+
+## Positioning
+
+Loci is intended to be a host-integrated runtime layer, not an opinionated end-user app.
+
+- Runtime layer: local inference execution for text/image paths with controllable runtime behavior.
+- Control plane layer: model inventory, policy/governance hooks, events, and service-side operational controls.
+- Integration layer: Rust crate, C ABI, REST API, and plugin contracts that let products embed and evolve capabilities safely.
+
+This positioning keeps Loci domain-neutral: game tools, IDE assistants, desktop automation, internal copilots, and service wrappers can share the same runtime core.
+For a concrete plugin-first agentization path, see [docs/AGENT_RUNTIME_BLUEPRINT.md](docs/AGENT_RUNTIME_BLUEPRINT.md).
 
 ## Plugin System - Highly Extensible
 
@@ -13,8 +24,8 @@ Loci features a **highly plugin-capable architecture** that allows you to extend
 - **WASM Plugins**: Sandboxed execution for security and cross-language support
 
 ### Plugin Contract Manifest
-- Dynamic plugins can ship a sidecar manifest such as `my_plugin.loci-plugin.json`
-- Manifest validation checks plugin kind, ABI version, and optional host-version bounds before load
+- Dynamic plugins must provide a sidecar manifest such as `my_plugin.loci-plugin.json`
+- Manifest validation enforces plugin kind, ABI version, and optional host-version bounds before load
 - Runtime plugin identity is cross-checked against the loaded implementation when version metadata is available
 - Policy-oriented plugin kinds include execution, management-auth, serve-dispatch, model-pull policy, and model-pull verifier plugins
 
@@ -51,6 +62,7 @@ API docs for integrators:
 - [docs/API_REFERENCE.md](docs/API_REFERENCE.md)
 - [docs/openapi/loci-rest-v1.yaml](docs/openapi/loci-rest-v1.yaml)
 - [examples/integration/templates/README.md](examples/integration/templates/README.md)
+- [docs/AGENT_RUNTIME_BLUEPRINT.md](docs/AGENT_RUNTIME_BLUEPRINT.md)
 
 ## Features
 
@@ -82,12 +94,25 @@ API docs for integrators:
 - **Ollama-compatible routes**: `GET /api/tags`, `POST /api/generate`
 - **Same core runtime**: Compatibility routes reuse the same engine, plugin hooks, auth, and metrics path as native REST endpoints
 - **Streaming compatibility**: `stream=true` is supported for OpenAI chat and Ollama generate; Loci uses native token streaming when available and falls back to buffered chunk streaming when required for compatibility
-- **Control-plane introspection**: `GET /info` exposes engine/runtime capabilities, `GET /metrics` exposes runtime request metrics, and `POST /models/plan` exposes remote placement planning for integrators
+- **Control-plane introspection**: `GET /info` exposes engine/runtime capabilities, `GET /capabilities` exposes serve-layer protocol/capability matrix (including assistant-chat contract + multimodal flags), `GET /metrics` exposes runtime request metrics, and `POST /models/plan` exposes remote placement planning for integrators
 - **Runtime audit stream**: `GET /events` and `GET /events/stream` expose a structured control-plane event spine for hosts that need supervision, logging, or activity feeds
 - **Model inventory control plane**: `GET/POST/DELETE /models/assets...` lets host software manage registered and imported model assets over REST
 - **Model source governance**: `GET/POST /model-pull-policies...` lets hosts activate builtin or plugin-provided policies for model source admission and checksum enforcement
 - **Model trust verification governance**: `GET/POST /model-pull-verifiers...` lets hosts activate builtin or plugin-provided post-download verifiers for sidecar, signature, or certificate-style checks before import is committed
 - **Live OpenAPI discovery**: `GET /openapi.yaml` and `GET /openapi.json` serve the embedded machine-readable API spec from the running process
+
+### Assistant Chat Protocol (v2)
+- `POST /assistant/chat` supports multiple compatible payload shapes:
+  - `prompt` (legacy text)
+  - `message` (single text message)
+  - `messages[]` with `content` as text or structured parts (`text`, `input_text`, `input_image`, `input_audio`)
+  - `attachments[]` (`type`, `mime_type`, `data_base64`, `path`)
+- When multimodal content is detected but current backend is not multimodal-capable, server returns `422` with structured error:
+  - `code=MULTIMODAL_UNSUPPORTED`
+  - `category=capability`
+  - `recoverable=true`
+- Native multimodal runtime path executes `text+image`; `audio/wav` inputs are also accepted and parsed into runtime audio context. Image+audio requests use native multimodal inference, while audio-only requests fall back to text inference with extracted audio summary metadata.
+- Use `GET /capabilities` to detect supported protocol fields and multimodal availability before dispatching requests.
 
 ### Language Integration
 - **Rust API**: Type-safe, zero-cost abstractions
@@ -127,6 +152,21 @@ Download a GGUF model, for example:
 # Example: Download a small Qwen model
 wget https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
 ```
+
+Edge resource-constrained smoke (real model import + execution, with remote-download fallback to local file):
+
+```powershell
+pwsh ./scripts/edge_resource_smoke.ps1 `
+  -LociExe ./target/debug/loci.exe `
+  -ModelStore models `
+  -ModelId edge-qwen05b-q4km `
+  -LocalSource D:/Code/Reptile/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf
+```
+
+The script validates:
+- model import into managed store (`model pull`)
+- constrained edge inference (`cpu-only`, `threads=1`, `context=256`, `max_tokens=16`)
+- `--mmap` vs `--no-mmap` execution viability and elapsed time
 
 ### Usage
 
@@ -576,17 +616,17 @@ For cross-compilation and platform-specific builds, see [BUILD.md](BUILD.md).
 
 ```
 loci/
-|-- src/
-|   |-- lib.rs          # Library entry point
-|   |-- main.rs         # CLI application
-|   |-- error.rs        # Error types
-|   |-- model.rs        # Model configuration
-|   `-- inference.rs    # Inference engine
-|-- docs/               # Documentation
-|-- tests/              # Integration tests
-|-- benches/            # Benchmarks
-|-- examples/           # Usage examples
-|-- models/             # Model files directory
+|-- src/                # Core runtime, control-plane, plugin contracts
+|-- include/            # Public C headers
+|-- docs/               # Architecture, API, ADRs, strategy
+|-- tests/              # Integration and E2E tests
+|-- benches/            # Benchmark suites
+|-- examples/           # Demos, plugins, integration templates
+|-- scripts/            # Local tooling / smoke test scripts
+|-- web/                # Embedded assistant console assets
+|-- android-sdk/        # Android SDK and sample app
+|-- wasm-plugin-sdk/    # WASM plugin SDK crate
+|-- models/             # Local model assets (git-ignored)
 |-- deps/
 |   `-- llama.cpp/      # llama.cpp submodule
 `-- Cargo.toml

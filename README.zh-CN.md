@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-Loci 是一个可嵌入到其他软件中的 AI 推理运行时，面向希望把模型能力真正集成进产品、而不是单独再造一套运行时基础设施的团队。
+Loci 是一个通用化、可嵌入到其他软件中的 AI 推理运行时，面向希望把模型能力真正集成进产品、而不是单独再造一套运行时基础设施的团队。
 
 它的目标形态不是一个面向最终用户的聊天界面，而是桌面应用、IDE 助手、本地自动化工具、服务进程和自定义 Agent Shell 背后的“推理引擎层”。Loci 负责承接模型执行、插件升级、工具接入、会话管理和宿主集成。
 
@@ -10,11 +10,12 @@ Loci 是一个可嵌入到其他软件中的 AI 推理运行时，面向希望�
 
 Loci 希望处在这样一个层级：
 
-- 模型执行层：基于 `llama.cpp` 提供本地 GGUF 推理能力，并预留动态内核扩展点。
+- 模型执行层：提供本地推理能力（文本/图像路径均可扩展），并预留动态内核扩展点。
 - 运行时层：统一处理插件生命周期、工具注册、会话、策略和宿主可控的生成流程。
 - 集成层：通过 Rust 嵌入、C ABI、REST 服务和多语言模板，接入其他软件。
 
-如果你需要的是一个可以被你的软件嵌入、升级、控制和扩展的 AI 推理引擎，Loci 的定位就是这里。
+如果你需要的是一个可以被你的软件嵌入、升级、控制和扩展的 AI 推理引擎，Loci 的定位就是这里。这个定位是领域中立的：游戏工具链、IDE 助手、桌面自动化、内部 Copilot、服务包装层都可复用同一运行时核心。
+如果你希望把它继续打造成可演进的 Agent Runtime，可参考 [`docs/AGENT_RUNTIME_BLUEPRINT.md`](docs/AGENT_RUNTIME_BLUEPRINT.md)。
 
 ## Loci 目前已经具备的能力
 
@@ -108,6 +109,21 @@ cargo build --release
 ```bash
 wget https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
 ```
+
+端侧资源受限实测（真实模型导入 + 推理，远程下载失败时自动回退本地文件）：
+
+```powershell
+pwsh ./scripts/edge_resource_smoke.ps1 `
+  -LociExe ./target/debug/loci.exe `
+  -ModelStore models `
+  -ModelId edge-qwen05b-q4km `
+  -LocalSource D:/Code/Reptile/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf
+```
+
+脚本会验证：
+- 托管模型导入（`model pull`）
+- 端侧受限推理（`cpu-only`、`threads=1`、`context=256`、`max_tokens=16`）
+- `--mmap` 与 `--no-mmap` 都可稳定执行，并输出耗时
 
 ### 5. 开始推理
 
@@ -324,6 +340,26 @@ embeddings 兼容接口也是同样思路：它只是对当前 Loci 后端能力
 OpenAPI 规范见：
 
 - [`docs/openapi/loci-rest-v1.yaml`](docs/openapi/loci-rest-v1.yaml)
+
+## 项目结构
+
+```
+loci/
+|-- src/                # 核心运行时、控制面、插件契约
+|-- include/            # C 头文件
+|-- docs/               # 架构、API、ADR、路线文档
+|-- tests/              # 集成与 E2E 测试
+|-- benches/            # 基准测试
+|-- examples/           # 示例、插件示例、集成模板
+|-- scripts/            # 本地工具与冒烟脚本
+|-- web/                # 内置助手控制台静态资源
+|-- android-sdk/        # Android SDK 与 sample app
+|-- wasm-plugin-sdk/    # WASM 插件 SDK crate
+|-- models/             # 本地模型目录（已忽略）
+|-- deps/
+|   `-- llama.cpp/      # llama.cpp 子模块
+`-- Cargo.toml
+```
 
 ## 当前项目状态
 
