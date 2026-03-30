@@ -1,5 +1,7 @@
 #[derive(Debug, thiserror::Error)]
 pub enum LociError {
+    #[error("config error: {0}")]
+    ConfigError(String),
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
     #[error("backend not available: {0}")]
