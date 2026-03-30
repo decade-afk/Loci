@@ -1,10 +1,10 @@
 pub mod backend;
 pub mod backends;
 pub mod core;
-pub mod engine;
 pub mod error;
 pub mod model;
 pub mod plugin;
+pub mod engine;
 
 pub use crate::backend::{
     BackendCapabilities, BackendParams, BackendRegistry, GpuSplitMode, InferenceBackend,

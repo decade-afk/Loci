@@ -1,194 +1,11 @@
-use crate::backend::{BackendParams, BackendRegistry, InferenceParams, Model};
+use crate::backend::{BackendParams, BackendRegistry, GpuSplitMode, InferenceParams};
 use crate::backends::MockBackend;
 use crate::core::{CoreRegistry, DefaultCoreRegistry};
-use crate::error::{LociError, Result};
+use crate::engine::runtime::InferenceEngine;
+use crate::error::Result;
 use crate::model::{ModelConfig, ModelLoadStrategy};
-use crate::plugin::RegisteredPlugin;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-#[derive(Debug, Clone)]
-pub struct GenerationParams {
-    pub max_tokens: u32,
-    pub temperature: f32,
-    pub top_p: f32,
-    pub min_p: f32,
-    pub top_k: u32,
-    pub repeat_penalty: f32,
-}
-
-impl Default for GenerationParams {
-    fn default() -> Self {
-        Self {
-            max_tokens: 512,
-            temperature: 0.8,
-            top_p: 0.95,
-            min_p: 0.0,
-            top_k: 40,
-            repeat_penalty: 1.1,
-        }
-    }
-}
-
-impl From<GenerationParams> for InferenceParams {
-    fn from(params: GenerationParams) -> Self {
-        Self {
-            max_tokens: params.max_tokens,
-            temperature: params.temperature,
-            top_p: params.top_p,
-            min_p: params.min_p,
-            top_k: params.top_k,
-            repeat_penalty: params.repeat_penalty,
-            ..Default::default()
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ModelInfo {
-    pub n_vocab: u32,
-    pub n_ctx_train: u32,
-    pub n_embd: u32,
-}
-
-pub struct InferenceEngine {
-    registry: Box<dyn CoreRegistry>,
-    backend_registry: BackendRegistry,
-    active_backend: Option<String>,
-    model: Option<Box<dyn Model>>,
-    model_path: Option<PathBuf>,
-    default_inference_params: InferenceParams,
-}
-
-impl InferenceEngine {
-    pub fn builder() -> InferenceEngineBuilder {
-        InferenceEngineBuilder::default()
-    }
-
-    pub fn register_plugin(&mut self, plugin: RegisteredPlugin) -> Result<()> {
-        self.registry
-            .plugin_manager_mut()
-            .register(plugin)
-            .map_err(LociError::from)
-    }
-
-    pub fn run_command(&self, command: &str) -> Result<String> {
-        self.registry.event_bus().publish(command)?;
-        Ok(format!("command accepted: {command}"))
-    }
-
-    pub fn plugin_count(&self) -> usize {
-        self.registry.plugin_manager().list().len()
-    }
-
-    pub fn load_model<P: AsRef<Path>>(
-        &mut self,
-        backend_name: &str,
-        model_path: P,
-        backend_params: BackendParams,
-    ) -> Result<()> {
-        let model_path = model_path.as_ref().to_path_buf();
-        let model =
-            self.backend_registry
-                .load_model(backend_name, &model_path, backend_params)?;
-        self.active_backend = Some(backend_name.to_string());
-        self.model = Some(model);
-        self.model_path = Some(model_path);
-        Ok(())
-    }
-
-    pub fn load_model_config(&mut self, backend_name: &str, config: &ModelConfig) -> Result<()> {
-        config.validate()?;
-        let backend_params = BackendParams {
-            n_gpu_layers: config.n_gpu_layers,
-            use_gpu: config.use_gpu,
-            use_mmap: config.use_mmap,
-            use_mlock: config.use_mlock,
-            kv_offload: config.kv_offload,
-            op_offload: config.op_offload,
-            split_mode: config.split_mode,
-            main_gpu: config.main_gpu,
-            tensor_split: config.tensor_split.clone(),
-            options: vec![
-                ("n_ctx".to_string(), config.n_ctx.to_string()),
-                ("n_batch".to_string(), config.n_batch.to_string()),
-            ],
-        };
-
-        let result = self.load_model(backend_name, &config.model_path, backend_params.clone());
-        match (result, config.load_strategy) {
-            (Ok(()), _) => Ok(()),
-            (
-                Err(_),
-                ModelLoadStrategy::AutoReduceGpuLayers { step },
-            ) if config.use_gpu && config.n_gpu_layers > 0 => {
-                let mut retry = config.n_gpu_layers.saturating_sub(step as i32);
-                while retry >= 0 {
-                    let mut reduced = backend_params.clone();
-                    reduced.n_gpu_layers = retry;
-                    if self
-                        .load_model(backend_name, &config.model_path, reduced)
-                        .is_ok()
-                    {
-                        return Ok(());
-                    }
-                    if retry == 0 {
-                        break;
-                    }
-                    retry = retry.saturating_sub(step as i32);
-                }
-                Err(LociError::ModelLoadError(
-                    "model load failed after GPU fallback attempts".to_string(),
-                ))
-            }
-            (Err(err), _) => Err(err),
-        }
-    }
-
-    pub fn generate(&mut self, prompt: &str, params: &InferenceParams) -> Result<String> {
-        let model = self
-            .model
-            .as_mut()
-            .ok_or_else(|| LociError::InferenceError("no model loaded".to_string()))?;
-        model.infer_text(prompt, params)
-    }
-
-    pub fn generate_legacy(&mut self, prompt: &str, params: GenerationParams) -> Result<String> {
-        let inference_params = self.generation_params_to_inference(params);
-        self.generate(prompt, &inference_params)
-    }
-
-    fn generation_params_to_inference(&self, params: GenerationParams) -> InferenceParams {
-        InferenceParams {
-            n_ctx: self.default_inference_params.n_ctx,
-            n_batch: self.default_inference_params.n_batch,
-            n_threads: self.default_inference_params.n_threads,
-            max_tokens: params.max_tokens,
-            temperature: params.temperature,
-            top_p: params.top_p,
-            min_p: params.min_p,
-            top_k: params.top_k,
-            repeat_penalty: params.repeat_penalty,
-        }
-    }
-
-    pub fn active_backend(&self) -> Option<&str> {
-        self.active_backend.as_deref()
-    }
-
-    pub fn model_metadata(&self) -> Option<crate::backend::ModelMetadata> {
-        self.model.as_ref().map(|model| model.metadata())
-    }
-
-    pub fn model_info(&self) -> Option<ModelInfo> {
-        self.model_metadata().map(|metadata| ModelInfo {
-            n_vocab: metadata.n_vocab,
-            n_ctx_train: metadata.n_ctx_train,
-            n_embd: metadata.n_embd,
-        })
-    }
-}
-
-#[derive(Default)]
 pub struct InferenceEngineBuilder {
     registry: Option<Box<dyn CoreRegistry>>,
     backend_registry: Option<BackendRegistry>,
@@ -205,10 +22,16 @@ pub struct InferenceEngineBuilder {
     use_mlock: bool,
     kv_offload: bool,
     op_offload: bool,
-    split_mode: crate::backend::GpuSplitMode,
+    split_mode: GpuSplitMode,
     main_gpu: u32,
     tensor_split: Option<Vec<f32>>,
     load_strategy: ModelLoadStrategy,
+}
+
+impl Default for InferenceEngineBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InferenceEngineBuilder {
@@ -229,7 +52,7 @@ impl InferenceEngineBuilder {
             use_mlock: false,
             kv_offload: true,
             op_offload: true,
-            split_mode: crate::backend::GpuSplitMode::Layer,
+            split_mode: GpuSplitMode::Layer,
             main_gpu: 0,
             tensor_split: None,
             load_strategy: ModelLoadStrategy::Strict,
@@ -251,6 +74,10 @@ impl InferenceEngineBuilder {
         self
     }
 
+    pub fn backend(self, backend_name: impl Into<String>) -> Self {
+        self.with_backend_name(backend_name)
+    }
+
     pub fn with_model_path(mut self, model_path: impl Into<PathBuf>) -> Self {
         self.model_path = Some(model_path.into());
         self
@@ -268,10 +95,6 @@ impl InferenceEngineBuilder {
     pub fn model_config(mut self, config: ModelConfig) -> Self {
         self.model_config = Some(config);
         self
-    }
-
-    pub fn backend(self, backend_name: impl Into<String>) -> Self {
-        self.with_backend_name(backend_name)
     }
 
     pub fn context_size(mut self, n_ctx: u32) -> Self {
@@ -294,7 +117,7 @@ impl InferenceEngineBuilder {
         self.n_gpu_layers = 0;
         self.kv_offload = false;
         self.op_offload = false;
-        self.split_mode = crate::backend::GpuSplitMode::None;
+        self.split_mode = GpuSplitMode::None;
         self.main_gpu = 0;
         self.tensor_split = None;
         self
@@ -325,7 +148,7 @@ impl InferenceEngineBuilder {
         self
     }
 
-    pub fn with_gpu_split_mode(mut self, split_mode: crate::backend::GpuSplitMode) -> Self {
+    pub fn with_gpu_split_mode(mut self, split_mode: GpuSplitMode) -> Self {
         self.split_mode = split_mode;
         self
     }
@@ -402,7 +225,9 @@ impl InferenceEngineBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::InferenceEngineBuilder;
+    use crate::engine::GenerationParams;
+    use crate::model::ModelConfig;
 
     #[test]
     fn builder_can_preload_model_and_generate() {
@@ -413,7 +238,7 @@ mod tests {
             .expect("build");
 
         let output = engine
-            .generate("hello", &InferenceParams::default())
+            .generate("hello", &crate::backend::InferenceParams::default())
             .expect("generate");
         assert!(output.contains("mock:hello"));
         assert_eq!(engine.active_backend(), Some("mock"));
