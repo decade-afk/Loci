@@ -25,6 +25,7 @@ impl Default for LlamaCppBackend {
 
 pub struct LlamaCppModel {
     load_plan: LlamaCppLoadPlan,
+    runtime_state: LlamaCppRuntimeState,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +33,28 @@ struct LlamaCppRuntimeOptions {
     n_ctx: u32,
     n_batch: u32,
     n_threads: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct LlamaCppExecutionConfig {
+    n_ctx: u32,
+    n_batch: u32,
+    n_threads: Option<u32>,
+    max_tokens: u32,
+    temperature: f32,
+    top_p: f32,
+    min_p: f32,
+    top_k: u32,
+    repeat_penalty: f32,
+}
+
+#[derive(Debug, Clone)]
+struct LlamaCppRuntimeState {
+    current_n_ctx: u32,
+    current_n_batch: u32,
+    current_n_threads: Option<u32>,
+    kv_offload: bool,
+    op_offload: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +107,16 @@ impl LlamaCppLoadPlan {
             param_count: None,
         }
     }
+
+    fn create_runtime_state(&self) -> LlamaCppRuntimeState {
+        LlamaCppRuntimeState {
+            current_n_ctx: self.runtime.n_ctx,
+            current_n_batch: self.runtime.n_batch,
+            current_n_threads: self.runtime.n_threads,
+            kv_offload: self.kv_offload,
+            op_offload: self.op_offload,
+        }
+    }
 }
 
 impl LlamaCppRuntimeOptions {
@@ -108,6 +141,65 @@ impl LlamaCppRuntimeOptions {
             n_batch,
             n_threads,
         })
+    }
+
+    fn supports(&self, params: &InferenceParams) -> bool {
+        self.n_ctx == params.n_ctx
+            && self.n_batch == params.n_batch
+            && self.n_threads == params.n_threads
+    }
+}
+
+impl LlamaCppExecutionConfig {
+    fn from_inference_params(params: &InferenceParams) -> Result<Self> {
+        if params.n_ctx == 0 {
+            return Err(LociError::ConfigError(
+                "llama.cpp execution requires n_ctx > 0".to_string(),
+            ));
+        }
+        if params.n_batch == 0 {
+            return Err(LociError::ConfigError(
+                "llama.cpp execution requires n_batch > 0".to_string(),
+            ));
+        }
+        if params.max_tokens == 0 {
+            return Err(LociError::ConfigError(
+                "llama.cpp execution requires max_tokens > 0".to_string(),
+            ));
+        }
+
+        Ok(Self {
+            n_ctx: params.n_ctx,
+            n_batch: params.n_batch,
+            n_threads: params.n_threads,
+            max_tokens: params.max_tokens,
+            temperature: params.temperature,
+            top_p: params.top_p,
+            min_p: params.min_p,
+            top_k: params.top_k,
+            repeat_penalty: params.repeat_penalty,
+        })
+    }
+}
+
+impl LlamaCppRuntimeState {
+    fn reconcile(&mut self, config: &LlamaCppExecutionConfig) {
+        self.current_n_ctx = config.n_ctx;
+        self.current_n_batch = config.n_batch;
+        self.current_n_threads = config.n_threads;
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "runtime[n_ctx={}, n_batch={}, n_threads={}, kv_offload={}, op_offload={}]",
+            self.current_n_ctx,
+            self.current_n_batch,
+            self.current_n_threads
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "auto".to_string()),
+            self.kv_offload,
+            self.op_offload
+        )
     }
 }
 
@@ -154,29 +246,33 @@ impl Model for LlamaCppModel {
             ));
         }
 
+        let execution = LlamaCppExecutionConfig::from_inference_params(params)?;
+        if !self.load_plan.runtime.supports(params) {
+            self.runtime_state.reconcile(&execution);
+        }
+
         Ok(format!(
-            "llama.cpp-stub:{prompt} [model={}, gpu_active={}, gpu_layers={}, n_ctx={}, n_batch={}, n_threads={}, mmap={}, mlock={}, kv_offload={}, op_offload={}, main_gpu={}, tensor_split={}, max_tokens={}]",
+            "llama.cpp-stub:{prompt} [model={}, gpu_active={}, gpu_layers={}, plan_n_ctx={}, plan_n_batch={}, mmap={}, mlock={}, main_gpu={}, tensor_split={}, {}, exec[max_tokens={}, temperature={}, top_p={}, min_p={}, top_k={}, repeat_penalty={}]]",
             self.load_plan.model_path.display(),
             self.load_plan.gpu_active,
             self.load_plan.n_gpu_layers,
             self.load_plan.runtime.n_ctx,
             self.load_plan.runtime.n_batch,
-            self.load_plan
-                .runtime
-                .n_threads
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "auto".to_string()),
             self.load_plan.use_mmap,
             self.load_plan.use_mlock,
-            self.load_plan.kv_offload,
-            self.load_plan.op_offload,
             self.load_plan.main_gpu,
             self.load_plan
                 .tensor_split
                 .as_ref()
                 .map(|values| values.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","))
                 .unwrap_or_else(|| "none".to_string()),
-            params.max_tokens
+            self.runtime_state.summary(),
+            execution.max_tokens,
+            execution.temperature,
+            execution.top_p,
+            execution.min_p,
+            execution.top_k,
+            execution.repeat_penalty
         ))
     }
 }
@@ -207,7 +303,11 @@ impl InferenceBackend for LlamaCppBackend {
         }
 
         let load_plan = LlamaCppLoadPlan::from_backend_params(model_path, backend_params)?;
-        Ok(Box::new(LlamaCppModel { load_plan }))
+        let runtime_state = load_plan.create_runtime_state();
+        Ok(Box::new(LlamaCppModel {
+            load_plan,
+            runtime_state,
+        }))
     }
 
     fn init(&mut self) -> Result<()> {
@@ -283,5 +383,58 @@ mod tests {
         .expect_err("should fail");
 
         assert!(matches!(err, LociError::ConfigError(_)));
+    }
+
+    #[test]
+    fn runtime_state_is_seeded_from_load_plan() {
+        let plan = LlamaCppLoadPlan::from_backend_params(
+            Path::new("demo.gguf"),
+            BackendParams {
+                options: vec![
+                    ("n_ctx".to_string(), "4096".to_string()),
+                    ("n_batch".to_string(), "256".to_string()),
+                    ("n_threads".to_string(), "8".to_string()),
+                ],
+                ..Default::default()
+            },
+        )
+        .expect("plan");
+
+        let runtime_state = plan.create_runtime_state();
+        assert_eq!(runtime_state.current_n_ctx, 4096);
+        assert_eq!(runtime_state.current_n_batch, 256);
+        assert_eq!(runtime_state.current_n_threads, Some(8));
+        assert!(runtime_state.kv_offload);
+    }
+
+    #[test]
+    fn execution_config_rejects_zero_max_tokens() {
+        let err = LlamaCppExecutionConfig::from_inference_params(&InferenceParams {
+            max_tokens: 0,
+            ..Default::default()
+        })
+        .expect_err("should fail");
+
+        assert!(matches!(err, LociError::ConfigError(_)));
+    }
+
+    #[test]
+    fn runtime_options_can_compare_execution_shape() {
+        let options = LlamaCppRuntimeOptions {
+            n_ctx: 4096,
+            n_batch: 512,
+            n_threads: Some(4),
+        };
+
+        assert!(options.supports(&InferenceParams {
+            n_ctx: 4096,
+            n_batch: 512,
+            n_threads: Some(4),
+            ..Default::default()
+        }));
+        assert!(!options.supports(&InferenceParams {
+            n_ctx: 8192,
+            ..Default::default()
+        }));
     }
 }
