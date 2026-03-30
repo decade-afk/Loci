@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+llama = []
+
 [dependencies]
 loci-plugin-api = { path = "../plugin-api" }
 anyhow.workspace = true

@@ -1,5 +1,5 @@
 use crate::error::{LociError, Result};
-use crate::backends::MockBackend;
+use crate::backends;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -137,7 +137,7 @@ impl BackendRegistry {
 
     pub fn with_builtin_backends() -> Self {
         let mut registry = Self::new();
-        registry.register("mock".to_string(), Box::new(MockBackend::new()));
+        backends::register_builtin_backends(&mut registry);
         registry
     }
 
@@ -181,5 +181,12 @@ mod tests {
     fn builtins_include_mock_backend() {
         let registry = BackendRegistry::with_builtin_backends();
         assert!(registry.contains("mock"));
+    }
+
+    #[cfg(feature = "llama")]
+    #[test]
+    fn builtins_include_llama_backend_when_feature_enabled() {
+        let registry = BackendRegistry::with_builtin_backends();
+        assert!(registry.contains("llama.cpp"));
     }
 }

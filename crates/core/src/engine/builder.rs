@@ -1,5 +1,5 @@
 use crate::backend::{BackendParams, BackendRegistry, GpuSplitMode, InferenceParams};
-use crate::backends::MockBackend;
+use crate::backends;
 use crate::core::{CoreRegistry, DefaultCoreRegistry};
 use crate::engine::runtime::InferenceEngine;
 use crate::error::Result;
@@ -39,7 +39,7 @@ impl InferenceEngineBuilder {
         Self {
             registry: None,
             backend_registry: None,
-            backend_name: Some("mock".to_string()),
+            backend_name: Some(backends::default_backend_name().to_string()),
             model_path: None,
             backend_params: BackendParams::default(),
             model_config: None,
@@ -170,9 +170,7 @@ impl InferenceEngineBuilder {
 
     pub fn build(self) -> Result<InferenceEngine> {
         let backend_registry = self.backend_registry.unwrap_or_else(|| {
-            let mut registry = BackendRegistry::new();
-            registry.register("mock".to_string(), Box::new(MockBackend::new()));
-            registry
+            BackendRegistry::with_builtin_backends()
         });
 
         let mut engine = InferenceEngine {
@@ -192,7 +190,11 @@ impl InferenceEngineBuilder {
         };
 
         if let Some(model_config) = self.model_config {
-            let backend_name = self.backend_name.as_deref().unwrap_or("mock").to_string();
+            let backend_name = self
+                .backend_name
+                .as_deref()
+                .unwrap_or(backends::default_backend_name())
+                .to_string();
             engine.load_model_config(&backend_name, &model_config)?;
         } else if let (Some(backend_name), Some(model_path)) = (self.backend_name, self.model_path)
         {
@@ -247,6 +249,7 @@ mod tests {
     #[test]
     fn builder_legacy_generate_uses_default_inference_shape() {
         let mut engine = InferenceEngineBuilder::new()
+            .backend("mock")
             .model_path("demo.gguf")
             .context_size(8192)
             .batch_size(1024)
@@ -272,5 +275,12 @@ mod tests {
             .expect("build");
 
         assert_eq!(engine.active_backend(), Some("mock"));
+    }
+
+    #[test]
+    fn builder_uses_builtin_registry_by_default() {
+        let engine = InferenceEngineBuilder::new().build().expect("build");
+        assert_eq!(engine.active_backend(), None);
+        assert_eq!(engine.plugin_count(), 0);
     }
 }
