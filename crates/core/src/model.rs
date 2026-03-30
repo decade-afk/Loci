@@ -1,4 +1,4 @@
-use crate::backend::GpuSplitMode;
+use crate::backend::{BackendParams, GpuSplitMode};
 use crate::error::{LociError, Result};
 use std::path::{Path, PathBuf};
 
@@ -178,6 +178,29 @@ impl ModelConfig {
         }
         Ok(())
     }
+
+    pub fn to_backend_params(&self) -> BackendParams {
+        let mut options = vec![
+            ("n_ctx".to_string(), self.n_ctx.to_string()),
+            ("n_batch".to_string(), self.n_batch.to_string()),
+        ];
+        if let Some(n_threads) = self.n_threads {
+            options.push(("n_threads".to_string(), n_threads.to_string()));
+        }
+
+        BackendParams {
+            n_gpu_layers: self.n_gpu_layers,
+            use_gpu: self.use_gpu,
+            use_mmap: self.use_mmap,
+            use_mlock: self.use_mlock,
+            kv_offload: self.kv_offload,
+            op_offload: self.op_offload,
+            split_mode: self.split_mode,
+            main_gpu: self.main_gpu,
+            tensor_split: self.tensor_split.clone(),
+            options,
+        }
+    }
 }
 
 pub struct ModelLoader;
@@ -205,5 +228,27 @@ mod tests {
             .validate()
             .expect_err("should fail");
         assert!(matches!(err, LociError::ConfigError(_)));
+    }
+
+    #[test]
+    fn model_config_converts_to_backend_params() {
+        let params = ModelConfig::new("demo.gguf")
+            .with_context_size(8192)
+            .with_batch_size(1024)
+            .with_threads(12)
+            .cpu_only()
+            .to_backend_params();
+
+        assert_eq!(params.n_gpu_layers, 0);
+        assert!(!params.use_gpu);
+        assert!(params.options.iter().any(|(k, v)| k == "n_ctx" && v == "8192"));
+        assert!(params
+            .options
+            .iter()
+            .any(|(k, v)| k == "n_batch" && v == "1024"));
+        assert!(params
+            .options
+            .iter()
+            .any(|(k, v)| k == "n_threads" && v == "12"));
     }
 }

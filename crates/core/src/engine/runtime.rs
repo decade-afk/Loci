@@ -54,21 +54,7 @@ impl InferenceEngine {
 
     pub fn load_model_config(&mut self, backend_name: &str, config: &ModelConfig) -> Result<()> {
         config.validate()?;
-        let backend_params = BackendParams {
-            n_gpu_layers: config.n_gpu_layers,
-            use_gpu: config.use_gpu,
-            use_mmap: config.use_mmap,
-            use_mlock: config.use_mlock,
-            kv_offload: config.kv_offload,
-            op_offload: config.op_offload,
-            split_mode: config.split_mode,
-            main_gpu: config.main_gpu,
-            tensor_split: config.tensor_split.clone(),
-            options: vec![
-                ("n_ctx".to_string(), config.n_ctx.to_string()),
-                ("n_batch".to_string(), config.n_batch.to_string()),
-            ],
-        };
+        let backend_params = config.to_backend_params();
 
         let result = self.load_model(backend_name, &config.model_path, backend_params.clone());
         match (result, config.load_strategy) {

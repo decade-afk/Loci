@@ -198,26 +198,27 @@ impl InferenceEngineBuilder {
             engine.load_model_config(&backend_name, &model_config)?;
         } else if let (Some(backend_name), Some(model_path)) = (self.backend_name, self.model_path)
         {
-            let backend_params = BackendParams {
-                n_gpu_layers: self.n_gpu_layers,
-                use_gpu: self.use_gpu,
-                use_mmap: self.use_mmap,
-                use_mlock: self.use_mlock,
-                kv_offload: self.kv_offload,
-                op_offload: self.op_offload,
-                split_mode: self.split_mode,
-                main_gpu: self.main_gpu,
-                tensor_split: self.tensor_split.clone(),
-                options: if self.backend_params.options.is_empty() {
-                    vec![
-                        ("n_ctx".to_string(), self.n_ctx.to_string()),
-                        ("n_batch".to_string(), self.n_batch.to_string()),
-                    ]
-                } else {
-                    self.backend_params.options
-                },
+            let backend_params = if self.backend_params.options.is_empty() {
+                ModelConfig {
+                    model_path: model_path.clone(),
+                    n_ctx: self.n_ctx,
+                    n_threads: self.n_threads,
+                    n_batch: self.n_batch,
+                    use_gpu: self.use_gpu,
+                    n_gpu_layers: self.n_gpu_layers,
+                    use_mmap: self.use_mmap,
+                    use_mlock: self.use_mlock,
+                    kv_offload: self.kv_offload,
+                    op_offload: self.op_offload,
+                    split_mode: self.split_mode,
+                    main_gpu: self.main_gpu,
+                    tensor_split: self.tensor_split.clone(),
+                    load_strategy: self.load_strategy,
+                }
+                .to_backend_params()
+            } else {
+                self.backend_params
             };
-            let _ = self.load_strategy;
             engine.load_model(&backend_name, model_path, backend_params)?;
         }
 
