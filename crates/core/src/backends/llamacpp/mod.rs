@@ -268,5 +268,12 @@ mod tests {
         assert_eq!(context.driver_protocol.kind, "native");
         assert_eq!(context.driver_protocol.backend_init_symbol, "backend_init");
         assert!(context.driver_protocol.ffi_module.ends_with("src\\ffi.rs"));
+        assert_eq!(context.driver_protocol.lifecycle.model_type, "LlamaModel");
+        assert_eq!(context.driver_protocol.lifecycle.context_type, "LlamaContext");
+        assert!(context.driver_protocol.lifecycle.supports_tokenize);
+        assert!(context.driver_protocol.lifecycle.supports_token_to_str);
+        assert!(context.driver_protocol.lifecycle.supports_decode);
+        assert!(context.driver_protocol.lifecycle.supports_logits);
+        assert!(context.driver_protocol.lifecycle.supports_kv_cache_clear);
     }
 }

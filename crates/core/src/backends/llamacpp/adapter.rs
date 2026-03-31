@@ -1,5 +1,5 @@
 use crate::error::{LociError, Result};
-use super::driver::{discover_driver, LlamaCppDriver, LlamaCppDriverProtocol};
+use super::driver::{discover_driver, LlamaCppDriver, LlamaCppDriverProtocol, LlamaCppLifecycleContract};
 use std::path::PathBuf;
 
 pub trait LlamaCppAdapter: Send + Sync {
@@ -46,6 +46,18 @@ impl LlamaCppAdapter for StubLlamaCppAdapter {
                 context_default_params_symbol: String::new(),
                 ffi_module: String::new(),
                 ffi_shim_c: String::new(),
+                lifecycle: LlamaCppLifecycleContract {
+                    model_type: String::new(),
+                    context_type: String::new(),
+                    supports_backend_init: false,
+                    supports_model_defaults: false,
+                    supports_context_defaults: false,
+                    supports_tokenize: false,
+                    supports_token_to_str: false,
+                    supports_decode: false,
+                    supports_logits: false,
+                    supports_kv_cache_clear: false,
+                },
             },
         };
         driver.validate(&context)?;
