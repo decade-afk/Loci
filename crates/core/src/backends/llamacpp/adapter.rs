@@ -1,5 +1,5 @@
 use crate::error::{LociError, Result};
-use super::driver::{LlamaCppDriver, LlamaCppDriverProtocol, StubLlamaCppDriver};
+use super::driver::{discover_driver, LlamaCppDriver, LlamaCppDriverProtocol};
 use std::path::PathBuf;
 
 pub trait LlamaCppAdapter: Send + Sync {
@@ -22,8 +22,8 @@ impl StubLlamaCppAdapter {
         LlamaCppBuildIntegration::discover()
     }
 
-    pub fn driver(&self) -> Box<dyn LlamaCppDriver> {
-        Box::new(StubLlamaCppDriver::new())
+    pub fn driver(&self, integration: &LlamaCppBuildIntegration) -> Box<dyn LlamaCppDriver> {
+        discover_driver(integration)
     }
 }
 
@@ -35,7 +35,7 @@ impl LlamaCppAdapter for StubLlamaCppAdapter {
     fn build_context(&self) -> Result<LlamaCppAdapterContext> {
         let source_layout = self.source_layout()?;
         let build_integration = self.build_integration()?;
-        let driver = self.driver();
+        let driver = self.driver(&build_integration);
         let mut context = LlamaCppAdapterContext {
             source_layout,
             build_integration,

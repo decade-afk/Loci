@@ -265,7 +265,7 @@ mod tests {
     fn adapter_context_contains_driver_protocol() {
         let adapter = StubLlamaCppAdapter::new();
         let context = adapter.build_context().expect("context");
-        assert_eq!(context.driver_protocol.kind, "stub");
+        assert_eq!(context.driver_protocol.kind, "native");
         assert_eq!(context.driver_protocol.backend_init_symbol, "backend_init");
         assert!(context.driver_protocol.ffi_module.ends_with("src\\ffi.rs"));
     }
