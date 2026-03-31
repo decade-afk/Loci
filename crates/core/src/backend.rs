@@ -1,5 +1,5 @@
-use crate::error::{LociError, Result};
 use crate::backends;
+use crate::error::{LociError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -115,6 +115,13 @@ pub trait Model: Send + Sync {
     fn metadata(&self) -> ModelMetadata;
     fn infer_text(&mut self, prompt: &str, params: &InferenceParams) -> Result<String>;
 
+    fn attach_sampling_runtime(
+        &mut self,
+        _runtime: crate::plugin::PluginSamplingRuntime,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     fn supports_streaming(&self) -> bool {
         false
     }
@@ -150,7 +157,10 @@ impl BackendRegistry {
     }
 
     pub fn list(&self) -> Vec<BackendCapabilities> {
-        self.backends.values().map(|backend| backend.capabilities()).collect()
+        self.backends
+            .values()
+            .map(|backend| backend.capabilities())
+            .collect()
     }
 
     pub fn load_model(

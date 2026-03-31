@@ -2,6 +2,7 @@ use crate::backend::{
     BackendCapabilities, BackendParams, InferenceBackend, InferenceParams, Model, ModelMetadata,
 };
 use crate::error::{LociError, Result};
+use crate::plugin::PluginSamplingRuntime;
 use std::path::{Path, PathBuf};
 
 pub struct MockBackend;
@@ -39,12 +40,14 @@ impl InferenceBackend for MockBackend {
     ) -> Result<Box<dyn Model>> {
         Ok(Box::new(MockModel {
             model_path: model_path.to_path_buf(),
+            sampling_runtime: PluginSamplingRuntime::default(),
         }))
     }
 }
 
 pub struct MockModel {
     model_path: PathBuf,
+    sampling_runtime: PluginSamplingRuntime,
 }
 
 impl Model for MockModel {
@@ -67,10 +70,16 @@ impl Model for MockModel {
         }
 
         Ok(format!(
-            "mock:{prompt} [model={}, max_tokens={}, temp={}]",
+            "mock:{prompt} [model={}, max_tokens={}, temp={}, hooks={}]",
             self.model_path.display(),
             params.max_tokens,
-            params.temperature
+            params.temperature,
+            self.sampling_runtime.hook_count()
         ))
+    }
+
+    fn attach_sampling_runtime(&mut self, runtime: PluginSamplingRuntime) -> Result<()> {
+        self.sampling_runtime = runtime;
+        Ok(())
     }
 }

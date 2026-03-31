@@ -75,8 +75,12 @@ impl LlamaCppModel {
                         "failed to read logits from llama.cpp context".to_string(),
                     ));
                 }
-                let logits_view = unsafe { LogitsView::from_raw(logits, model.n_vocab() as usize) };
-                sample_token(&logits_view, &sampling_params, &recent_tokens)
+                let mut logits_view =
+                    unsafe { LogitsView::from_raw(logits, model.n_vocab() as usize) };
+                self.sampling_runtime
+                    .apply_transform_logits(&mut logits_view, &recent_tokens)?;
+                let sampled = sample_token(&logits_view, &sampling_params, &recent_tokens);
+                self.sampling_runtime.apply_post_sample(sampled)?
             };
 
             let piece = {

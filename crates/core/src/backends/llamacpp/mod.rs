@@ -10,6 +10,7 @@ use crate::backend::{
     BackendCapabilities, BackendParams, InferenceBackend, InferenceParams, Model, ModelMetadata,
 };
 use crate::error::{LociError, Result};
+use crate::plugin::PluginSamplingRuntime;
 use adapter::{LlamaCppAdapter, LlamaCppAdapterContext, StubLlamaCppAdapter};
 use driver::{
     discover_driver, LlamaCppBackendSession, LlamaCppContextCreateRequest, LlamaCppCreatedContext,
@@ -49,6 +50,7 @@ pub struct LlamaCppModel {
     load_plan: LlamaCppLoadPlan,
     metadata: ModelMetadata,
     runtime_state: LlamaCppRuntimeState,
+    sampling_runtime: PluginSamplingRuntime,
 }
 
 impl Model for LlamaCppModel {
@@ -63,6 +65,11 @@ impl Model for LlamaCppModel {
             ));
         }
         self.infer_text_native(prompt, params)
+    }
+
+    fn attach_sampling_runtime(&mut self, runtime: PluginSamplingRuntime) -> Result<()> {
+        self.sampling_runtime = runtime;
+        Ok(())
     }
 }
 
@@ -115,6 +122,7 @@ impl InferenceBackend for LlamaCppBackend {
             load_plan,
             metadata,
             runtime_state,
+            sampling_runtime: PluginSamplingRuntime::default(),
         }))
     }
 

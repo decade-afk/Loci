@@ -1,10 +1,70 @@
+use crate::error::Result as CoreResult;
+use crate::sampler::LogitsView;
 use anyhow::{bail, Context, Result};
 use loci_plugin_api::{CoreComponent, PlatformTrack, PluginManifest};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const MANIFEST_FILE_NAME: &str = "manifest.toml";
+
+pub trait SamplingHook: Send + Sync {
+    fn transform_logits(
+        &self,
+        _logits: &mut LogitsView<'_>,
+        _context_tokens: &[i32],
+    ) -> CoreResult<()> {
+        Ok(())
+    }
+
+    fn post_sample(&self, token_id: i32) -> CoreResult<i32> {
+        Ok(token_id)
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct PluginSamplingRuntime {
+    hooks: Vec<RegisteredSamplingHook>,
+}
+
+#[derive(Clone)]
+struct RegisteredSamplingHook {
+    plugin_name: String,
+    hook: Arc<dyn SamplingHook>,
+}
+
+impl PluginSamplingRuntime {
+    pub fn hook_count(&self) -> usize {
+        self.hooks.len()
+    }
+
+    pub fn apply_transform_logits(
+        &self,
+        logits: &mut LogitsView<'_>,
+        context_tokens: &[i32],
+    ) -> CoreResult<()> {
+        for registered in &self.hooks {
+            registered.hook.transform_logits(logits, context_tokens)?;
+        }
+        Ok(())
+    }
+
+    pub fn apply_post_sample(&self, token_id: i32) -> CoreResult<i32> {
+        let mut token = token_id;
+        for registered in &self.hooks {
+            token = registered.hook.post_sample(token)?;
+        }
+        Ok(token)
+    }
+
+    pub fn plugin_names(&self) -> Vec<&str> {
+        self.hooks
+            .iter()
+            .map(|registered| registered.plugin_name.as_str())
+            .collect()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RegisteredPlugin {
@@ -82,6 +142,7 @@ pub fn discover_plugin_manifest_files(plugin_dir: impl AsRef<Path>) -> Result<Ve
 pub struct InMemoryPluginManager {
     plugins: Vec<RegisteredPlugin>,
     plugin_index: BTreeMap<String, usize>,
+    sampling_hooks: BTreeMap<String, Arc<dyn SamplingHook>>,
 }
 
 impl crate::core::PluginManager for InMemoryPluginManager {
@@ -94,6 +155,19 @@ impl crate::core::PluginManager for InMemoryPluginManager {
         self.plugin_index
             .insert(plugin.manifest.name.clone(), index);
         self.plugins.push(plugin);
+        Ok(())
+    }
+
+    fn register_sampling_hook(
+        &mut self,
+        plugin_name: &str,
+        hook: Arc<dyn SamplingHook>,
+    ) -> Result<()> {
+        if !self.plugin_index.contains_key(plugin_name) {
+            bail!("plugin not registered: {plugin_name}");
+        }
+
+        self.sampling_hooks.insert(plugin_name.to_string(), hook);
         Ok(())
     }
 
@@ -134,14 +208,33 @@ impl crate::core::PluginManager for InMemoryPluginManager {
             .filter(|plugin| plugin.declares_core_rewriter(component))
             .collect()
     }
+
+    fn sampling_runtime(&self) -> PluginSamplingRuntime {
+        let hooks = self
+            .plugins
+            .iter()
+            .filter_map(|plugin| {
+                self.sampling_hooks
+                    .get(&plugin.manifest.name)
+                    .map(|hook| RegisteredSamplingHook {
+                        plugin_name: plugin.manifest.name.clone(),
+                        hook: Arc::clone(hook),
+                    })
+            })
+            .collect();
+
+        PluginSamplingRuntime { hooks }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::PluginManager;
+    use crate::sampler::LogitsView;
     use loci_plugin_api::{ContributionPoints, CoreRewriters};
     use std::fs;
+    use std::sync::Arc;
 
     fn unique_temp_dir(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
@@ -231,5 +324,56 @@ api_version = "1.0"
         assert!(!plugin.manifest.name.is_empty());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    struct BiasHook;
+
+    impl SamplingHook for BiasHook {
+        fn transform_logits(
+            &self,
+            logits: &mut LogitsView<'_>,
+            _context_tokens: &[i32],
+        ) -> CoreResult<()> {
+            logits.set_usize(0, -10.0)?;
+            logits.set_usize(2, 99.0)?;
+            Ok(())
+        }
+
+        fn post_sample(&self, _token_id: i32) -> CoreResult<i32> {
+            Ok(7)
+        }
+    }
+
+    #[test]
+    fn manager_builds_sampling_runtime_from_registered_hooks() {
+        let mut manager = InMemoryPluginManager::default();
+        manager
+            .register(RegisteredPlugin::new(plugin_manifest("sampler-hook")))
+            .expect("register plugin");
+        manager
+            .register_sampling_hook("sampler-hook", Arc::new(BiasHook))
+            .expect("register hook");
+
+        let runtime = manager.sampling_runtime();
+        assert_eq!(runtime.hook_count(), 1);
+        assert_eq!(runtime.plugin_names(), vec!["sampler-hook"]);
+
+        let mut logits = vec![1.0, 2.0, 3.0];
+        runtime
+            .apply_transform_logits(&mut LogitsView::new(&mut logits), &[])
+            .expect("transform");
+        assert_eq!(logits[0], -10.0);
+        assert_eq!(logits[2], 99.0);
+        assert_eq!(runtime.apply_post_sample(2).expect("post sample"), 7);
+    }
+
+    #[test]
+    fn manager_rejects_sampling_hook_for_unknown_plugin() {
+        let mut manager = InMemoryPluginManager::default();
+        let err = manager
+            .register_sampling_hook("missing", Arc::new(BiasHook))
+            .expect_err("should reject");
+
+        assert!(err.to_string().contains("plugin not registered"));
     }
 }

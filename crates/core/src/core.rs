@@ -2,6 +2,7 @@ use crate::plugin::RegisteredPlugin;
 use anyhow::{bail, Result as AnyhowResult};
 use loci_plugin_api::{CoreComponent, PlatformTrack};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 pub trait ModelRepository: Send + Sync {
     fn has_model(&self, model_id: &str) -> bool;
@@ -25,11 +26,17 @@ pub trait UiHost: Send + Sync {
 
 pub trait PluginManager: Send + Sync {
     fn register(&mut self, plugin: RegisteredPlugin) -> AnyhowResult<()>;
+    fn register_sampling_hook(
+        &mut self,
+        plugin_name: &str,
+        hook: Arc<dyn crate::plugin::SamplingHook>,
+    ) -> AnyhowResult<()>;
     fn list(&self) -> &[RegisteredPlugin];
     fn get(&self, plugin_name: &str) -> Option<&RegisteredPlugin>;
     fn plugins_for_track(&self, track: PlatformTrack) -> Vec<&RegisteredPlugin>;
     fn plugins_for_model_provider(&self, provider: &str) -> Vec<&RegisteredPlugin>;
     fn plugins_for_core_component(&self, component: CoreComponent) -> Vec<&RegisteredPlugin>;
+    fn sampling_runtime(&self) -> crate::plugin::PluginSamplingRuntime;
 }
 
 pub trait CoreRegistry: Send + Sync {

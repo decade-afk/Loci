@@ -3,9 +3,12 @@ use crate::core::CoreRegistry;
 use crate::engine::types::{GenerationParams, ModelInfo};
 use crate::error::{LociError, Result};
 use crate::model::{ModelConfig, ModelLoadStrategy};
-use crate::plugin::{discover_plugin_manifest_files, load_plugin_manifest_file, RegisteredPlugin};
+use crate::plugin::{
+    discover_plugin_manifest_files, load_plugin_manifest_file, RegisteredPlugin, SamplingHook,
+};
 use loci_plugin_api::{CoreComponent, PlatformTrack};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub struct InferenceEngine {
     pub(crate) registry: Box<dyn CoreRegistry>,
@@ -25,7 +28,20 @@ impl InferenceEngine {
         self.registry
             .plugin_manager_mut()
             .register(plugin)
-            .map_err(LociError::from)
+            .map_err(LociError::from)?;
+        self.refresh_model_sampling_runtime()
+    }
+
+    pub fn register_sampling_hook(
+        &mut self,
+        plugin_name: &str,
+        hook: Arc<dyn SamplingHook>,
+    ) -> Result<()> {
+        self.registry
+            .plugin_manager_mut()
+            .register_sampling_hook(plugin_name, hook)
+            .map_err(LociError::from)?;
+        self.refresh_model_sampling_runtime()
     }
 
     pub fn run_command(&self, command: &str) -> Result<String> {
@@ -35,6 +51,13 @@ impl InferenceEngine {
 
     pub fn plugin_count(&self) -> usize {
         self.registry.plugin_manager().list().len()
+    }
+
+    pub fn sampling_hook_count(&self) -> usize {
+        self.registry
+            .plugin_manager()
+            .sampling_runtime()
+            .hook_count()
     }
 
     pub fn plugin_names(&self) -> Vec<String> {
@@ -115,6 +138,7 @@ impl InferenceEngine {
         self.active_backend = Some(backend_name.to_string());
         self.model = Some(model);
         self.model_path = Some(model_path);
+        self.refresh_model_sampling_runtime()?;
         Ok(())
     }
 
@@ -164,6 +188,14 @@ impl InferenceEngine {
         self.generate(prompt, &inference_params)
     }
 
+    fn refresh_model_sampling_runtime(&mut self) -> Result<()> {
+        if let Some(model) = self.model.as_mut() {
+            let runtime = self.registry.plugin_manager().sampling_runtime();
+            model.attach_sampling_runtime(runtime)?;
+        }
+        Ok(())
+    }
+
     fn generation_params_to_inference(&self, params: GenerationParams) -> InferenceParams {
         InferenceParams {
             n_ctx: self.default_inference_params.n_ctx,
@@ -199,8 +231,10 @@ impl InferenceEngine {
 mod tests {
     use super::*;
     use crate::core::DefaultCoreRegistry;
+    use crate::sampler::LogitsView;
     use loci_plugin_api::{ContributionPoints, CoreRewriters, PluginManifest};
     use std::fs;
+    use std::sync::Arc;
 
     fn unique_temp_dir(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
@@ -302,5 +336,53 @@ workflow = true
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    struct ForceTokenHook;
+
+    impl SamplingHook for ForceTokenHook {
+        fn transform_logits(
+            &self,
+            logits: &mut LogitsView<'_>,
+            _context_tokens: &[i32],
+        ) -> crate::Result<()> {
+            logits.set_usize(0, 123.0)?;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn engine_propagates_sampling_runtime_into_loaded_model() {
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+        };
+
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "hooked-plugin".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                target_tracks: vec![PlatformTrack::AiInfra],
+                contributes: ContributionPoints::default(),
+                core_rewriters: CoreRewriters::default(),
+            }))
+            .expect("register");
+        engine
+            .load_model("mock", "demo.gguf", BackendParams::default())
+            .expect("load model");
+        engine
+            .register_sampling_hook("hooked-plugin", Arc::new(ForceTokenHook))
+            .expect("register hook");
+
+        let output = engine
+            .generate("hello", &InferenceParams::default())
+            .expect("generate");
+        assert!(output.contains("hooks=1"));
+        assert_eq!(engine.sampling_hook_count(), 1);
     }
 }
