@@ -1,7 +1,10 @@
 use crate::error::Result as CoreResult;
 use crate::sampler::LogitsView;
 use anyhow::{bail, Context, Result};
-use loci_plugin_api::{CoreComponent, PlatformTrack, PluginManifest};
+use loci_plugin_api::{
+    ContributionPoints, CoreComponent, CoreRewriters, PlatformTrack, PluginBootstrap,
+    PluginCompatibility, PluginManifest, PluginRuntime, PluginSourceFormat,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -10,6 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const MANIFEST_FILE_NAME: &str = "manifest.toml";
+const LEGACY_PLUGIN_ABI_VERSION: u32 = 1;
+const LEGACY_DYNAMIC_EXTENSIONS: &[&str] = &["dll", "so", "dylib"];
+const LEGACY_WASM_EXTENSIONS: &[&str] = &["wasm"];
 
 pub trait SamplingHook: Send + Sync {
     fn transform_logits(
@@ -56,6 +62,55 @@ impl Default for SamplingHookProfile {
 
 fn default_forced_logit() -> f32 {
     120.0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LegacyPluginContractKind {
+    TextPlugin,
+    ToolPlugin,
+    ExecutionPolicy,
+    ManagementAuthPolicy,
+    ModelPullPolicy,
+    ModelPullVerifier,
+    ServeDispatchPolicy,
+    ImageKernel,
+    Backend,
+}
+
+impl LegacyPluginContractKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            LegacyPluginContractKind::TextPlugin => "text_plugin",
+            LegacyPluginContractKind::ToolPlugin => "tool_plugin",
+            LegacyPluginContractKind::ExecutionPolicy => "execution_policy",
+            LegacyPluginContractKind::ManagementAuthPolicy => "management_auth_policy",
+            LegacyPluginContractKind::ModelPullPolicy => "model_pull_policy",
+            LegacyPluginContractKind::ModelPullVerifier => "model_pull_verifier",
+            LegacyPluginContractKind::ServeDispatchPolicy => "serve_dispatch_policy",
+            LegacyPluginContractKind::ImageKernel => "image_kernel",
+            LegacyPluginContractKind::Backend => "backend",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LegacyPluginContractManifest {
+    name: String,
+    version: String,
+    kind: LegacyPluginContractKind,
+    #[serde(default = "default_legacy_plugin_abi_version")]
+    abi_version: u32,
+    #[serde(default)]
+    min_host_version: Option<String>,
+    #[serde(default)]
+    max_host_version: Option<String>,
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
+
+fn default_legacy_plugin_abi_version() -> u32 {
+    LEGACY_PLUGIN_ABI_VERSION
 }
 
 #[derive(Clone, Default)]
@@ -155,6 +210,14 @@ impl RegisteredPlugin {
         self.runtime.sampling_hook.is_some()
     }
 
+    pub fn is_legacy_compat_bundle(&self) -> bool {
+        self.manifest.is_legacy_compat_manifest()
+    }
+
+    pub fn legacy_runtime_path(&self) -> Option<&str> {
+        self.manifest.compatibility.legacy_runtime_path.as_deref()
+    }
+
     fn with_manifest_location(mut self, manifest_path: PathBuf) -> Self {
         self.root_dir = manifest_path.parent().map(Path::to_path_buf);
         self.manifest_path = Some(manifest_path);
@@ -214,6 +277,114 @@ fn load_sampling_hook_profile(path: &Path) -> Result<SamplingHookProfile> {
         .with_context(|| format!("failed to read sampling hook profile: {}", path.display()))?;
     toml::from_str(&content)
         .with_context(|| format!("failed to parse sampling hook profile: {}", path.display()))
+}
+
+fn build_legacy_contract_candidates(path: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
+        candidates.push(parent.join(format!("{stem}.loci-plugin.json")));
+        candidates.push(parent.join(format!("{stem}.loci-plugin.toml")));
+        candidates.push(parent.join(format!("{stem}.plugin.json")));
+        candidates.push(parent.join(format!("{stem}.plugin.toml")));
+    }
+    candidates
+}
+
+fn load_legacy_contract_manifest(
+    runtime_artifact_path: &Path,
+) -> Result<Option<LegacyPluginContractManifest>> {
+    for candidate in build_legacy_contract_candidates(runtime_artifact_path) {
+        if !candidate.exists() {
+            continue;
+        }
+
+        let content = fs::read_to_string(&candidate).with_context(|| {
+            format!(
+                "failed to read legacy plugin contract: {}",
+                candidate.display()
+            )
+        })?;
+        let manifest = match candidate
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "json" => serde_json::from_str::<LegacyPluginContractManifest>(&content).with_context(
+                || {
+                    format!(
+                        "failed to parse legacy plugin contract: {}",
+                        candidate.display()
+                    )
+                },
+            )?,
+            "toml" => {
+                toml::from_str::<LegacyPluginContractManifest>(&content).with_context(|| {
+                    format!(
+                        "failed to parse legacy plugin contract: {}",
+                        candidate.display()
+                    )
+                })?
+            }
+            other => {
+                bail!(
+                    "unsupported legacy plugin contract format `{other}`: {}",
+                    candidate.display()
+                )
+            }
+        };
+
+        return Ok(Some(manifest));
+    }
+
+    Ok(None)
+}
+
+fn is_legacy_runtime_artifact_extension(path: &Path) -> bool {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    LEGACY_DYNAMIC_EXTENSIONS.contains(&extension.as_str())
+        || LEGACY_WASM_EXTENSIONS.contains(&extension.as_str())
+}
+
+fn is_legacy_runtime_artifact(path: &Path) -> bool {
+    path.is_file()
+        && is_legacy_runtime_artifact_extension(path)
+        && build_legacy_contract_candidates(path)
+            .iter()
+            .any(|candidate| candidate.exists())
+}
+
+fn convert_legacy_contract_manifest(
+    runtime_artifact_path: &Path,
+    contract: LegacyPluginContractManifest,
+) -> PluginManifest {
+    PluginManifest {
+        name: contract.name,
+        version: contract.version,
+        api_version: "1.0".to_string(),
+        min_host_version: contract.min_host_version,
+        max_host_version: contract.max_host_version,
+        target_tracks: Vec::new(),
+        contributes: ContributionPoints {
+            inference_hooks: contract.capabilities,
+            ..Default::default()
+        },
+        core_rewriters: CoreRewriters::default(),
+        runtime: PluginRuntime::default(),
+        bootstrap: PluginBootstrap::default(),
+        compatibility: PluginCompatibility {
+            source_format: PluginSourceFormat::LegacyContract,
+            legacy_kind: Some(contract.kind.as_str().to_string()),
+            legacy_abi_version: Some(contract.abi_version),
+            legacy_runtime_path: Some(runtime_artifact_path.to_string_lossy().to_string()),
+        },
+    }
 }
 
 fn resolve_runtime_artifact_path(manifest_path: &Path, relative_path: &str) -> PathBuf {
@@ -293,6 +464,36 @@ fn load_registered_plugin_runtime(
     Ok(RegisteredPluginRuntime { sampling_hook })
 }
 
+fn load_legacy_plugin_bundle(runtime_artifact_path: &Path) -> Result<RegisteredPlugin> {
+    let contract = load_legacy_contract_manifest(runtime_artifact_path)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "legacy plugin contract not found for: {}",
+            runtime_artifact_path.display()
+        )
+    })?;
+    let manifest = convert_legacy_contract_manifest(runtime_artifact_path, contract);
+    Ok(RegisteredPlugin::new(manifest).with_manifest_location(runtime_artifact_path.to_path_buf()))
+}
+
+pub fn load_plugin_bundle_file(path: impl AsRef<Path>) -> Result<RegisteredPlugin> {
+    let path = path.as_ref();
+    let is_native_manifest = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case(MANIFEST_FILE_NAME))
+        .unwrap_or(false);
+
+    if is_native_manifest {
+        return load_plugin_manifest_file(path);
+    }
+
+    if is_legacy_runtime_artifact(path) {
+        return load_legacy_plugin_bundle(path);
+    }
+
+    bail!("unsupported plugin bundle entry: {}", path.display());
+}
+
 pub fn load_plugin_manifest_file(path: impl AsRef<Path>) -> Result<RegisteredPlugin> {
     let path = path.as_ref();
     let content = fs::read_to_string(path)
@@ -303,6 +504,68 @@ pub fn load_plugin_manifest_file(path: impl AsRef<Path>) -> Result<RegisteredPlu
     Ok(RegisteredPlugin::new(manifest)
         .with_manifest_location(path.to_path_buf())
         .with_runtime(runtime))
+}
+
+pub fn discover_plugin_bundle_files(plugin_dir: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
+    let plugin_dir = plugin_dir.as_ref();
+    if !plugin_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    if plugin_dir.is_file() {
+        if plugin_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.eq_ignore_ascii_case(MANIFEST_FILE_NAME))
+            .unwrap_or(false)
+            || is_legacy_runtime_artifact(plugin_dir)
+        {
+            return Ok(vec![plugin_dir.to_path_buf()]);
+        }
+        return Ok(Vec::new());
+    }
+
+    let mut bundles = Vec::new();
+    let root_manifest = plugin_dir.join(MANIFEST_FILE_NAME);
+    if root_manifest.exists() {
+        bundles.push(root_manifest);
+    }
+
+    for entry in fs::read_dir(plugin_dir)
+        .with_context(|| format!("failed to scan plugin dir: {}", plugin_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() {
+            if is_legacy_runtime_artifact(&path) {
+                bundles.push(path);
+            }
+            continue;
+        }
+
+        if !path.is_dir() {
+            continue;
+        }
+
+        let manifest = path.join(MANIFEST_FILE_NAME);
+        if manifest.exists() {
+            bundles.push(manifest);
+        }
+
+        for child in fs::read_dir(&path)
+            .with_context(|| format!("failed to scan plugin bundle dir: {}", path.display()))?
+        {
+            let child = child?;
+            let child_path = child.path();
+            if is_legacy_runtime_artifact(&child_path) {
+                bundles.push(child_path);
+            }
+        }
+    }
+
+    bundles.sort();
+    bundles.dedup();
+    Ok(bundles)
 }
 
 pub fn discover_plugin_manifest_files(plugin_dir: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
@@ -462,7 +725,9 @@ mod tests {
     use super::*;
     use crate::core::PluginManager;
     use crate::sampler::LogitsView;
-    use loci_plugin_api::{ContributionPoints, CoreRewriters, PluginBootstrap, PluginRuntime};
+    use loci_plugin_api::{
+        ContributionPoints, CoreRewriters, PluginBootstrap, PluginCompatibility, PluginRuntime,
+    };
     use std::fs;
     use std::sync::Arc;
 
@@ -481,11 +746,14 @@ mod tests {
             name: name.to_string(),
             version: "1.0.0".to_string(),
             api_version: "1.0".to_string(),
+            min_host_version: None,
+            max_host_version: None,
             target_tracks: vec![PlatformTrack::AiInfra],
             contributes: ContributionPoints::default(),
             core_rewriters: CoreRewriters::default(),
             runtime: PluginRuntime::default(),
             bootstrap: PluginBootstrap::default(),
+            compatibility: PluginCompatibility::default(),
         }
     }
 
@@ -554,6 +822,47 @@ api_version = "1.0"
 
         let plugin = load_plugin_manifest_file(&manifests[0]).expect("load");
         assert!(!plugin.manifest.name.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_and_load_legacy_plugin_bundle_from_directory() {
+        let dir = unique_temp_dir("legacy-discover");
+        fs::create_dir_all(dir.join("legacy-plugin")).expect("mkdir");
+        fs::write(dir.join("legacy-plugin").join("rot13.dll"), b"binary").expect("write runtime");
+        fs::write(
+            dir.join("legacy-plugin").join("rot13.loci-plugin.json"),
+            r#"{
+  "name": "rot13_dynamic",
+  "version": "1.0.0",
+  "kind": "text_plugin",
+  "abi_version": 1,
+  "min_host_version": "0.1.0",
+  "capabilities": ["pre_generate", "post_generate"]
+}"#,
+        )
+        .expect("write contract");
+
+        let bundles = discover_plugin_bundle_files(&dir).expect("discover bundles");
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(
+            bundles[0].file_name().and_then(|value| value.to_str()),
+            Some("rot13.dll")
+        );
+
+        let plugin = load_plugin_bundle_file(&bundles[0]).expect("load legacy bundle");
+        assert!(plugin.is_legacy_compat_bundle());
+        assert_eq!(plugin.manifest.name, "rot13_dynamic");
+        assert_eq!(
+            plugin.legacy_runtime_path(),
+            Some(&*bundles[0].to_string_lossy())
+        );
+        assert_eq!(
+            plugin.manifest.compatibility.legacy_kind.as_deref(),
+            Some("text_plugin")
+        );
+        assert_eq!(plugin.manifest.min_host_version.as_deref(), Some("0.1.0"));
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -4,7 +4,8 @@ use crate::engine::types::{GenerationParams, ModelInfo};
 use crate::error::{LociError, Result};
 use crate::model::{ModelConfig, ModelLoadStrategy};
 use crate::plugin::{
-    discover_plugin_manifest_files, load_plugin_manifest_file, RegisteredPlugin, SamplingHook,
+    discover_plugin_bundle_files, load_plugin_bundle_file, load_plugin_manifest_file,
+    RegisteredPlugin, SamplingHook,
 };
 use loci_plugin_api::{CoreComponent, PlatformTrack};
 use std::path::{Path, PathBuf};
@@ -143,11 +144,16 @@ impl InferenceEngine {
         self.register_plugin(plugin)
     }
 
+    pub fn load_plugin_bundle_file<P: AsRef<Path>>(&mut self, bundle_path: P) -> Result<()> {
+        let plugin = load_plugin_bundle_file(bundle_path).map_err(LociError::from)?;
+        self.register_plugin(plugin)
+    }
+
     pub fn load_plugins_from_dir<P: AsRef<Path>>(&mut self, plugin_dir: P) -> Result<usize> {
-        let manifests = discover_plugin_manifest_files(plugin_dir).map_err(LociError::from)?;
+        let manifests = discover_plugin_bundle_files(plugin_dir).map_err(LociError::from)?;
         let mut loaded = 0usize;
         for manifest in manifests {
-            self.load_plugin_manifest_file(&manifest)?;
+            self.load_plugin_bundle_file(&manifest)?;
             loaded += 1;
         }
         Ok(loaded)
@@ -266,7 +272,8 @@ mod tests {
     use crate::core::DefaultCoreRegistry;
     use crate::sampler::LogitsView;
     use loci_plugin_api::{
-        ContributionPoints, CoreRewriters, PluginBootstrap, PluginManifest, PluginRuntime,
+        ContributionPoints, CoreRewriters, PluginBootstrap, PluginCompatibility, PluginManifest,
+        PluginRuntime,
     };
     use std::fs;
     use std::sync::Arc;
@@ -297,6 +304,8 @@ mod tests {
                 name: "agent-workflow".to_string(),
                 version: "1.0.0".to_string(),
                 api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
                 target_tracks: vec![PlatformTrack::AiAgent],
                 contributes: ContributionPoints {
                     model_providers: vec!["rag-local".to_string()],
@@ -308,6 +317,7 @@ mod tests {
                 },
                 runtime: PluginRuntime::default(),
                 bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
             }))
             .expect("register");
 
@@ -441,6 +451,40 @@ logit = 42.0
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn engine_loads_legacy_plugin_bundle_as_compat_metadata() {
+        let dir = unique_temp_dir("legacy-bundle");
+        fs::create_dir_all(dir.join("legacy-plugin")).expect("mkdir");
+        fs::write(dir.join("legacy-plugin").join("rot13.dll"), b"binary").expect("write runtime");
+        fs::write(
+            dir.join("legacy-plugin").join("rot13.loci-plugin.json"),
+            r#"{
+  "name": "rot13_dynamic",
+  "version": "1.0.0",
+  "kind": "text_plugin",
+  "abi_version": 1,
+  "capabilities": ["post_generate"]
+}"#,
+        )
+        .expect("write contract");
+
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+        };
+
+        let loaded = engine.load_plugins_from_dir(&dir).expect("load plugins");
+        assert_eq!(loaded, 1);
+        assert_eq!(engine.plugin_names(), vec!["rot13_dynamic".to_string()]);
+        assert_eq!(engine.sampling_hook_count(), 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     struct ForceTokenHook;
 
     impl SamplingHook for ForceTokenHook {
@@ -470,6 +514,8 @@ logit = 42.0
                 name: "hooked-plugin".to_string(),
                 version: "1.0.0".to_string(),
                 api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
                 target_tracks: vec![PlatformTrack::AiInfra],
                 contributes: ContributionPoints::default(),
                 core_rewriters: CoreRewriters {
@@ -478,6 +524,7 @@ logit = 42.0
                 },
                 runtime: PluginRuntime::default(),
                 bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
             }))
             .expect("register");
         engine
@@ -520,6 +567,8 @@ logit = 42.0
                 name: "broken-bootstrap".to_string(),
                 version: "1.0.0".to_string(),
                 api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
                 target_tracks: vec![PlatformTrack::AiInfra],
                 contributes: ContributionPoints::default(),
                 core_rewriters: CoreRewriters::default(),
@@ -527,6 +576,7 @@ logit = 42.0
                 bootstrap: PluginBootstrap {
                     activate_on_load: vec![CoreComponent::Inference],
                 },
+                compatibility: PluginCompatibility::default(),
             }))
             .expect_err("register should fail");
 
@@ -551,6 +601,8 @@ logit = 42.0
                 name: "first-inference".to_string(),
                 version: "1.0.0".to_string(),
                 api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
                 target_tracks: vec![PlatformTrack::AiInfra],
                 contributes: ContributionPoints::default(),
                 core_rewriters: CoreRewriters {
@@ -561,6 +613,7 @@ logit = 42.0
                 bootstrap: PluginBootstrap {
                     activate_on_load: vec![CoreComponent::Inference],
                 },
+                compatibility: PluginCompatibility::default(),
             }))
             .expect("register first");
 
@@ -569,6 +622,8 @@ logit = 42.0
                 name: "second-inference".to_string(),
                 version: "1.0.0".to_string(),
                 api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
                 target_tracks: vec![PlatformTrack::AiInfra],
                 contributes: ContributionPoints::default(),
                 core_rewriters: CoreRewriters {
@@ -579,6 +634,7 @@ logit = 42.0
                 bootstrap: PluginBootstrap {
                     activate_on_load: vec![CoreComponent::Inference],
                 },
+                compatibility: PluginCompatibility::default(),
             }))
             .expect_err("second register should fail");
 

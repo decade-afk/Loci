@@ -79,11 +79,35 @@ pub struct PluginBootstrap {
     pub activate_on_load: Vec<CoreComponent>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginSourceFormat {
+    #[default]
+    NativeManifest,
+    LegacyContract,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginCompatibility {
+    #[serde(default)]
+    pub source_format: PluginSourceFormat,
+    #[serde(default)]
+    pub legacy_kind: Option<String>,
+    #[serde(default)]
+    pub legacy_abi_version: Option<u32>,
+    #[serde(default)]
+    pub legacy_runtime_path: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PluginManifest {
     pub name: String,
     pub version: String,
     pub api_version: String,
+    #[serde(default)]
+    pub min_host_version: Option<String>,
+    #[serde(default)]
+    pub max_host_version: Option<String>,
     #[serde(default)]
     pub target_tracks: Vec<PlatformTrack>,
     #[serde(default)]
@@ -94,6 +118,8 @@ pub struct PluginManifest {
     pub runtime: PluginRuntime,
     #[serde(default)]
     pub bootstrap: PluginBootstrap,
+    #[serde(default)]
+    pub compatibility: PluginCompatibility,
 }
 
 impl ContributionPoints {
@@ -154,6 +180,10 @@ impl PluginManifest {
     pub fn activates_on_load(&self, component: CoreComponent) -> bool {
         self.bootstrap.activate_on_load.contains(&component)
     }
+
+    pub fn is_legacy_compat_manifest(&self) -> bool {
+        self.compatibility.source_format == PluginSourceFormat::LegacyContract
+    }
 }
 
 pub trait Plugin: Send + Sync {
@@ -170,11 +200,14 @@ mod tests {
             name: "demo".to_string(),
             version: "1.0.0".to_string(),
             api_version: "1.0".to_string(),
+            min_host_version: None,
+            max_host_version: None,
             target_tracks: Vec::new(),
             contributes: ContributionPoints::default(),
             core_rewriters: CoreRewriters::default(),
             runtime: PluginRuntime::default(),
             bootstrap: PluginBootstrap::default(),
+            compatibility: PluginCompatibility::default(),
         };
 
         assert!(manifest.supports_track(PlatformTrack::AiInfra));
@@ -206,6 +239,8 @@ mod tests {
             name: "demo".to_string(),
             version: "1.0.0".to_string(),
             api_version: "1.0".to_string(),
+            min_host_version: None,
+            max_host_version: None,
             target_tracks: vec![PlatformTrack::AiInfra],
             contributes: ContributionPoints::default(),
             core_rewriters: CoreRewriters {
@@ -219,9 +254,34 @@ mod tests {
             bootstrap: PluginBootstrap {
                 activate_on_load: vec![CoreComponent::Inference],
             },
+            compatibility: PluginCompatibility::default(),
         };
 
         assert!(manifest.activates_on_load(CoreComponent::Inference));
         assert!(!manifest.activates_on_load(CoreComponent::Workflow));
+    }
+
+    #[test]
+    fn manifest_reports_legacy_compat_source() {
+        let manifest = PluginManifest {
+            name: "legacy-demo".to_string(),
+            version: "0.1.0".to_string(),
+            api_version: "1.0".to_string(),
+            min_host_version: Some("0.1.0".to_string()),
+            max_host_version: None,
+            target_tracks: Vec::new(),
+            contributes: ContributionPoints::default(),
+            core_rewriters: CoreRewriters::default(),
+            runtime: PluginRuntime::default(),
+            bootstrap: PluginBootstrap::default(),
+            compatibility: PluginCompatibility {
+                source_format: PluginSourceFormat::LegacyContract,
+                legacy_kind: Some("text_plugin".to_string()),
+                legacy_abi_version: Some(1),
+                legacy_runtime_path: Some("plugins/legacy.dll".to_string()),
+            },
+        };
+
+        assert!(manifest.is_legacy_compat_manifest());
     }
 }

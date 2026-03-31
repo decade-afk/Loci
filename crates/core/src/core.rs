@@ -198,7 +198,8 @@ mod tests {
     use super::*;
     use crate::plugin::RegisteredPlugin;
     use loci_plugin_api::{
-        ContributionPoints, CoreRewriters, PluginBootstrap, PluginManifest, PluginRuntime,
+        ContributionPoints, CoreRewriters, PluginBootstrap, PluginCompatibility, PluginManifest,
+        PluginRuntime,
     };
 
     #[test]
@@ -210,6 +211,8 @@ mod tests {
                 name: "workflow-override".to_string(),
                 version: "1.0.0".to_string(),
                 api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
                 target_tracks: vec![PlatformTrack::AiAgent],
                 contributes: ContributionPoints::default(),
                 core_rewriters: CoreRewriters {
@@ -218,6 +221,7 @@ mod tests {
                 },
                 runtime: PluginRuntime::default(),
                 bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
             }))
             .expect("register");
 
@@ -240,6 +244,8 @@ mod tests {
                 name: "model-provider".to_string(),
                 version: "1.0.0".to_string(),
                 api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
                 target_tracks: vec![PlatformTrack::AiInfra],
                 contributes: ContributionPoints {
                     model_providers: vec!["private-registry".to_string()],
@@ -248,6 +254,7 @@ mod tests {
                 core_rewriters: CoreRewriters::default(),
                 runtime: PluginRuntime::default(),
                 bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
             }))
             .expect("register");
 
