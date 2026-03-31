@@ -33,6 +33,14 @@ impl InferenceEngine {
                     "plugin `{plugin_name}` requests auto activation for `{component:?}` without declaring the core rewriter capability"
                 )));
             }
+
+            if let Some(active_plugin_name) = self.registry.active_core_rewriter(*component) {
+                if active_plugin_name != plugin_name {
+                    return Err(LociError::from(anyhow::anyhow!(
+                        "plugin `{plugin_name}` requests auto activation for `{component:?}`, but `{active_plugin_name}` is already active; explicit activation is required"
+                    )));
+                }
+            }
         }
 
         self.registry
@@ -525,5 +533,60 @@ logit = 42.0
         assert!(err
             .to_string()
             .contains("requests auto activation for `Inference`"));
+    }
+
+    #[test]
+    fn engine_rejects_conflicting_auto_activation_for_same_component() {
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+        };
+
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "first-inference".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                target_tracks: vec![PlatformTrack::AiInfra],
+                contributes: ContributionPoints::default(),
+                core_rewriters: CoreRewriters {
+                    inference: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap {
+                    activate_on_load: vec![CoreComponent::Inference],
+                },
+            }))
+            .expect("register first");
+
+        let err = engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "second-inference".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                target_tracks: vec![PlatformTrack::AiInfra],
+                contributes: ContributionPoints::default(),
+                core_rewriters: CoreRewriters {
+                    inference: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap {
+                    activate_on_load: vec![CoreComponent::Inference],
+                },
+            }))
+            .expect_err("second register should fail");
+
+        assert!(err.to_string().contains("explicit activation is required"));
+        assert_eq!(
+            engine.active_core_rewriter(CoreComponent::Inference),
+            Some("first-inference")
+        );
+        assert_eq!(engine.plugin_names(), vec!["first-inference".to_string()]);
     }
 }

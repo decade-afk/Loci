@@ -223,10 +223,52 @@ fn resolve_runtime_artifact_path(manifest_path: &Path, relative_path: &str) -> P
         .join(relative_path)
 }
 
+fn validate_runtime_artifact_within_plugin_root(
+    manifest_path: &Path,
+    artifact_path: &Path,
+) -> Result<()> {
+    let plugin_root = manifest_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("plugin manifest has no parent"))?;
+    let canonical_root = plugin_root
+        .canonicalize()
+        .with_context(|| format!("failed to resolve plugin root: {}", plugin_root.display()))?;
+    let canonical_artifact = artifact_path.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve runtime artifact: {}",
+            artifact_path.display()
+        )
+    })?;
+
+    if !canonical_artifact.starts_with(&canonical_root) {
+        bail!(
+            "runtime artifact `{}` escapes plugin root `{}`",
+            canonical_artifact.display(),
+            canonical_root.display()
+        );
+    }
+
+    Ok(())
+}
+
 fn load_registered_plugin_runtime(
     manifest: &PluginManifest,
     manifest_path: &Path,
 ) -> Result<RegisteredPluginRuntime> {
+    if manifest.runtime.library_path.is_some() {
+        bail!(
+            "plugin `{}` declares runtime.library_path but dynamic library runtime loading is not implemented in the new architecture yet",
+            manifest.name
+        );
+    }
+
+    if manifest.runtime.wasm_path.is_some() {
+        bail!(
+            "plugin `{}` declares runtime.wasm_path but wasm runtime loading is not implemented in the new architecture yet",
+            manifest.name
+        );
+    }
+
     if manifest.runtime.sampling_profile.is_some()
         && !manifest.declares_core_rewriter(CoreComponent::Inference)
     {
@@ -242,6 +284,7 @@ fn load_registered_plugin_runtime(
         .as_deref()
         .map(|profile_path| {
             let profile_path = resolve_runtime_artifact_path(manifest_path, profile_path);
+            validate_runtime_artifact_within_plugin_root(manifest_path, &profile_path)?;
             let profile = load_sampling_hook_profile(&profile_path)?;
             Ok::<Arc<dyn SamplingHook>, anyhow::Error>(Arc::new(ProfiledSamplingHook::new(profile)))
         })
@@ -683,6 +726,63 @@ sampling_profile = "sampling-hook.toml"
         assert!(err
             .to_string()
             .contains("does not declare inference core rewriter capability"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_plugin_manifest_file_rejects_sampling_profile_outside_plugin_root() {
+        let dir = unique_temp_dir("escaped-sampling-sidecar");
+        fs::create_dir_all(dir.join("plugin")).expect("mkdir");
+        fs::write(dir.join("outside.toml"), "post_sample_override = 4\n")
+            .expect("write outside profile");
+        fs::write(
+            dir.join("plugin").join(MANIFEST_FILE_NAME),
+            r#"
+name = "escaped-plugin"
+version = "1.0.0"
+api_version = "1.0"
+
+[core_rewriters]
+inference = true
+
+[runtime]
+sampling_profile = "../outside.toml"
+"#,
+        )
+        .expect("write manifest");
+
+        let err = load_plugin_manifest_file(dir.join("plugin").join(MANIFEST_FILE_NAME))
+            .expect_err("load should fail");
+
+        assert!(err.to_string().contains("escapes plugin root"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_plugin_manifest_file_rejects_unimplemented_runtime_kinds() {
+        let dir = unique_temp_dir("unsupported-runtime");
+        fs::create_dir_all(dir.join("plugin")).expect("mkdir");
+        fs::write(
+            dir.join("plugin").join(MANIFEST_FILE_NAME),
+            r#"
+name = "dynamic-plugin"
+version = "1.0.0"
+api_version = "1.0"
+
+[runtime]
+library_path = "plugin.dll"
+"#,
+        )
+        .expect("write manifest");
+
+        let err = load_plugin_manifest_file(dir.join("plugin").join(MANIFEST_FILE_NAME))
+            .expect_err("load should fail");
+
+        assert!(err
+            .to_string()
+            .contains("dynamic library runtime loading is not implemented"));
 
         let _ = fs::remove_dir_all(&dir);
     }
