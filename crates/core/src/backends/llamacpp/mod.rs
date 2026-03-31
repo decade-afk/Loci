@@ -6,7 +6,7 @@ use crate::backend::{
     BackendCapabilities, BackendParams, InferenceBackend, InferenceParams, Model, ModelMetadata,
 };
 use crate::error::{LociError, Result};
-use adapter::{LlamaCppAdapter, StubLlamaCppAdapter};
+use adapter::{LlamaCppAdapter, LlamaCppAdapterContext, StubLlamaCppAdapter};
 use plan::LlamaCppLoadPlan;
 use runtime::{LlamaCppExecutionConfig, LlamaCppRuntimeState};
 use std::path::Path;
@@ -32,6 +32,7 @@ impl Default for LlamaCppBackend {
 }
 
 pub struct LlamaCppModel {
+    adapter_context: LlamaCppAdapterContext,
     load_plan: LlamaCppLoadPlan,
     runtime_state: LlamaCppRuntimeState,
 }
@@ -52,7 +53,7 @@ impl Model for LlamaCppModel {
         if !self.load_plan.runtime().supports(params) {
             self.runtime_state.reconcile(&execution);
         }
-        let adapter_summary = self.adapter_summary()?;
+        let adapter_summary = self.adapter_context.summary();
 
         Ok(format!(
             "llama.cpp-stub:{prompt} [model={}, gpu_active={}, gpu_layers={}, plan_n_ctx={}, plan_n_batch={}, mmap={}, mlock={}, main_gpu={}, tensor_split={}, {}, adapter={}, exec[max_tokens={}, temperature={}, top_p={}, min_p={}, top_k={}, repeat_penalty={}]]",
@@ -102,9 +103,11 @@ impl InferenceBackend for LlamaCppBackend {
             ));
         }
 
+        let adapter_context = self.adapter.build_context()?;
         let load_plan = LlamaCppLoadPlan::from_backend_params(model_path, backend_params)?;
         let runtime_state = load_plan.create_runtime_state();
         Ok(Box::new(LlamaCppModel {
+            adapter_context,
             load_plan,
             runtime_state,
         }))
@@ -117,19 +120,11 @@ impl InferenceBackend for LlamaCppBackend {
     }
 }
 
-impl LlamaCppModel {
-    fn adapter_summary(&self) -> Result<String> {
-        Ok(StubLlamaCppAdapter::new()
-            .source_layout()?
-            .summary())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::BackendParams;
-    use crate::backends::llamacpp::adapter::LlamaCppSourceLayout;
+    use crate::backends::llamacpp::adapter::{LlamaCppBuildIntegration, LlamaCppSourceLayout};
     use std::path::Path;
 
     #[test]
@@ -255,5 +250,13 @@ mod tests {
         assert!(layout.include_dir.ends_with("deps\\llama.cpp\\include"));
         assert!(layout.llama_header.ends_with("deps\\llama.cpp\\include\\llama.h"));
         assert!(layout.ggml_include_dir.ends_with("deps\\llama.cpp\\ggml\\include"));
+    }
+
+    #[test]
+    fn build_integration_matches_workspace_layout() {
+        let integration = LlamaCppBuildIntegration::discover().expect("integration");
+        assert!(integration.build_script.ends_with("build.rs"));
+        assert!(integration.ffi_module.ends_with("src\\ffi.rs"));
+        assert!(integration.ffi_shim_c.ends_with("src\\ffi_shim.c"));
     }
 }
