@@ -1,5 +1,6 @@
 use crate::backend::InferenceParams;
 use crate::error::{LociError, Result};
+use crate::sampler::{sample_token, LogitsView, SamplingParams};
 
 use super::ffi;
 use super::runtime::LlamaCppExecutionConfig;
@@ -53,6 +54,16 @@ impl LlamaCppModel {
             .map_err(|_| LociError::InferenceError("token count exceeds i32 range".to_string()))?;
         let mut remaining_decode_slots = execution.n_ctx() as usize - tokens.len();
         let max_steps = usize::try_from(execution.max_tokens).unwrap_or(usize::MAX);
+        let sampling_params = SamplingParams {
+            temperature: execution.temperature,
+            top_k: execution.top_k,
+            top_p: execution.top_p,
+            min_p: execution.min_p,
+            repeat_penalty: execution.repeat_penalty,
+            seed: 0,
+        };
+        let mut recent_tokens = tokens.iter().copied().rev().take(64).collect::<Vec<_>>();
+        recent_tokens.reverse();
 
         for _ in 0..max_steps {
             let token = {
@@ -64,7 +75,8 @@ impl LlamaCppModel {
                         "failed to read logits from llama.cpp context".to_string(),
                     ));
                 }
-                context.sample_greedy(logits, model.n_vocab())
+                let logits_view = unsafe { LogitsView::from_raw(logits, model.n_vocab() as usize) };
+                sample_token(&logits_view, &sampling_params, &recent_tokens)
             };
 
             let piece = {
@@ -73,17 +85,28 @@ impl LlamaCppModel {
                     break;
                 }
 
-                model.token_to_str(token).map_err(LociError::InferenceError)?
+                model
+                    .token_to_str(token)
+                    .map_err(LociError::InferenceError)?
             };
 
             result.push_str(&piece);
+            recent_tokens.push(token);
+            if recent_tokens.len() > 64 {
+                recent_tokens.remove(0);
+            }
 
             if remaining_decode_slots == 0 {
                 break;
             }
 
             let context = self.native_context.require_native_context_mut()?;
-            Self::decode_tokens(context, &[token], current_position, Self::max_decode_chunk(&execution))?;
+            Self::decode_tokens(
+                context,
+                &[token],
+                current_position,
+                Self::max_decode_chunk(&execution),
+            )?;
             current_position = current_position
                 .checked_add(1)
                 .ok_or_else(|| LociError::InferenceError("token position overflow".to_string()))?;
