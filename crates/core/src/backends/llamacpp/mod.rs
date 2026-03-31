@@ -1,3 +1,4 @@
+mod adapter;
 mod plan;
 mod runtime;
 
@@ -5,17 +6,22 @@ use crate::backend::{
     BackendCapabilities, BackendParams, InferenceBackend, InferenceParams, Model, ModelMetadata,
 };
 use crate::error::{LociError, Result};
+use adapter::{LlamaCppAdapter, StubLlamaCppAdapter};
 use plan::LlamaCppLoadPlan;
 use runtime::{LlamaCppExecutionConfig, LlamaCppRuntimeState};
 use std::path::Path;
 
 pub struct LlamaCppBackend {
+    adapter: Box<dyn LlamaCppAdapter>,
     initialized: bool,
 }
 
 impl LlamaCppBackend {
     pub fn new() -> Self {
-        Self { initialized: false }
+        Self {
+            adapter: Box::new(StubLlamaCppAdapter::new()),
+            initialized: false,
+        }
     }
 }
 
@@ -46,9 +52,10 @@ impl Model for LlamaCppModel {
         if !self.load_plan.runtime().supports(params) {
             self.runtime_state.reconcile(&execution);
         }
+        let adapter_summary = self.adapter_summary()?;
 
         Ok(format!(
-            "llama.cpp-stub:{prompt} [model={}, gpu_active={}, gpu_layers={}, plan_n_ctx={}, plan_n_batch={}, mmap={}, mlock={}, main_gpu={}, tensor_split={}, {}, exec[max_tokens={}, temperature={}, top_p={}, min_p={}, top_k={}, repeat_penalty={}]]",
+            "llama.cpp-stub:{prompt} [model={}, gpu_active={}, gpu_layers={}, plan_n_ctx={}, plan_n_batch={}, mmap={}, mlock={}, main_gpu={}, tensor_split={}, {}, adapter={}, exec[max_tokens={}, temperature={}, top_p={}, min_p={}, top_k={}, repeat_penalty={}]]",
             self.load_plan.model_path().display(),
             self.load_plan.gpu_active(),
             self.load_plan.n_gpu_layers(),
@@ -59,6 +66,7 @@ impl Model for LlamaCppModel {
             self.load_plan.main_gpu(),
             self.load_plan.tensor_split_summary(),
             self.runtime_state.summary(),
+            adapter_summary,
             execution.max_tokens,
             execution.temperature,
             execution.top_p,
@@ -103,8 +111,17 @@ impl InferenceBackend for LlamaCppBackend {
     }
 
     fn init(&mut self) -> Result<()> {
+        self.adapter.validate_environment()?;
         self.initialized = true;
         Ok(())
+    }
+}
+
+impl LlamaCppModel {
+    fn adapter_summary(&self) -> Result<String> {
+        Ok(StubLlamaCppAdapter::new()
+            .source_layout()?
+            .summary())
     }
 }
 
@@ -112,6 +129,7 @@ impl InferenceBackend for LlamaCppBackend {
 mod tests {
     use super::*;
     use crate::backend::BackendParams;
+    use crate::backends::llamacpp::adapter::LlamaCppSourceLayout;
     use std::path::Path;
 
     #[test]
@@ -229,5 +247,13 @@ mod tests {
             n_ctx: 8192,
             ..Default::default()
         }));
+    }
+
+    #[test]
+    fn source_layout_matches_cloned_repo_structure() {
+        let layout = LlamaCppSourceLayout::discover().expect("layout");
+        assert!(layout.include_dir.ends_with("deps\\llama.cpp\\include"));
+        assert!(layout.llama_header.ends_with("deps\\llama.cpp\\include\\llama.h"));
+        assert!(layout.ggml_include_dir.ends_with("deps\\llama.cpp\\ggml\\include"));
     }
 }
