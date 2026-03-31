@@ -25,10 +25,27 @@ impl InferenceEngine {
     }
 
     pub fn register_plugin(&mut self, plugin: RegisteredPlugin) -> Result<()> {
+        let plugin_name = plugin.manifest.name.clone();
+        let auto_activate = plugin.auto_activate_components().to_vec();
+        for component in &auto_activate {
+            if !plugin.declares_core_rewriter(*component) {
+                return Err(LociError::from(anyhow::anyhow!(
+                    "plugin `{plugin_name}` requests auto activation for `{component:?}` without declaring the core rewriter capability"
+                )));
+            }
+        }
+
         self.registry
             .plugin_manager_mut()
             .register(plugin)
             .map_err(LociError::from)?;
+
+        for component in auto_activate {
+            self.registry
+                .activate_core_rewriter(component, &plugin_name)
+                .map_err(LociError::from)?;
+        }
+
         self.refresh_model_sampling_runtime()
     }
 
@@ -240,7 +257,9 @@ mod tests {
     use super::*;
     use crate::core::DefaultCoreRegistry;
     use crate::sampler::LogitsView;
-    use loci_plugin_api::{ContributionPoints, CoreRewriters, PluginManifest};
+    use loci_plugin_api::{
+        ContributionPoints, CoreRewriters, PluginBootstrap, PluginManifest, PluginRuntime,
+    };
     use std::fs;
     use std::sync::Arc;
 
@@ -279,6 +298,8 @@ mod tests {
                     workflow: true,
                     ..Default::default()
                 },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
             }))
             .expect("register");
 
@@ -346,6 +367,72 @@ workflow = true
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn engine_loads_plugin_runtime_bundle_and_auto_activates_inference() {
+        let dir = unique_temp_dir("runtime-bundle");
+        fs::create_dir_all(dir.join("inference-plugin")).expect("mkdir");
+        fs::write(
+            dir.join("inference-plugin").join("manifest.toml"),
+            r#"
+name = "inference-plugin"
+version = "1.0.0"
+api_version = "1.0"
+target_tracks = ["ai_infra"]
+
+[contributes]
+inference_hooks = ["sampling-profile"]
+
+[core_rewriters]
+inference = true
+
+[runtime]
+sampling_profile = "sampling-hook.toml"
+
+[bootstrap]
+activate_on_load = ["inference"]
+"#,
+        )
+        .expect("write manifest");
+        fs::write(
+            dir.join("inference-plugin").join("sampling-hook.toml"),
+            r#"
+post_sample_override = 9
+
+[[logit_biases]]
+token_id = 4
+logit = 42.0
+"#,
+        )
+        .expect("write profile");
+
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+        };
+
+        let loaded = engine.load_plugins_from_dir(&dir).expect("load plugins");
+        assert_eq!(loaded, 1);
+        assert_eq!(
+            engine.active_core_rewriter(CoreComponent::Inference),
+            Some("inference-plugin")
+        );
+        assert_eq!(engine.sampling_hook_count(), 1);
+
+        engine
+            .load_model("mock", "demo.gguf", BackendParams::default())
+            .expect("load model");
+        let output = engine
+            .generate("hello", &InferenceParams::default())
+            .expect("generate");
+        assert!(output.contains("hooks=1"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     struct ForceTokenHook;
 
     impl SamplingHook for ForceTokenHook {
@@ -381,6 +468,8 @@ workflow = true
                     inference: true,
                     ..Default::default()
                 },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
             }))
             .expect("register");
         engine
@@ -405,5 +494,36 @@ workflow = true
             .expect("generate");
         assert!(output.contains("hooks=1"));
         assert_eq!(engine.sampling_hook_count(), 1);
+    }
+
+    #[test]
+    fn engine_rejects_auto_activation_for_undeclared_component() {
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+        };
+
+        let err = engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "broken-bootstrap".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                target_tracks: vec![PlatformTrack::AiInfra],
+                contributes: ContributionPoints::default(),
+                core_rewriters: CoreRewriters::default(),
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap {
+                    activate_on_load: vec![CoreComponent::Inference],
+                },
+            }))
+            .expect_err("register should fail");
+
+        assert!(err
+            .to_string()
+            .contains("requests auto activation for `Inference`"));
     }
 }

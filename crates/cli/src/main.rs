@@ -22,12 +22,16 @@ fn main() -> anyhow::Result<()> {
     let plugin_dir = plugin_dir_from_args()?;
     let mut engine = InferenceEngine::builder().build()?;
     let loaded = engine.load_plugins_from_dir(&plugin_dir)?;
+    let active_inference = engine
+        .active_core_rewriter(loci_core::CoreComponent::Inference)
+        .unwrap_or("none");
     println!(
-        "loci-cli ready; plugins={}, loaded_now={}, infra_plugins={}, agent_plugins={}",
+        "loci-cli ready; plugins={}, loaded_now={}, infra_plugins={}, agent_plugins={}, active_inference={}",
         engine.plugin_count(),
         loaded,
         engine.plugins_for_track(PlatformTrack::AiInfra).len(),
-        engine.plugins_for_track(PlatformTrack::AiAgent).len()
+        engine.plugins_for_track(PlatformTrack::AiAgent).len(),
+        active_inference
     );
     Ok(())
 }

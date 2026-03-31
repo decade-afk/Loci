@@ -2,7 +2,9 @@ use crate::error::Result as CoreResult;
 use crate::sampler::LogitsView;
 use anyhow::{bail, Context, Result};
 use loci_plugin_api::{CoreComponent, PlatformTrack, PluginManifest};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,6 +23,44 @@ pub trait SamplingHook: Send + Sync {
     fn post_sample(&self, token_id: i32) -> CoreResult<i32> {
         Ok(token_id)
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SamplingLogitBias {
+    pub token_id: i32,
+    pub logit: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SamplingHookProfile {
+    #[serde(default)]
+    pub logit_biases: Vec<SamplingLogitBias>,
+    #[serde(default)]
+    pub force_token_id: Option<i32>,
+    #[serde(default = "default_forced_logit")]
+    pub forced_logit: f32,
+    #[serde(default)]
+    pub post_sample_override: Option<i32>,
+}
+
+impl Default for SamplingHookProfile {
+    fn default() -> Self {
+        Self {
+            logit_biases: Vec::new(),
+            force_token_id: None,
+            forced_logit: default_forced_logit(),
+            post_sample_override: None,
+        }
+    }
+}
+
+fn default_forced_logit() -> f32 {
+    120.0
+}
+
+#[derive(Clone, Default)]
+struct RegisteredPluginRuntime {
+    sampling_hook: Option<Arc<dyn SamplingHook>>,
 }
 
 #[derive(Clone, Default)]
@@ -66,14 +106,33 @@ impl PluginSamplingRuntime {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RegisteredPlugin {
     pub manifest: PluginManifest,
+    manifest_path: Option<PathBuf>,
+    root_dir: Option<PathBuf>,
+    runtime: RegisteredPluginRuntime,
+}
+
+impl fmt::Debug for RegisteredPlugin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RegisteredPlugin")
+            .field("manifest", &self.manifest)
+            .field("manifest_path", &self.manifest_path)
+            .field("root_dir", &self.root_dir)
+            .field("has_sampling_hook", &self.runtime.sampling_hook.is_some())
+            .finish()
+    }
 }
 
 impl RegisteredPlugin {
     pub fn new(manifest: PluginManifest) -> Self {
-        Self { manifest }
+        Self {
+            manifest,
+            manifest_path: None,
+            root_dir: None,
+            runtime: RegisteredPluginRuntime::default(),
+        }
     }
 
     pub fn supports_track(&self, track: PlatformTrack) -> bool {
@@ -87,6 +146,108 @@ impl RegisteredPlugin {
     pub fn declares_inference_sampling_runtime(&self) -> bool {
         self.declares_core_rewriter(CoreComponent::Inference)
     }
+
+    pub fn auto_activate_components(&self) -> &[CoreComponent] {
+        &self.manifest.bootstrap.activate_on_load
+    }
+
+    pub fn has_sampling_hook(&self) -> bool {
+        self.runtime.sampling_hook.is_some()
+    }
+
+    fn with_manifest_location(mut self, manifest_path: PathBuf) -> Self {
+        self.root_dir = manifest_path.parent().map(Path::to_path_buf);
+        self.manifest_path = Some(manifest_path);
+        self
+    }
+
+    fn with_runtime(mut self, runtime: RegisteredPluginRuntime) -> Self {
+        self.runtime = runtime;
+        self
+    }
+
+    fn sampling_hook(&self) -> Option<Arc<dyn SamplingHook>> {
+        self.runtime.sampling_hook.as_ref().map(Arc::clone)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProfiledSamplingHook {
+    profile: SamplingHookProfile,
+}
+
+impl ProfiledSamplingHook {
+    fn new(profile: SamplingHookProfile) -> Self {
+        Self { profile }
+    }
+}
+
+impl SamplingHook for ProfiledSamplingHook {
+    fn transform_logits(
+        &self,
+        logits: &mut LogitsView<'_>,
+        _context_tokens: &[i32],
+    ) -> CoreResult<()> {
+        for bias in &self.profile.logit_biases {
+            if bias.token_id < 0 {
+                continue;
+            }
+            logits.set_usize(bias.token_id as usize, bias.logit)?;
+        }
+
+        if let Some(token_id) = self.profile.force_token_id {
+            if token_id >= 0 {
+                logits.set_usize(token_id as usize, self.profile.forced_logit)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn post_sample(&self, token_id: i32) -> CoreResult<i32> {
+        Ok(self.profile.post_sample_override.unwrap_or(token_id))
+    }
+}
+
+fn load_sampling_hook_profile(path: &Path) -> Result<SamplingHookProfile> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read sampling hook profile: {}", path.display()))?;
+    toml::from_str(&content)
+        .with_context(|| format!("failed to parse sampling hook profile: {}", path.display()))
+}
+
+fn resolve_runtime_artifact_path(manifest_path: &Path, relative_path: &str) -> PathBuf {
+    manifest_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(relative_path)
+}
+
+fn load_registered_plugin_runtime(
+    manifest: &PluginManifest,
+    manifest_path: &Path,
+) -> Result<RegisteredPluginRuntime> {
+    if manifest.runtime.sampling_profile.is_some()
+        && !manifest.declares_core_rewriter(CoreComponent::Inference)
+    {
+        bail!(
+            "plugin `{}` declares a sampling profile but does not declare inference core rewriter capability",
+            manifest.name
+        );
+    }
+
+    let sampling_hook = manifest
+        .runtime
+        .sampling_profile
+        .as_deref()
+        .map(|profile_path| {
+            let profile_path = resolve_runtime_artifact_path(manifest_path, profile_path);
+            let profile = load_sampling_hook_profile(&profile_path)?;
+            Ok::<Arc<dyn SamplingHook>, anyhow::Error>(Arc::new(ProfiledSamplingHook::new(profile)))
+        })
+        .transpose()?;
+
+    Ok(RegisteredPluginRuntime { sampling_hook })
 }
 
 pub fn load_plugin_manifest_file(path: impl AsRef<Path>) -> Result<RegisteredPlugin> {
@@ -95,7 +256,10 @@ pub fn load_plugin_manifest_file(path: impl AsRef<Path>) -> Result<RegisteredPlu
         .with_context(|| format!("failed to read plugin manifest: {}", path.display()))?;
     let manifest: PluginManifest = toml::from_str(&content)
         .with_context(|| format!("failed to parse plugin manifest: {}", path.display()))?;
-    Ok(RegisteredPlugin::new(manifest))
+    let runtime = load_registered_plugin_runtime(&manifest, path)?;
+    Ok(RegisteredPlugin::new(manifest)
+        .with_manifest_location(path.to_path_buf())
+        .with_runtime(runtime))
 }
 
 pub fn discover_plugin_manifest_files(plugin_dir: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
@@ -155,10 +319,16 @@ impl crate::core::PluginManager for InMemoryPluginManager {
             bail!("plugin already registered: {}", plugin.manifest.name);
         }
 
+        let plugin_name = plugin.manifest.name.clone();
+        let sampling_hook = plugin.sampling_hook();
         let index = self.plugins.len();
-        self.plugin_index
-            .insert(plugin.manifest.name.clone(), index);
+        self.plugin_index.insert(plugin_name.clone(), index);
         self.plugins.push(plugin);
+
+        if let Some(hook) = sampling_hook {
+            self.sampling_hooks.insert(plugin_name, hook);
+        }
+
         Ok(())
     }
 
@@ -224,7 +394,10 @@ impl crate::core::PluginManager for InMemoryPluginManager {
             .collect()
     }
 
-    fn sampling_runtime_for_inference(&self, active_plugin_name: Option<&str>) -> PluginSamplingRuntime {
+    fn sampling_runtime_for_inference(
+        &self,
+        active_plugin_name: Option<&str>,
+    ) -> PluginSamplingRuntime {
         let hooks = active_plugin_name
             .into_iter()
             .filter_map(|plugin_name| {
@@ -246,7 +419,7 @@ mod tests {
     use super::*;
     use crate::core::PluginManager;
     use crate::sampler::LogitsView;
-    use loci_plugin_api::{ContributionPoints, CoreRewriters};
+    use loci_plugin_api::{ContributionPoints, CoreRewriters, PluginBootstrap, PluginRuntime};
     use std::fs;
     use std::sync::Arc;
 
@@ -268,6 +441,8 @@ mod tests {
             target_tracks: vec![PlatformTrack::AiInfra],
             contributes: ContributionPoints::default(),
             core_rewriters: CoreRewriters::default(),
+            runtime: PluginRuntime::default(),
+            bootstrap: PluginBootstrap::default(),
         }
     }
 
@@ -423,5 +598,92 @@ api_version = "1.0"
 
         let runtime = manager.sampling_runtime_for_inference(None);
         assert_eq!(runtime.hook_count(), 0);
+    }
+
+    #[test]
+    fn load_plugin_manifest_file_wires_sampling_hook_from_sidecar_profile() {
+        let dir = unique_temp_dir("sampling-sidecar");
+        fs::create_dir_all(dir.join("sampler-plugin")).expect("mkdir");
+        fs::write(
+            dir.join("sampler-plugin").join(MANIFEST_FILE_NAME),
+            r#"
+name = "sampler-plugin"
+version = "1.0.0"
+api_version = "1.0"
+target_tracks = ["ai_infra"]
+
+[core_rewriters]
+inference = true
+
+[runtime]
+sampling_profile = "sampling-hook.toml"
+"#,
+        )
+        .expect("write manifest");
+        fs::write(
+            dir.join("sampler-plugin").join("sampling-hook.toml"),
+            r#"
+force_token_id = 1
+forced_logit = 55.0
+post_sample_override = 7
+
+[[logit_biases]]
+token_id = 2
+logit = 99.0
+"#,
+        )
+        .expect("write profile");
+
+        let plugin = load_plugin_manifest_file(dir.join("sampler-plugin").join(MANIFEST_FILE_NAME))
+            .expect("load plugin bundle");
+        assert!(plugin.has_sampling_hook());
+
+        let mut manager = InMemoryPluginManager::default();
+        manager.register(plugin).expect("register plugin");
+
+        let runtime = manager.sampling_runtime_for_inference(Some("sampler-plugin"));
+        assert_eq!(runtime.hook_count(), 1);
+
+        let mut logits = vec![1.0, 2.0, 3.0];
+        runtime
+            .apply_transform_logits(&mut LogitsView::new(&mut logits), &[])
+            .expect("transform");
+        assert_eq!(logits[1], 55.0);
+        assert_eq!(logits[2], 99.0);
+        assert_eq!(runtime.apply_post_sample(3).expect("post sample"), 7);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_plugin_manifest_file_rejects_sampling_profile_without_inference_rewriter() {
+        let dir = unique_temp_dir("bad-sampling-sidecar");
+        fs::create_dir_all(dir.join("plain-plugin")).expect("mkdir");
+        fs::write(
+            dir.join("plain-plugin").join(MANIFEST_FILE_NAME),
+            r#"
+name = "plain-plugin"
+version = "1.0.0"
+api_version = "1.0"
+
+[runtime]
+sampling_profile = "sampling-hook.toml"
+"#,
+        )
+        .expect("write manifest");
+        fs::write(
+            dir.join("plain-plugin").join("sampling-hook.toml"),
+            "post_sample_override = 4\n",
+        )
+        .expect("write profile");
+
+        let err = load_plugin_manifest_file(dir.join("plain-plugin").join(MANIFEST_FILE_NAME))
+            .expect_err("load should fail");
+
+        assert!(err
+            .to_string()
+            .contains("does not declare inference core rewriter capability"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

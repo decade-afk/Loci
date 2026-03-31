@@ -1,0 +1,5 @@
+post_sample_override = 4
+
+[[logit_biases]]
+token_id = 4
+logit = 75.0

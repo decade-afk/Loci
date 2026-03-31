@@ -63,6 +63,22 @@ pub struct CoreRewriters {
     pub ui_host: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginRuntime {
+    #[serde(default)]
+    pub library_path: Option<String>,
+    #[serde(default)]
+    pub wasm_path: Option<String>,
+    #[serde(default)]
+    pub sampling_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginBootstrap {
+    #[serde(default)]
+    pub activate_on_load: Vec<CoreComponent>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PluginManifest {
     pub name: String,
@@ -74,6 +90,10 @@ pub struct PluginManifest {
     pub contributes: ContributionPoints,
     #[serde(default)]
     pub core_rewriters: CoreRewriters,
+    #[serde(default)]
+    pub runtime: PluginRuntime,
+    #[serde(default)]
+    pub bootstrap: PluginBootstrap,
 }
 
 impl ContributionPoints {
@@ -130,6 +150,10 @@ impl PluginManifest {
     pub fn declares_core_rewriter(&self, component: CoreComponent) -> bool {
         self.core_rewriters.supports(component)
     }
+
+    pub fn activates_on_load(&self, component: CoreComponent) -> bool {
+        self.bootstrap.activate_on_load.contains(&component)
+    }
 }
 
 pub trait Plugin: Send + Sync {
@@ -149,6 +173,8 @@ mod tests {
             target_tracks: Vec::new(),
             contributes: ContributionPoints::default(),
             core_rewriters: CoreRewriters::default(),
+            runtime: PluginRuntime::default(),
+            bootstrap: PluginBootstrap::default(),
         };
 
         assert!(manifest.supports_track(PlatformTrack::AiInfra));
@@ -172,5 +198,30 @@ mod tests {
                 CoreComponent::UiHost,
             ]
         );
+    }
+
+    #[test]
+    fn manifest_reports_bootstrap_activation_targets() {
+        let manifest = PluginManifest {
+            name: "demo".to_string(),
+            version: "1.0.0".to_string(),
+            api_version: "1.0".to_string(),
+            target_tracks: vec![PlatformTrack::AiInfra],
+            contributes: ContributionPoints::default(),
+            core_rewriters: CoreRewriters {
+                inference: true,
+                ..Default::default()
+            },
+            runtime: PluginRuntime {
+                sampling_profile: Some("sampling-hook.toml".to_string()),
+                ..Default::default()
+            },
+            bootstrap: PluginBootstrap {
+                activate_on_load: vec![CoreComponent::Inference],
+            },
+        };
+
+        assert!(manifest.activates_on_load(CoreComponent::Inference));
+        assert!(!manifest.activates_on_load(CoreComponent::Workflow));
     }
 }

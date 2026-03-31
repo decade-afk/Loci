@@ -20,7 +20,9 @@ pub use crate::error::{LociError, Result};
 pub use crate::model::{ModelConfig, ModelLoadStrategy, ModelLoader};
 pub use crate::plugin::{
     discover_plugin_manifest_files, load_plugin_manifest_file, InMemoryPluginManager,
-    PluginSamplingRuntime, RegisteredPlugin, SamplingHook,
+    PluginSamplingRuntime, RegisteredPlugin, SamplingHook, SamplingHookProfile, SamplingLogitBias,
 };
 pub use crate::sampler::{sample_token, LogitsView, SamplingParams};
-pub use loci_plugin_api::{CoreComponent, CoreRewriters, PlatformTrack, PluginManifest};
+pub use loci_plugin_api::{
+    CoreComponent, CoreRewriters, PlatformTrack, PluginBootstrap, PluginManifest, PluginRuntime,
+};

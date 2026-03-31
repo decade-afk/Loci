@@ -197,7 +197,9 @@ impl CoreRegistry for DefaultCoreRegistry {
 mod tests {
     use super::*;
     use crate::plugin::RegisteredPlugin;
-    use loci_plugin_api::{ContributionPoints, CoreRewriters, PluginManifest};
+    use loci_plugin_api::{
+        ContributionPoints, CoreRewriters, PluginBootstrap, PluginManifest, PluginRuntime,
+    };
 
     #[test]
     fn registry_can_activate_declared_core_rewriter() {
@@ -214,6 +216,8 @@ mod tests {
                     workflow: true,
                     ..Default::default()
                 },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
             }))
             .expect("register");
 
@@ -242,6 +246,8 @@ mod tests {
                     ..Default::default()
                 },
                 core_rewriters: CoreRewriters::default(),
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
             }))
             .expect("register");
 
