@@ -1,4 +1,5 @@
 mod adapter;
+mod driver;
 mod plan;
 mod runtime;
 
@@ -124,7 +125,7 @@ impl InferenceBackend for LlamaCppBackend {
 mod tests {
     use super::*;
     use crate::backend::BackendParams;
-    use crate::backends::llamacpp::adapter::{LlamaCppBuildIntegration, LlamaCppSourceLayout};
+    use crate::backends::llamacpp::adapter::{LlamaCppBuildIntegration, LlamaCppSourceLayout, StubLlamaCppAdapter};
     use std::path::Path;
 
     #[test]
@@ -258,5 +259,14 @@ mod tests {
         assert!(integration.build_script.ends_with("build.rs"));
         assert!(integration.ffi_module.ends_with("src\\ffi.rs"));
         assert!(integration.ffi_shim_c.ends_with("src\\ffi_shim.c"));
+    }
+
+    #[test]
+    fn adapter_context_contains_driver_protocol() {
+        let adapter = StubLlamaCppAdapter::new();
+        let context = adapter.build_context().expect("context");
+        assert_eq!(context.driver_protocol.kind, "stub");
+        assert_eq!(context.driver_protocol.backend_init_symbol, "backend_init");
+        assert!(context.driver_protocol.ffi_module.ends_with("src\\ffi.rs"));
     }
 }

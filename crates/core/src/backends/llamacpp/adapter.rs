@@ -1,4 +1,5 @@
 use crate::error::{LociError, Result};
+use super::driver::{LlamaCppDriver, LlamaCppDriverProtocol, StubLlamaCppDriver};
 use std::path::PathBuf;
 
 pub trait LlamaCppAdapter: Send + Sync {
@@ -20,6 +21,10 @@ impl StubLlamaCppAdapter {
     pub fn build_integration(&self) -> Result<LlamaCppBuildIntegration> {
         LlamaCppBuildIntegration::discover()
     }
+
+    pub fn driver(&self) -> Box<dyn LlamaCppDriver> {
+        Box::new(StubLlamaCppDriver::new())
+    }
 }
 
 impl LlamaCppAdapter for StubLlamaCppAdapter {
@@ -28,24 +33,40 @@ impl LlamaCppAdapter for StubLlamaCppAdapter {
     }
 
     fn build_context(&self) -> Result<LlamaCppAdapterContext> {
-        Ok(LlamaCppAdapterContext {
-            source_layout: self.source_layout()?,
-            build_integration: self.build_integration()?,
-        })
+        let source_layout = self.source_layout()?;
+        let build_integration = self.build_integration()?;
+        let driver = self.driver();
+        let mut context = LlamaCppAdapterContext {
+            source_layout,
+            build_integration,
+            driver_protocol: LlamaCppDriverProtocol {
+                kind: String::new(),
+                backend_init_symbol: String::new(),
+                model_default_params_symbol: String::new(),
+                context_default_params_symbol: String::new(),
+                ffi_module: String::new(),
+                ffi_shim_c: String::new(),
+            },
+        };
+        driver.validate(&context)?;
+        context.driver_protocol = driver.protocol(&context);
+        Ok(context)
     }
 }
 
 pub struct LlamaCppAdapterContext {
     pub source_layout: LlamaCppSourceLayout,
     pub build_integration: LlamaCppBuildIntegration,
+    pub driver_protocol: LlamaCppDriverProtocol,
 }
 
 impl LlamaCppAdapterContext {
     pub fn summary(&self) -> String {
         format!(
-            "{} {}",
+            "{} {} {}",
             self.source_layout.summary(),
-            self.build_integration.summary()
+            self.build_integration.summary(),
+            self.driver_protocol.summary()
         )
     }
 }
