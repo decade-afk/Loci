@@ -1,5 +1,9 @@
 use crate::error::{LociError, Result};
-use super::driver::{discover_driver, LlamaCppDriver, LlamaCppDriverProtocol, LlamaCppLifecycleContract};
+use super::driver::{
+    discover_driver, LlamaCppCreateContextPhase, LlamaCppDriver, LlamaCppDriverPhases,
+    LlamaCppDriverProtocol, LlamaCppInitPhase, LlamaCppLifecycleContract,
+    LlamaCppLoadModelPhase,
+};
 use std::path::PathBuf;
 
 pub trait LlamaCppAdapter: Send + Sync {
@@ -46,6 +50,22 @@ impl LlamaCppAdapter for StubLlamaCppAdapter {
                 context_default_params_symbol: String::new(),
                 ffi_module: String::new(),
                 ffi_shim_c: String::new(),
+                phases: LlamaCppDriverPhases {
+                    init: LlamaCppInitPhase {
+                        function: String::new(),
+                        companion_free_function: None,
+                    },
+                    load_model: LlamaCppLoadModelPhase {
+                        model_type: String::new(),
+                        function: String::new(),
+                        params_function: String::new(),
+                    },
+                    create_context: LlamaCppCreateContextPhase {
+                        context_type: String::new(),
+                        function: String::new(),
+                        params_function: String::new(),
+                    },
+                },
                 lifecycle: LlamaCppLifecycleContract {
                     model_type: String::new(),
                     context_type: String::new(),

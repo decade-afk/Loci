@@ -17,7 +17,35 @@ pub struct LlamaCppDriverProtocol {
     pub context_default_params_symbol: String,
     pub ffi_module: String,
     pub ffi_shim_c: String,
+    pub phases: LlamaCppDriverPhases,
     pub lifecycle: LlamaCppLifecycleContract,
+}
+
+#[derive(Debug, Clone)]
+pub struct LlamaCppDriverPhases {
+    pub init: LlamaCppInitPhase,
+    pub load_model: LlamaCppLoadModelPhase,
+    pub create_context: LlamaCppCreateContextPhase,
+}
+
+#[derive(Debug, Clone)]
+pub struct LlamaCppInitPhase {
+    pub function: String,
+    pub companion_free_function: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LlamaCppLoadModelPhase {
+    pub model_type: String,
+    pub function: String,
+    pub params_function: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LlamaCppCreateContextPhase {
+    pub context_type: String,
+    pub function: String,
+    pub params_function: String,
 }
 
 #[derive(Debug, Clone)]
@@ -37,14 +65,56 @@ pub struct LlamaCppLifecycleContract {
 impl LlamaCppDriverProtocol {
     pub fn summary(&self) -> String {
         format!(
-            "driver[kind={}, backend_init={}, model_default_params={}, context_default_params={}, ffi={}, shim={}, lifecycle={}]",
+            "driver[kind={}, backend_init={}, model_default_params={}, context_default_params={}, ffi={}, shim={}, phases={}, lifecycle={}]",
             self.kind,
             self.backend_init_symbol,
             self.model_default_params_symbol,
             self.context_default_params_symbol,
             self.ffi_module,
             self.ffi_shim_c,
+            self.phases.summary(),
             self.lifecycle.summary()
+        )
+    }
+}
+
+impl LlamaCppDriverPhases {
+    pub fn summary(&self) -> String {
+        format!(
+            "phases[init={}, load_model={}, create_context={}]",
+            self.init.summary(),
+            self.load_model.summary(),
+            self.create_context.summary()
+        )
+    }
+}
+
+impl LlamaCppInitPhase {
+    pub fn summary(&self) -> String {
+        format!(
+            "init(function={}, free={})",
+            self.function,
+            self.companion_free_function
+                .clone()
+                .unwrap_or_else(|| "none".to_string())
+        )
+    }
+}
+
+impl LlamaCppLoadModelPhase {
+    pub fn summary(&self) -> String {
+        format!(
+            "load_model(type={}, function={}, params={})",
+            self.model_type, self.function, self.params_function
+        )
+    }
+}
+
+impl LlamaCppCreateContextPhase {
+    pub fn summary(&self) -> String {
+        format!(
+            "create_context(type={}, function={}, params={})",
+            self.context_type, self.function, self.params_function
         )
     }
 }
@@ -137,6 +207,7 @@ fn protocol_from_build_integration(
         context_default_params_symbol: "context_default_params".to_string(),
         ffi_module: integration.ffi_module.display().to_string(),
         ffi_shim_c: integration.ffi_shim_c.display().to_string(),
+        phases: phases_from_ffi_source(&ffi_source),
         lifecycle: lifecycle_from_ffi_source(&ffi_source),
     }
 }
@@ -184,5 +255,56 @@ fn lifecycle_from_ffi_source(ffi_source: &str) -> LlamaCppLifecycleContract {
         supports_decode: ffi_source.contains("pub fn decode("),
         supports_logits: ffi_source.contains("pub fn get_logits_ith("),
         supports_kv_cache_clear: ffi_source.contains("pub fn kv_cache_clear("),
+    }
+}
+
+fn phases_from_ffi_source(ffi_source: &str) -> LlamaCppDriverPhases {
+    LlamaCppDriverPhases {
+        init: LlamaCppInitPhase {
+            function: if ffi_source.contains("pub fn backend_init()") {
+                "backend_init".to_string()
+            } else {
+                "missing".to_string()
+            },
+            companion_free_function: if ffi_source.contains("pub fn backend_free()") {
+                Some("backend_free".to_string())
+            } else {
+                None
+            },
+        },
+        load_model: LlamaCppLoadModelPhase {
+            model_type: if ffi_source.contains("pub struct LlamaModel") {
+                "LlamaModel".to_string()
+            } else {
+                "unknown".to_string()
+            },
+            function: if ffi_source.contains("pub fn from_file(") {
+                "LlamaModel::from_file".to_string()
+            } else {
+                "missing".to_string()
+            },
+            params_function: if ffi_source.contains("pub fn model_default_params()") {
+                "model_default_params".to_string()
+            } else {
+                "missing".to_string()
+            },
+        },
+        create_context: LlamaCppCreateContextPhase {
+            context_type: if ffi_source.contains("pub struct LlamaContext") {
+                "LlamaContext".to_string()
+            } else {
+                "unknown".to_string()
+            },
+            function: if ffi_source.contains("pub fn new(model: &LlamaModel") {
+                "LlamaContext::new".to_string()
+            } else {
+                "missing".to_string()
+            },
+            params_function: if ffi_source.contains("pub fn context_default_params()") {
+                "context_default_params".to_string()
+            } else {
+                "missing".to_string()
+            },
+        },
     }
 }

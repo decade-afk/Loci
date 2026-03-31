@@ -267,6 +267,19 @@ mod tests {
         let context = adapter.build_context().expect("context");
         assert_eq!(context.driver_protocol.kind, "native");
         assert_eq!(context.driver_protocol.backend_init_symbol, "backend_init");
+        assert_eq!(context.driver_protocol.phases.init.function, "backend_init");
+        assert_eq!(
+            context.driver_protocol.phases.init.companion_free_function.as_deref(),
+            Some("backend_free")
+        );
+        assert_eq!(
+            context.driver_protocol.phases.load_model.function,
+            "LlamaModel::from_file"
+        );
+        assert_eq!(
+            context.driver_protocol.phases.create_context.function,
+            "LlamaContext::new"
+        );
         assert!(context.driver_protocol.ffi_module.ends_with("src\\ffi.rs"));
         assert_eq!(context.driver_protocol.lifecycle.model_type, "LlamaModel");
         assert_eq!(context.driver_protocol.lifecycle.context_type, "LlamaContext");
