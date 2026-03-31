@@ -4,6 +4,7 @@ use crate::engine::types::{GenerationParams, ModelInfo};
 use crate::error::{LociError, Result};
 use crate::model::{ModelConfig, ModelLoadStrategy};
 use crate::plugin::RegisteredPlugin;
+use loci_plugin_api::{CoreComponent, PlatformTrack};
 use std::path::{Path, PathBuf};
 
 pub struct InferenceEngine {
@@ -34,6 +35,56 @@ impl InferenceEngine {
 
     pub fn plugin_count(&self) -> usize {
         self.registry.plugin_manager().list().len()
+    }
+
+    pub fn plugin_names(&self) -> Vec<String> {
+        self.registry
+            .plugin_manager()
+            .list()
+            .iter()
+            .map(|plugin| plugin.manifest.name.clone())
+            .collect()
+    }
+
+    pub fn plugins_for_track(&self, track: PlatformTrack) -> Vec<String> {
+        self.registry
+            .plugin_manager()
+            .plugins_for_track(track)
+            .into_iter()
+            .map(|plugin| plugin.manifest.name.clone())
+            .collect()
+    }
+
+    pub fn plugins_for_model_provider(&self, provider: &str) -> Vec<String> {
+        self.registry
+            .plugin_manager()
+            .plugins_for_model_provider(provider)
+            .into_iter()
+            .map(|plugin| plugin.manifest.name.clone())
+            .collect()
+    }
+
+    pub fn plugins_for_core_component(&self, component: CoreComponent) -> Vec<String> {
+        self.registry
+            .plugin_manager()
+            .plugins_for_core_component(component)
+            .into_iter()
+            .map(|plugin| plugin.manifest.name.clone())
+            .collect()
+    }
+
+    pub fn activate_core_rewriter(
+        &mut self,
+        component: CoreComponent,
+        plugin_name: &str,
+    ) -> Result<()> {
+        self.registry
+            .activate_core_rewriter(component, plugin_name)
+            .map_err(LociError::from)
+    }
+
+    pub fn active_core_rewriter(&self, component: CoreComponent) -> Option<&str> {
+        self.registry.active_core_rewriter(component)
     }
 
     pub fn load_model<P: AsRef<Path>>(
@@ -126,5 +177,63 @@ impl InferenceEngine {
             n_ctx_train: metadata.n_ctx_train,
             n_embd: metadata.n_embd,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::DefaultCoreRegistry;
+    use loci_plugin_api::{ContributionPoints, CoreRewriters, PluginManifest};
+
+    #[test]
+    fn engine_exposes_plugin_indexes_and_core_rewriter_activation() {
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+        };
+
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "agent-workflow".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                target_tracks: vec![PlatformTrack::AiAgent],
+                contributes: ContributionPoints {
+                    model_providers: vec!["rag-local".to_string()],
+                    ..Default::default()
+                },
+                core_rewriters: CoreRewriters {
+                    workflow: true,
+                    ..Default::default()
+                },
+            }))
+            .expect("register");
+
+        assert_eq!(engine.plugin_names(), vec!["agent-workflow".to_string()]);
+        assert_eq!(
+            engine.plugins_for_track(PlatformTrack::AiAgent),
+            vec!["agent-workflow".to_string()]
+        );
+        assert_eq!(
+            engine.plugins_for_model_provider("rag-local"),
+            vec!["agent-workflow".to_string()]
+        );
+        assert_eq!(
+            engine.plugins_for_core_component(CoreComponent::Workflow),
+            vec!["agent-workflow".to_string()]
+        );
+
+        engine
+            .activate_core_rewriter(CoreComponent::Workflow, "agent-workflow")
+            .expect("activate");
+        assert_eq!(
+            engine.active_core_rewriter(CoreComponent::Workflow),
+            Some("agent-workflow")
+        );
     }
 }
