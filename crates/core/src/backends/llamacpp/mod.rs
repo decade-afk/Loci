@@ -130,7 +130,7 @@ mod tests {
     use super::*;
     use crate::backend::BackendParams;
     use crate::backends::llamacpp::adapter::{LlamaCppBuildIntegration, LlamaCppSourceLayout};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn load_plan_requires_gguf_extension() {
@@ -317,5 +317,65 @@ mod tests {
         let backend = driver.init_backend(&context).expect("backend init");
         assert_eq!(backend.kind(), "native");
         assert!(backend.is_native());
+    }
+
+    fn llama_test_model_path() -> PathBuf {
+        std::env::var_os("LOCI_LLAMA_TEST_MODEL")
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+            .expect("set LOCI_LLAMA_TEST_MODEL to a decoder gguf model file")
+    }
+
+    #[test]
+    #[ignore = "requires LOCI_LLAMA_TEST_MODEL=/path/to/decoder-model.gguf"]
+    fn real_llama_runtime_smoke_test() {
+        let model_path = llama_test_model_path();
+        let mut backend = LlamaCppBackend::new();
+        backend.init().expect("backend init");
+
+        let mut model = backend
+            .load_model(
+                &model_path,
+                BackendParams {
+                    use_gpu: false,
+                    n_gpu_layers: 0,
+                    options: vec![
+                        ("n_ctx".to_string(), "512".to_string()),
+                        ("n_batch".to_string(), "64".to_string()),
+                    ],
+                    ..Default::default()
+                },
+            )
+            .expect("load test model");
+
+        let metadata = model.metadata();
+        assert!(metadata.n_vocab > 0);
+        assert!(metadata.n_ctx_train > 0);
+
+        let first = model
+            .infer_text(
+                "Reply with one short greeting.",
+                &InferenceParams {
+                    n_ctx: 512,
+                    n_batch: 64,
+                    max_tokens: 8,
+                    ..Default::default()
+                },
+            )
+            .expect("first inference");
+        let second = model
+            .infer_text(
+                "Reply with one short word.",
+                &InferenceParams {
+                    n_ctx: 768,
+                    n_batch: 32,
+                    max_tokens: 8,
+                    ..Default::default()
+                },
+            )
+            .expect("second inference with recreated context");
+
+        assert!(!first.contains("llama.cpp-migrating:"));
+        assert!(!second.contains("llama.cpp-migrating:"));
     }
 }
