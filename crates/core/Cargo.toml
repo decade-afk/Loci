@@ -14,3 +14,8 @@ loci-plugin-api = { path = "../plugin-api" }
 anyhow.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+[build-dependencies]
+bindgen = "0.72"
+cc = "1.1"
+cmake = "0.1"

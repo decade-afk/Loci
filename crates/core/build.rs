@@ -1,0 +1,136 @@
+use std::env;
+use std::path::{Path, PathBuf};
+
+fn main() {
+    if env::var_os("CARGO_FEATURE_LLAMA").is_none() {
+        return;
+    }
+
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("workspace root")
+        .to_path_buf();
+    let llama_cpp_path = workspace_root.join("deps").join("llama.cpp");
+    let ffi_shim = manifest_dir.join("src").join("backends").join("llamacpp").join("ffi_shim.c");
+
+    println!("cargo:rerun-if-changed={}", llama_cpp_path.display());
+    println!("cargo:rerun-if-changed={}", ffi_shim.display());
+    println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
+
+    let target = env::var("TARGET").unwrap_or_default();
+    configure_bindgen_environment(&target);
+
+    let mut config = cmake::Config::new(&llama_cpp_path);
+    config
+        .define("BUILD_SHARED_LIBS", "OFF")
+        .define("LLAMA_BUILD_TESTS", "OFF")
+        .define("LLAMA_BUILD_EXAMPLES", "OFF")
+        .define("LLAMA_BUILD_SERVER", "OFF")
+        .define("LLAMA_BUILD_TOOLS", "OFF")
+        .define("LLAMA_CURL", "OFF")
+        .define("GGML_CCACHE", "OFF")
+        .define("GGML_NATIVE", "OFF")
+        .define("GGML_OPENMP", "OFF");
+
+    if target.contains("windows-gnu") {
+        config.cxxflag("-Wa,-mbig-obj");
+        config.cflag("-Wa,-mbig-obj");
+    } else if target.contains("windows-msvc") {
+        config.cxxflag("/bigobj");
+        config.cflag("/bigobj");
+    }
+
+    let dst = config.build();
+
+    cc::Build::new()
+        .file(&ffi_shim)
+        .include(llama_cpp_path.join("include"))
+        .include(llama_cpp_path.join("ggml").join("include"))
+        .compile("loci_core_ffi_shim");
+
+    for lib_dir in [dst.join("lib"), dst.join("lib64")] {
+        if lib_dir.exists() {
+            println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        }
+    }
+
+    link_libraries(&target);
+    link_system_libraries(&target);
+
+    let bindings = bindgen::Builder::default()
+        .header(llama_cpp_path.join("include").join("llama.h").display().to_string())
+        .clang_arg(format!("-I{}", llama_cpp_path.join("include").display()))
+        .clang_arg(format!("-I{}", llama_cpp_path.join("ggml").join("include").display()))
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .generate()
+        .expect("Unable to generate llama.cpp bindings");
+
+    bindings
+        .write_to_file(Path::new(&env::var("OUT_DIR").expect("out dir")).join("llama_bindings.rs"))
+        .expect("Couldn't write llama bindings");
+}
+
+fn configure_bindgen_environment(target: &str) {
+    if env::var_os("LIBCLANG_PATH").is_some() {
+        return;
+    }
+
+    if let Some(path) = resolve_libclang_dir(target) {
+        println!("cargo:warning=Using detected libclang from {}", path.display());
+        env::set_var("LIBCLANG_PATH", path);
+    }
+}
+
+fn resolve_libclang_dir(target: &str) -> Option<PathBuf> {
+    if !target.contains("windows") {
+        return None;
+    }
+
+    let candidates = [
+        PathBuf::from(r"D:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\Llvm\x64\bin"),
+        PathBuf::from(r"D:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\Llvm\bin"),
+        PathBuf::from(r"D:\Code\LocalTrans\tools\llvm-portable\clang+llvm-22.1.1-x86_64-pc-windows-msvc\bin"),
+        PathBuf::from(r"C:\Users\o-dream\.conda\envs\localtrans\Lib\site-packages\clang\native"),
+        PathBuf::from(r"C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8a15007674ba9201\tools\llvm-portable\clang+llvm-22.1.1-x86_64-pc-windows-msvc\bin"),
+    ];
+
+    candidates
+        .into_iter()
+        .find(|dir| dir.join("libclang.dll").exists() || dir.join("clang.dll").exists())
+}
+
+fn link_libraries(target: &str) {
+    if target.contains("windows-gnu") {
+        println!("cargo:rustc-link-lib=static:+verbatim=libllama.a");
+        println!("cargo:rustc-link-lib=static:+verbatim=ggml.a");
+        println!("cargo:rustc-link-lib=static:+verbatim=ggml-cpu.a");
+        println!("cargo:rustc-link-lib=static:+verbatim=ggml-base.a");
+    } else {
+        println!("cargo:rustc-link-lib=static=llama");
+        println!("cargo:rustc-link-lib=static=ggml");
+        println!("cargo:rustc-link-lib=static=ggml-cpu");
+        println!("cargo:rustc-link-lib=static=ggml-base");
+    }
+}
+
+fn link_system_libraries(target: &str) {
+    if target.contains("windows-gnu") {
+        println!("cargo:rustc-link-lib=dylib=stdc++");
+        println!("cargo:rustc-link-lib=dylib=advapi32");
+    } else if target.contains("windows-msvc") {
+        println!("cargo:rustc-link-lib=dylib=advapi32");
+    } else if target.contains("apple") {
+        println!("cargo:rustc-link-lib=dylib=c++");
+        println!("cargo:rustc-link-lib=dylib=m");
+    } else {
+        println!("cargo:rustc-link-lib=dylib=stdc++");
+        println!("cargo:rustc-link-lib=dylib=m");
+        println!("cargo:rustc-link-lib=dylib=dl");
+        println!("cargo:rustc-link-lib=dylib=pthread");
+        if target.contains("linux") {
+            println!("cargo:rustc-link-lib=dylib=atomic");
+        }
+    }
+}

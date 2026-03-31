@@ -1,9 +1,9 @@
-use crate::error::{LociError, Result};
 use super::driver::{
     discover_driver, LlamaCppCreateContextPhase, LlamaCppDriver, LlamaCppDriverPhases,
     LlamaCppDriverProtocol, LlamaCppInitPhase, LlamaCppLifecycleContract,
     LlamaCppLoadModelPhase,
 };
+use crate::error::{LociError, Result};
 use std::path::PathBuf;
 
 pub trait LlamaCppAdapter: Send + Sync {
@@ -112,10 +112,7 @@ pub struct LlamaCppSourceLayout {
 
 impl LlamaCppSourceLayout {
     pub fn discover() -> Result<Self> {
-        let repo_root = workspace_root()?
-            .join("deps")
-            .join("llama.cpp");
-
+        let repo_root = workspace_root()?.join("deps").join("llama.cpp");
         let include_dir = repo_root.join("include");
         let ggml_include_dir = repo_root.join("ggml").join("include");
         let llama_header = include_dir.join("llama.h");
@@ -149,7 +146,7 @@ impl LlamaCppSourceLayout {
 }
 
 pub struct LlamaCppBuildIntegration {
-    pub workspace_root: PathBuf,
+    pub crate_root: PathBuf,
     pub build_script: PathBuf,
     pub ffi_module: PathBuf,
     pub ffi_shim_c: PathBuf,
@@ -157,10 +154,10 @@ pub struct LlamaCppBuildIntegration {
 
 impl LlamaCppBuildIntegration {
     pub fn discover() -> Result<Self> {
-        let workspace_root = workspace_root()?;
-        let build_script = workspace_root.join("build.rs");
-        let ffi_module = workspace_root.join("src").join("ffi.rs");
-        let ffi_shim_c = workspace_root.join("src").join("ffi_shim.c");
+        let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let build_script = crate_root.join("build.rs");
+        let ffi_module = crate_root.join("src").join("backends").join("llamacpp").join("ffi.rs");
+        let ffi_shim_c = crate_root.join("src").join("backends").join("llamacpp").join("ffi_shim.c");
 
         for required in [&build_script, &ffi_module, &ffi_shim_c] {
             if !required.exists() {
@@ -172,7 +169,7 @@ impl LlamaCppBuildIntegration {
         }
 
         Ok(Self {
-            workspace_root,
+            crate_root,
             build_script,
             ffi_module,
             ffi_shim_c,
@@ -181,8 +178,8 @@ impl LlamaCppBuildIntegration {
 
     pub fn summary(&self) -> String {
         format!(
-            "build[root={}, script={}, ffi={}, shim={}]",
-            self.workspace_root.display(),
+            "build[crate_root={}, script={}, ffi={}, shim={}]",
+            self.crate_root.display(),
             self.build_script.display(),
             self.ffi_module.display(),
             self.ffi_shim_c.display()
