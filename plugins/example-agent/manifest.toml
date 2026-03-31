@@ -1,0 +1,12 @@
+name = "example-agent"
+version = "0.1.0"
+api_version = "1.0"
+target_tracks = ["ai_agent"]
+
+[contributes]
+workflows = ["chat-workflow"]
+custom_nodes = ["tool-call"]
+commands = ["agent:start"]
+
+[core_rewriters]
+workflow = true

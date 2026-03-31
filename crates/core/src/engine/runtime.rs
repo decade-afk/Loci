@@ -3,7 +3,7 @@ use crate::core::CoreRegistry;
 use crate::engine::types::{GenerationParams, ModelInfo};
 use crate::error::{LociError, Result};
 use crate::model::{ModelConfig, ModelLoadStrategy};
-use crate::plugin::RegisteredPlugin;
+use crate::plugin::{discover_plugin_manifest_files, load_plugin_manifest_file, RegisteredPlugin};
 use loci_plugin_api::{CoreComponent, PlatformTrack};
 use std::path::{Path, PathBuf};
 
@@ -87,6 +87,21 @@ impl InferenceEngine {
         self.registry.active_core_rewriter(component)
     }
 
+    pub fn load_plugin_manifest_file<P: AsRef<Path>>(&mut self, manifest_path: P) -> Result<()> {
+        let plugin = load_plugin_manifest_file(manifest_path).map_err(LociError::from)?;
+        self.register_plugin(plugin)
+    }
+
+    pub fn load_plugins_from_dir<P: AsRef<Path>>(&mut self, plugin_dir: P) -> Result<usize> {
+        let manifests = discover_plugin_manifest_files(plugin_dir).map_err(LociError::from)?;
+        let mut loaded = 0usize;
+        for manifest in manifests {
+            self.load_plugin_manifest_file(&manifest)?;
+            loaded += 1;
+        }
+        Ok(loaded)
+    }
+
     pub fn load_model<P: AsRef<Path>>(
         &mut self,
         backend_name: &str,
@@ -94,9 +109,9 @@ impl InferenceEngine {
         backend_params: BackendParams,
     ) -> Result<()> {
         let model_path = model_path.as_ref().to_path_buf();
-        let model =
-            self.backend_registry
-                .load_model(backend_name, &model_path, backend_params)?;
+        let model = self
+            .backend_registry
+            .load_model(backend_name, &model_path, backend_params)?;
         self.active_backend = Some(backend_name.to_string());
         self.model = Some(model);
         self.model_path = Some(model_path);
@@ -185,6 +200,17 @@ mod tests {
     use super::*;
     use crate::core::DefaultCoreRegistry;
     use loci_plugin_api::{ContributionPoints, CoreRewriters, PluginManifest};
+    use std::fs;
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        path.push(format!("loci-engine-test-{name}-{nanos}"));
+        path
+    }
 
     #[test]
     fn engine_exposes_plugin_indexes_and_core_rewriter_activation() {
@@ -235,5 +261,46 @@ mod tests {
             engine.active_core_rewriter(CoreComponent::Workflow),
             Some("agent-workflow")
         );
+    }
+
+    #[test]
+    fn engine_loads_plugins_from_manifest_directory() {
+        let dir = unique_temp_dir("plugins");
+        fs::create_dir_all(dir.join("agent-plugin")).expect("mkdir");
+        fs::write(
+            dir.join("agent-plugin").join("manifest.toml"),
+            r#"
+name = "agent-plugin"
+version = "1.0.0"
+api_version = "1.0"
+target_tracks = ["ai_agent"]
+
+[contributes]
+model_providers = ["rag-local"]
+
+[core_rewriters]
+workflow = true
+"#,
+        )
+        .expect("write manifest");
+
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+        };
+
+        let loaded = engine.load_plugins_from_dir(&dir).expect("load plugins");
+        assert_eq!(loaded, 1);
+        assert_eq!(engine.plugin_count(), 1);
+        assert_eq!(
+            engine.plugins_for_track(PlatformTrack::AiAgent),
+            vec!["agent-plugin".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
