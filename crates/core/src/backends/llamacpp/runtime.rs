@@ -26,13 +26,19 @@ pub struct LlamaCppRuntimeState {
 impl LlamaCppExecutionConfig {
     pub fn from_inference_params(params: &InferenceParams) -> Result<Self> {
         if params.n_ctx == 0 {
-            return Err(LociError::ConfigError("llama.cpp execution requires n_ctx > 0".to_string()));
+            return Err(LociError::ConfigError(
+                "llama.cpp execution requires n_ctx > 0".to_string(),
+            ));
         }
         if params.n_batch == 0 {
-            return Err(LociError::ConfigError("llama.cpp execution requires n_batch > 0".to_string()));
+            return Err(LociError::ConfigError(
+                "llama.cpp execution requires n_batch > 0".to_string(),
+            ));
         }
         if params.max_tokens == 0 {
-            return Err(LociError::ConfigError("llama.cpp execution requires max_tokens > 0".to_string()));
+            return Err(LociError::ConfigError(
+                "llama.cpp execution requires max_tokens > 0".to_string(),
+            ));
         }
 
         Ok(Self {
@@ -48,9 +54,15 @@ impl LlamaCppExecutionConfig {
         })
     }
 
-    pub fn n_ctx(&self) -> u32 { self.n_ctx }
-    pub fn n_batch(&self) -> u32 { self.n_batch }
-    pub fn n_threads(&self) -> Option<u32> { self.n_threads }
+    pub fn n_ctx(&self) -> u32 {
+        self.n_ctx
+    }
+    pub fn n_batch(&self) -> u32 {
+        self.n_batch
+    }
+    pub fn n_threads(&self) -> Option<u32> {
+        self.n_threads
+    }
 }
 
 impl LlamaCppRuntimeState {
@@ -61,7 +73,13 @@ impl LlamaCppRuntimeState {
         kv_offload: bool,
         op_offload: bool,
     ) -> Self {
-        Self { current_n_ctx, current_n_batch, current_n_threads, kv_offload, op_offload }
+        Self {
+            current_n_ctx,
+            current_n_batch,
+            current_n_threads,
+            kv_offload,
+            op_offload,
+        }
     }
 
     pub fn reconcile(&mut self, config: &LlamaCppExecutionConfig) {
@@ -70,23 +88,32 @@ impl LlamaCppRuntimeState {
         self.current_n_threads = config.n_threads();
     }
 
+    pub fn current_n_ctx(&self) -> u32 {
+        self.current_n_ctx
+    }
+    pub fn current_n_batch(&self) -> u32 {
+        self.current_n_batch
+    }
+    pub fn current_n_threads(&self) -> Option<u32> {
+        self.current_n_threads
+    }
+    pub fn kv_offload(&self) -> bool {
+        self.kv_offload
+    }
+    pub fn op_offload(&self) -> bool {
+        self.op_offload
+    }
+
     pub fn summary(&self) -> String {
         format!(
             "runtime[n_ctx={}, n_batch={}, n_threads={}, kv_offload={}, op_offload={}]",
             self.current_n_ctx,
             self.current_n_batch,
-            self.current_n_threads.map(|value| value.to_string()).unwrap_or_else(|| "auto".to_string()),
+            self.current_n_threads
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "auto".to_string()),
             self.kv_offload,
             self.op_offload
         )
     }
-
-    #[cfg(test)]
-    pub fn current_n_ctx(&self) -> u32 { self.current_n_ctx }
-    #[cfg(test)]
-    pub fn current_n_batch(&self) -> u32 { self.current_n_batch }
-    #[cfg(test)]
-    pub fn current_n_threads(&self) -> Option<u32> { self.current_n_threads }
-    #[cfg(test)]
-    pub fn kv_offload(&self) -> bool { self.kv_offload }
 }
