@@ -83,6 +83,10 @@ impl RegisteredPlugin {
     pub fn declares_core_rewriter(&self, component: CoreComponent) -> bool {
         self.manifest.declares_core_rewriter(component)
     }
+
+    pub fn declares_inference_sampling_runtime(&self) -> bool {
+        self.declares_core_rewriter(CoreComponent::Inference)
+    }
 }
 
 pub fn load_plugin_manifest_file(path: impl AsRef<Path>) -> Result<RegisteredPlugin> {
@@ -163,6 +167,17 @@ impl crate::core::PluginManager for InMemoryPluginManager {
         plugin_name: &str,
         hook: Arc<dyn SamplingHook>,
     ) -> Result<()> {
+        let plugin = self
+            .get(plugin_name)
+            .ok_or_else(|| anyhow::anyhow!("plugin not registered: {plugin_name}"))?;
+
+        if !plugin.declares_inference_sampling_runtime() {
+            bail!(
+                "plugin `{}` does not declare inference core rewriter capability",
+                plugin.manifest.name
+            );
+        }
+
         if !self.plugin_index.contains_key(plugin_name) {
             bail!("plugin not registered: {plugin_name}");
         }
@@ -209,15 +224,14 @@ impl crate::core::PluginManager for InMemoryPluginManager {
             .collect()
     }
 
-    fn sampling_runtime(&self) -> PluginSamplingRuntime {
-        let hooks = self
-            .plugins
-            .iter()
-            .filter_map(|plugin| {
+    fn sampling_runtime_for_inference(&self, active_plugin_name: Option<&str>) -> PluginSamplingRuntime {
+        let hooks = active_plugin_name
+            .into_iter()
+            .filter_map(|plugin_name| {
                 self.sampling_hooks
-                    .get(&plugin.manifest.name)
+                    .get(plugin_name)
                     .map(|hook| RegisteredSamplingHook {
-                        plugin_name: plugin.manifest.name.clone(),
+                        plugin_name: plugin_name.to_string(),
                         hook: Arc::clone(hook),
                     })
             })
@@ -347,14 +361,16 @@ api_version = "1.0"
     #[test]
     fn manager_builds_sampling_runtime_from_registered_hooks() {
         let mut manager = InMemoryPluginManager::default();
+        let mut manifest = plugin_manifest("sampler-hook");
+        manifest.core_rewriters.inference = true;
         manager
-            .register(RegisteredPlugin::new(plugin_manifest("sampler-hook")))
+            .register(RegisteredPlugin::new(manifest))
             .expect("register plugin");
         manager
             .register_sampling_hook("sampler-hook", Arc::new(BiasHook))
             .expect("register hook");
 
-        let runtime = manager.sampling_runtime();
+        let runtime = manager.sampling_runtime_for_inference(Some("sampler-hook"));
         assert_eq!(runtime.hook_count(), 1);
         assert_eq!(runtime.plugin_names(), vec!["sampler-hook"]);
 
@@ -375,5 +391,37 @@ api_version = "1.0"
             .expect_err("should reject");
 
         assert!(err.to_string().contains("plugin not registered"));
+    }
+
+    #[test]
+    fn manager_rejects_sampling_hook_without_inference_declaration() {
+        let mut manager = InMemoryPluginManager::default();
+        manager
+            .register(RegisteredPlugin::new(plugin_manifest("plain-plugin")))
+            .expect("register plugin");
+
+        let err = manager
+            .register_sampling_hook("plain-plugin", Arc::new(BiasHook))
+            .expect_err("should reject");
+
+        assert!(err
+            .to_string()
+            .contains("does not declare inference core rewriter capability"));
+    }
+
+    #[test]
+    fn manager_sampling_runtime_is_empty_without_active_inference_plugin() {
+        let mut manager = InMemoryPluginManager::default();
+        let mut manifest = plugin_manifest("sampler-hook");
+        manifest.core_rewriters.inference = true;
+        manager
+            .register(RegisteredPlugin::new(manifest))
+            .expect("register plugin");
+        manager
+            .register_sampling_hook("sampler-hook", Arc::new(BiasHook))
+            .expect("register hook");
+
+        let runtime = manager.sampling_runtime_for_inference(None);
+        assert_eq!(runtime.hook_count(), 0);
     }
 }

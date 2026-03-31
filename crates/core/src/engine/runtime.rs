@@ -56,7 +56,9 @@ impl InferenceEngine {
     pub fn sampling_hook_count(&self) -> usize {
         self.registry
             .plugin_manager()
-            .sampling_runtime()
+            .sampling_runtime_for_inference(
+                self.registry.active_core_rewriter(CoreComponent::Inference),
+            )
             .hook_count()
     }
 
@@ -103,7 +105,8 @@ impl InferenceEngine {
     ) -> Result<()> {
         self.registry
             .activate_core_rewriter(component, plugin_name)
-            .map_err(LociError::from)
+            .map_err(LociError::from)?;
+        self.refresh_model_sampling_runtime()
     }
 
     pub fn active_core_rewriter(&self, component: CoreComponent) -> Option<&str> {
@@ -190,7 +193,12 @@ impl InferenceEngine {
 
     fn refresh_model_sampling_runtime(&mut self) -> Result<()> {
         if let Some(model) = self.model.as_mut() {
-            let runtime = self.registry.plugin_manager().sampling_runtime();
+            let runtime = self
+                .registry
+                .plugin_manager()
+                .sampling_runtime_for_inference(
+                    self.registry.active_core_rewriter(CoreComponent::Inference),
+                );
             model.attach_sampling_runtime(runtime)?;
         }
         Ok(())
@@ -352,7 +360,7 @@ workflow = true
     }
 
     #[test]
-    fn engine_propagates_sampling_runtime_into_loaded_model() {
+    fn engine_only_activates_sampling_runtime_after_inference_rewriter_activation() {
         let mut engine = InferenceEngine {
             registry: Box::new(DefaultCoreRegistry::default()),
             backend_registry: BackendRegistry::with_builtin_backends(),
@@ -369,7 +377,10 @@ workflow = true
                 api_version: "1.0".to_string(),
                 target_tracks: vec![PlatformTrack::AiInfra],
                 contributes: ContributionPoints::default(),
-                core_rewriters: CoreRewriters::default(),
+                core_rewriters: CoreRewriters {
+                    inference: true,
+                    ..Default::default()
+                },
             }))
             .expect("register");
         engine
@@ -378,6 +389,16 @@ workflow = true
         engine
             .register_sampling_hook("hooked-plugin", Arc::new(ForceTokenHook))
             .expect("register hook");
+
+        let inactive_output = engine
+            .generate("hello", &InferenceParams::default())
+            .expect("generate");
+        assert!(inactive_output.contains("hooks=0"));
+        assert_eq!(engine.sampling_hook_count(), 0);
+
+        engine
+            .activate_core_rewriter(CoreComponent::Inference, "hooked-plugin")
+            .expect("activate inference rewriter");
 
         let output = engine
             .generate("hello", &InferenceParams::default())

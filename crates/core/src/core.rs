@@ -36,7 +36,10 @@ pub trait PluginManager: Send + Sync {
     fn plugins_for_track(&self, track: PlatformTrack) -> Vec<&RegisteredPlugin>;
     fn plugins_for_model_provider(&self, provider: &str) -> Vec<&RegisteredPlugin>;
     fn plugins_for_core_component(&self, component: CoreComponent) -> Vec<&RegisteredPlugin>;
-    fn sampling_runtime(&self) -> crate::plugin::PluginSamplingRuntime;
+    fn sampling_runtime_for_inference(
+        &self,
+        active_plugin_name: Option<&str>,
+    ) -> crate::plugin::PluginSamplingRuntime;
 }
 
 pub trait CoreRegistry: Send + Sync {
