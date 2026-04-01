@@ -111,6 +111,7 @@ impl ManagementService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::BackendParams;
     use crate::plugin::registered_legacy_text_plugin_for_tests;
     use crate::{
         CoreRewriters, InferenceEngine, PlatformTrack, PluginBootstrap, PluginCompatibility,
@@ -154,6 +155,20 @@ mod tests {
                 &["pre_generate", "post_generate"],
             ))
             .expect("register legacy text plugin");
+        ManagementService::new(engine)
+    }
+
+    fn legacy_sampling_service() -> ManagementService {
+        let mut engine = InferenceEngine::builder().build().expect("build engine");
+        engine
+            .register_plugin(registered_legacy_text_plugin_for_tests(
+                "legacy-sampler",
+                &["transform_logits", "post_sample"],
+            ))
+            .expect("register legacy sampling plugin");
+        engine
+            .load_model("mock", "demo.gguf", BackendParams::default())
+            .expect("load model");
         ManagementService::new(engine)
     }
 
@@ -225,5 +240,31 @@ mod tests {
             .expect("deactivate legacy text");
         assert_eq!(inactive.status, "deactivated");
         assert!(inactive.active_legacy_text.is_empty());
+    }
+
+    #[test]
+    fn service_reports_legacy_sampling_materialization_after_activation() {
+        let service = legacy_sampling_service();
+        let before = service
+            .plugin_detail("legacy-sampler")
+            .expect("detail query")
+            .expect("plugin detail");
+        assert!(!before.status.has_sampling_hook);
+        assert!(before.active_core_rewriters.is_empty());
+
+        let activation = service
+            .activate_inference_plugin("legacy-sampler")
+            .expect("activate legacy sampler");
+        assert_eq!(
+            activation.active_inference.as_deref(),
+            Some("legacy-sampler")
+        );
+
+        let after = service
+            .plugin_detail("legacy-sampler")
+            .expect("detail query")
+            .expect("plugin detail");
+        assert!(after.status.has_sampling_hook);
+        assert_eq!(after.active_core_rewriters, vec![CoreComponent::Inference]);
     }
 }
