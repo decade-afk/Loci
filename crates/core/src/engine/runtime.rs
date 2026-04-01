@@ -57,9 +57,10 @@ impl InferenceEngine {
             .map_err(LociError::from)?;
 
         for component in auto_activate {
-            self.registry
-                .activate_core_rewriter(component, &plugin_name)
-                .map_err(LociError::from)?;
+            match component {
+                CoreComponent::Inference => self.activate_inference_plugin(&plugin_name)?,
+                _ => self.activate_core_rewriter(component, &plugin_name)?,
+            }
         }
 
         self.refresh_model_sampling_runtime()
@@ -1213,6 +1214,50 @@ logit = 42.0
         assert!(active_output.contains("hooks=1"));
         assert_eq!(engine.sampling_hook_count(), 1);
         assert!(engine.active_legacy_text_plugins().is_empty());
+    }
+
+    #[test]
+    fn engine_auto_activation_uses_legacy_inference_materialization_path() {
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        let mut plugin = registered_legacy_text_plugin_for_tests(
+            "legacy-auto-sampler",
+            &["transform_logits", "post_sample"],
+        );
+        plugin.manifest.bootstrap.activate_on_load = vec![CoreComponent::Inference];
+
+        engine.register_plugin(plugin).expect("register plugin");
+        assert_eq!(
+            engine.active_core_rewriter(CoreComponent::Inference),
+            Some("legacy-auto-sampler")
+        );
+
+        let snapshot = engine.runtime_snapshot();
+        assert_eq!(
+            snapshot.configured_core_rewriters,
+            vec![CoreRewriterStatus {
+                component: CoreComponent::Inference,
+                plugin_name: "legacy-auto-sampler".to_string(),
+            }]
+        );
+        assert!(snapshot.plugins[0].has_sampling_hook);
+
+        engine
+            .load_model("mock", "demo.gguf", BackendParams::default())
+            .expect("load model");
+        let output = engine
+            .generate("hello", &InferenceParams::default())
+            .expect("generate");
+        assert!(output.contains("hooks=1"));
     }
 
     #[test]
