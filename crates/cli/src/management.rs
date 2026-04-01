@@ -92,6 +92,13 @@ pub fn handle_management_request(
             },
             Err(error) => json_response(500, json!({ "error": error.to_string() })),
         },
+        ("GET", "/v1/ui") => match service.ui_inventory() {
+            Ok(ui) => match serde_json::to_value(ui) {
+                Ok(ui) => json_response(200, ui),
+                Err(error) => json_response(500, json!({ "error": error.to_string() })),
+            },
+            Err(error) => json_response(500, json!({ "error": error.to_string() })),
+        },
         ("GET", "/v1/commands") => match service.command_inventory() {
             Ok(commands) => match serde_json::to_value(commands) {
                 Ok(commands) => json_response(200, commands),
@@ -494,6 +501,33 @@ mod tests {
         ManagementService::new(engine)
     }
 
+    fn ui_service() -> ManagementService {
+        let mut engine = InferenceEngine::builder().build().expect("build engine");
+        let mut manifest = PluginManifest {
+            name: "ui-shell".to_string(),
+            version: "1.0.0".to_string(),
+            api_version: "1.0".to_string(),
+            min_host_version: None,
+            max_host_version: None,
+            target_tracks: vec![PlatformTrack::AiAgent],
+            contributes: Default::default(),
+            core_rewriters: CoreRewriters {
+                ui_host: true,
+                ..Default::default()
+            },
+            runtime: PluginRuntime::default(),
+            bootstrap: PluginBootstrap::default(),
+            compatibility: PluginCompatibility::default(),
+        };
+        manifest.contributes.ui_contributes.panels = vec!["inspector".to_string()];
+        manifest.contributes.ui_contributes.windows = vec!["governance".to_string()];
+        manifest.contributes.ui_contributes.widgets = vec!["status-pill".to_string()];
+        engine
+            .register_plugin(RegisteredPlugin::new(manifest))
+            .expect("register ui plugin");
+        ManagementService::new(engine)
+    }
+
     fn combined_service() -> ManagementService {
         let mut engine = InferenceEngine::builder().build().expect("build engine");
         engine
@@ -695,6 +729,52 @@ mod tests {
             after_value["workflows"],
             json!(["agent.plan", "agent.review"])
         );
+    }
+
+    #[test]
+    fn ui_route_returns_effective_ui_inventory() {
+        let service = ui_service();
+        let before = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/ui".to_string(),
+                body: Vec::new(),
+            },
+        );
+
+        assert_eq!(before.status_code, 200);
+        let before_value: Value = serde_json::from_slice(&before.body).expect("json");
+        assert_eq!(before_value["active_ui_host"], Value::Null);
+        assert_eq!(before_value["ui"]["panels"], json!([]));
+        assert_eq!(before_value["ui"]["windows"], json!([]));
+        assert_eq!(before_value["ui"]["widgets"], json!([]));
+
+        let activation = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/core/rewriters/activate".to_string(),
+                body: br#"{"component":"ui_host","plugin_name":"ui-shell"}"#.to_vec(),
+            },
+        );
+        assert_eq!(activation.status_code, 200);
+
+        let after = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/ui".to_string(),
+                body: Vec::new(),
+            },
+        );
+
+        assert_eq!(after.status_code, 200);
+        let after_value: Value = serde_json::from_slice(&after.body).expect("json");
+        assert_eq!(after_value["active_ui_host"], "ui-shell");
+        assert_eq!(after_value["ui"]["panels"], json!(["inspector"]));
+        assert_eq!(after_value["ui"]["windows"], json!(["governance"]));
+        assert_eq!(after_value["ui"]["widgets"], json!(["status-pill"]));
     }
 
     #[test]

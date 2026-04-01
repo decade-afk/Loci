@@ -5,7 +5,7 @@ use crate::control_plane::{
     CommandInventoryStatus, CoreRewriterStatus, ModelRuntimeInfo, PluginHostRuntimeKind,
     PluginHostRuntimeMaterialization, PluginHostRuntimeRegistration, PluginRuntimeArtifacts,
     PluginRuntimeDetail, PluginRuntimeStatus, PluginUiContributionStatus, RuntimeSnapshot,
-    SamplingHookSource, WorkflowInventoryStatus,
+    SamplingHookSource, UiInventoryStatus, WorkflowInventoryStatus,
 };
 use crate::core::CoreRegistry;
 use crate::engine::types::{GenerationParams, ModelInfo};
@@ -380,6 +380,27 @@ impl InferenceEngine {
             active_workflow_rewriter,
             workflows,
         }
+    }
+
+    pub fn ui_inventory(&self) -> UiInventoryStatus {
+        let active_ui_host = self
+            .active_core_rewriter(CoreComponent::UiHost)
+            .map(str::to_string);
+        let ui = active_ui_host
+            .as_deref()
+            .and_then(|plugin_name| self.registry.plugin_manager().get(plugin_name))
+            .map(|plugin| PluginUiContributionStatus {
+                panels: plugin.manifest.contributes.ui_contributes.panels.clone(),
+                windows: plugin.manifest.contributes.ui_contributes.windows.clone(),
+                widgets: plugin.manifest.contributes.ui_contributes.widgets.clone(),
+            })
+            .unwrap_or(PluginUiContributionStatus {
+                panels: Vec::new(),
+                windows: Vec::new(),
+                widgets: Vec::new(),
+            });
+
+        UiInventoryStatus { active_ui_host, ui }
     }
 
     pub fn runtime_snapshot(&self) -> RuntimeSnapshot {
@@ -949,6 +970,75 @@ mod tests {
             WorkflowInventoryStatus {
                 active_workflow_rewriter: Some("agent-workflow".to_string()),
                 workflows: vec!["agent.plan".to_string(), "agent.review".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn engine_reports_ui_inventory_from_active_ui_host() {
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "ui-shell".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiAgent],
+                contributes: ContributionPoints {
+                    ui_contributes: loci_plugin_api::UiContributionPoints {
+                        panels: vec!["inspector".to_string()],
+                        windows: vec!["governance".to_string()],
+                        widgets: vec!["status-pill".to_string()],
+                    },
+                    ..Default::default()
+                },
+                core_rewriters: CoreRewriters {
+                    ui_host: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
+            }))
+            .expect("register");
+
+        assert_eq!(
+            engine.ui_inventory(),
+            UiInventoryStatus {
+                active_ui_host: None,
+                ui: PluginUiContributionStatus {
+                    panels: Vec::new(),
+                    windows: Vec::new(),
+                    widgets: Vec::new(),
+                },
+            }
+        );
+
+        engine
+            .activate_core_rewriter(CoreComponent::UiHost, "ui-shell")
+            .expect("activate ui host");
+
+        assert_eq!(
+            engine.ui_inventory(),
+            UiInventoryStatus {
+                active_ui_host: Some("ui-shell".to_string()),
+                ui: PluginUiContributionStatus {
+                    panels: vec!["inspector".to_string()],
+                    windows: vec!["governance".to_string()],
+                    widgets: vec!["status-pill".to_string()],
+                },
             }
         );
     }

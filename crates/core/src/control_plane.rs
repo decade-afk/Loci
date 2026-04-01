@@ -110,6 +110,12 @@ pub struct WorkflowInventoryStatus {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UiInventoryStatus {
+    pub active_ui_host: Option<String>,
+    pub ui: PluginUiContributionStatus,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CommandInventoryStatus {
     pub active_plugin_manager: Option<String>,
     pub commands: Vec<String>,

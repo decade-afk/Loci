@@ -6,7 +6,7 @@ use crate::control_plane::{
     ManagementHealthStatus, ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus,
     ModelLoadStrategyRequest, PluginLoadRequest, PluginLoadSourceKind, PluginLoadStatus,
     PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot, TextGenerationRequest,
-    TextGenerationResponse, WorkflowInventoryStatus,
+    TextGenerationResponse, UiInventoryStatus, WorkflowInventoryStatus,
 };
 use crate::engine::InferenceEngine;
 use crate::error::{LociError, Result};
@@ -82,6 +82,10 @@ impl ManagementService {
 
     pub fn workflow_inventory(&self) -> Result<WorkflowInventoryStatus> {
         self.with_engine(|engine| Ok(engine.workflow_inventory()))
+    }
+
+    pub fn ui_inventory(&self) -> Result<UiInventoryStatus> {
+        self.with_engine(|engine| Ok(engine.ui_inventory()))
     }
 
     pub fn command_inventory(&self) -> Result<CommandInventoryStatus> {
@@ -438,6 +442,33 @@ mod tests {
         ManagementService::new(engine)
     }
 
+    fn ui_service() -> ManagementService {
+        let mut engine = InferenceEngine::builder().build().expect("build engine");
+        let mut manifest = PluginManifest {
+            name: "ui-shell".to_string(),
+            version: "1.0.0".to_string(),
+            api_version: "1.0".to_string(),
+            min_host_version: None,
+            max_host_version: None,
+            target_tracks: vec![PlatformTrack::AiAgent],
+            contributes: Default::default(),
+            core_rewriters: CoreRewriters {
+                ui_host: true,
+                ..Default::default()
+            },
+            runtime: PluginRuntime::default(),
+            bootstrap: PluginBootstrap::default(),
+            compatibility: PluginCompatibility::default(),
+        };
+        manifest.contributes.ui_contributes.panels = vec!["inspector".to_string()];
+        manifest.contributes.ui_contributes.windows = vec!["governance".to_string()];
+        manifest.contributes.ui_contributes.widgets = vec!["status-pill".to_string()];
+        engine
+            .register_plugin(RegisteredPlugin::new(manifest))
+            .expect("register ui host plugin");
+        ManagementService::new(engine)
+    }
+
     fn legacy_service() -> ManagementService {
         let mut engine = InferenceEngine::builder().build().expect("build engine");
         engine
@@ -625,6 +656,41 @@ mod tests {
             WorkflowInventoryStatus {
                 active_workflow_rewriter: Some("workflow-override".to_string()),
                 workflows: vec!["agent.plan".to_string(), "agent.review".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn service_reports_ui_inventory() {
+        let service = ui_service();
+        assert_eq!(
+            service.ui_inventory().expect("ui inventory"),
+            UiInventoryStatus {
+                active_ui_host: None,
+                ui: crate::PluginUiContributionStatus {
+                    panels: Vec::new(),
+                    windows: Vec::new(),
+                    widgets: Vec::new(),
+                },
+            }
+        );
+
+        service
+            .activate_core_rewriter(CoreRewriterActivationRequest {
+                component: CoreComponent::UiHost,
+                plugin_name: "ui-shell".to_string(),
+            })
+            .expect("activate ui host");
+
+        assert_eq!(
+            service.ui_inventory().expect("ui inventory"),
+            UiInventoryStatus {
+                active_ui_host: Some("ui-shell".to_string()),
+                ui: crate::PluginUiContributionStatus {
+                    panels: vec!["inspector".to_string()],
+                    windows: vec!["governance".to_string()],
+                    widgets: vec!["status-pill".to_string()],
+                },
             }
         );
     }

@@ -22,7 +22,8 @@ pub use crate::control_plane::{
     PluginHostRuntimeMaterialization, PluginHostRuntimeRegistration, PluginLoadRequest,
     PluginLoadSourceKind, PluginLoadStatus, PluginRuntimeArtifacts, PluginRuntimeDetail,
     PluginRuntimeStatus, PluginUiContributionStatus, RuntimeSnapshot, SamplingHookSource,
-    TextGenerationParams, TextGenerationRequest, TextGenerationResponse, WorkflowInventoryStatus,
+    TextGenerationParams, TextGenerationRequest, TextGenerationResponse, UiInventoryStatus,
+    WorkflowInventoryStatus,
 };
 pub use crate::core::{
     CoreRegistry, DefaultCoreRegistry, EventBus, HardwareAbstraction, ModelRepository,
