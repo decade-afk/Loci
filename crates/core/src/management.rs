@@ -942,6 +942,10 @@ target_tracks = ["ai_agent"]
         assert!(!detail.status.declares_sampling_hook);
         assert!(!detail.status.registered_sampling_hook);
         assert!(!detail.status.effective_sampling_hook);
+        assert!(detail.status.declares_host_runtime);
+        assert!(!detail.status.registered_host_runtime);
+        assert!(!detail.status.materialized_host_runtime);
+        assert_eq!(detail.status.host_runtime_kind, None);
         assert!(!detail.status.active_inference_rewriter);
         assert_eq!(detail.inference_hooks, vec!["sampling-profile".to_string()]);
         assert_eq!(detail.workflows, vec!["agent.pipeline".to_string()]);
@@ -960,6 +964,8 @@ target_tracks = ["ai_agent"]
             detail.runtime_artifacts.legacy_runtime_path.as_deref(),
             Some("legacy/compat.dll")
         );
+        assert!(detail.runtime_artifacts.host_runtimes.is_empty());
+        assert!(detail.runtime_artifacts.materialized_host_runtime.is_none());
         assert_eq!(detail.ui.panels, vec!["inspector".to_string()]);
         assert_eq!(detail.ui.windows, vec!["governance".to_string()]);
         assert_eq!(detail.ui.widgets, vec!["status-pill".to_string()]);

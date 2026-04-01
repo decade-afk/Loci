@@ -24,6 +24,10 @@ pub struct PluginRuntimeStatus {
     pub sampling_hook_source: SamplingHookSource,
     pub registered_sampling_hook: bool,
     pub effective_sampling_hook: bool,
+    pub declares_host_runtime: bool,
+    pub registered_host_runtime: bool,
+    pub materialized_host_runtime: bool,
+    pub host_runtime_kind: Option<PluginHostRuntimeKind>,
     pub materialized_legacy_runtime: bool,
     pub active_inference_rewriter: bool,
     pub has_sampling_hook: bool,
@@ -63,12 +67,20 @@ pub struct PluginHostRuntimeRegistration {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PluginHostRuntimeMaterialization {
+    pub kind: PluginHostRuntimeKind,
+    pub resolved_path: String,
+    pub file_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PluginRuntimeArtifacts {
     pub library_path: Option<String>,
     pub wasm_path: Option<String>,
     pub sampling_profile: Option<String>,
     pub legacy_runtime_path: Option<String>,
     pub host_runtimes: Vec<PluginHostRuntimeRegistration>,
+    pub materialized_host_runtime: Option<PluginHostRuntimeMaterialization>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

@@ -2,9 +2,10 @@ use crate::backend::{
     BackendCapabilities, BackendParams, BackendRegistry, InferenceParams, Model, ModelMetadata,
 };
 use crate::control_plane::{
-    CoreRewriterStatus, ModelRuntimeInfo, PluginHostRuntimeKind, PluginHostRuntimeRegistration,
-    PluginRuntimeArtifacts, PluginRuntimeDetail, PluginRuntimeStatus, PluginUiContributionStatus,
-    RuntimeSnapshot, SamplingHookSource, WorkflowInventoryStatus,
+    CoreRewriterStatus, ModelRuntimeInfo, PluginHostRuntimeKind, PluginHostRuntimeMaterialization,
+    PluginHostRuntimeRegistration, PluginRuntimeArtifacts, PluginRuntimeDetail,
+    PluginRuntimeStatus, PluginUiContributionStatus, RuntimeSnapshot, SamplingHookSource,
+    WorkflowInventoryStatus,
 };
 use crate::core::CoreRegistry;
 use crate::engine::types::{GenerationParams, ModelInfo};
@@ -17,8 +18,16 @@ use crate::plugin::{
 use loci_legacy_plugin_compat::{load_legacy_text_plugin_compat, LegacyTextCompat};
 use loci_plugin_api::{CoreComponent, PlatformTrack};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MaterializedHostRuntime {
+    kind: RegisteredHostRuntimeKind,
+    resolved_path: PathBuf,
+    file_size_bytes: u64,
+}
 
 pub struct InferenceEngine {
     pub(crate) registry: Box<dyn CoreRegistry>,
@@ -28,6 +37,7 @@ pub struct InferenceEngine {
     pub(crate) model_path: Option<PathBuf>,
     pub(crate) default_inference_params: InferenceParams,
     pub(crate) active_legacy_text_plugins: BTreeSet<String>,
+    pub(crate) host_plugin_runtimes: BTreeMap<String, MaterializedHostRuntime>,
     pub(crate) legacy_text_plugin_runtimes: BTreeMap<String, Arc<dyn LegacyTextCompat>>,
 }
 
@@ -141,6 +151,7 @@ impl InferenceEngine {
         component: CoreComponent,
         plugin_name: &str,
     ) -> Result<()> {
+        self.ensure_host_runtime_materialized(plugin_name)?;
         self.registry
             .activate_core_rewriter(component, plugin_name)
             .map_err(LociError::from)?;
@@ -279,6 +290,13 @@ impl InferenceEngine {
                         resolved_path: runtime.resolved_path().display().to_string(),
                     })
                     .collect(),
+                materialized_host_runtime: self.host_plugin_runtimes.get(plugin_name).map(
+                    |runtime| PluginHostRuntimeMaterialization {
+                        kind: host_runtime_kind_to_control_plane(runtime.kind),
+                        resolved_path: runtime.resolved_path.display().to_string(),
+                        file_size_bytes: runtime.file_size_bytes,
+                    },
+                ),
             },
             model_providers: plugin.manifest.contributes.model_providers.clone(),
             inference_hooks: plugin.manifest.contributes.inference_hooks.clone(),
@@ -530,6 +548,73 @@ impl InferenceEngine {
         Ok(runtime)
     }
 
+    fn ensure_host_runtime_materialized(&mut self, plugin_name: &str) -> Result<()> {
+        if self.host_plugin_runtimes.contains_key(plugin_name) {
+            return Ok(());
+        }
+
+        let host_runtime = {
+            let plugin = self
+                .registry
+                .plugin_manager()
+                .get(plugin_name)
+                .ok_or_else(|| {
+                    LociError::from(anyhow::anyhow!("plugin not registered: {plugin_name}"))
+                })?;
+
+            plugin.registered_host_runtimes().first().cloned()
+        };
+
+        let Some(host_runtime) = host_runtime else {
+            return Ok(());
+        };
+
+        let metadata = fs::metadata(host_runtime.resolved_path()).map_err(|err| {
+            LociError::from(anyhow::anyhow!(
+                "failed to materialize host runtime for plugin `{plugin_name}`: {}",
+                err
+            ))
+        })?;
+
+        if !metadata.is_file() {
+            return Err(LociError::from(anyhow::anyhow!(
+                "host runtime artifact for plugin `{plugin_name}` is not a file: {}",
+                host_runtime.resolved_path().display()
+            )));
+        }
+
+        if metadata.len() == 0 {
+            return Err(LociError::from(anyhow::anyhow!(
+                "host runtime artifact for plugin `{plugin_name}` is empty: {}",
+                host_runtime.resolved_path().display()
+            )));
+        }
+
+        if host_runtime.kind() == RegisteredHostRuntimeKind::WasmModule {
+            let bytes = fs::read(host_runtime.resolved_path()).map_err(|err| {
+                LociError::from(anyhow::anyhow!(
+                    "failed to read wasm host runtime for plugin `{plugin_name}`: {}",
+                    err
+                ))
+            })?;
+            if bytes.len() < 4 || &bytes[..4] != b"\0asm" {
+                return Err(LociError::from(anyhow::anyhow!(
+                    "plugin `{plugin_name}` declares a wasm host runtime, but the artifact does not start with the wasm magic header"
+                )));
+            }
+        }
+
+        self.host_plugin_runtimes.insert(
+            plugin_name.to_string(),
+            MaterializedHostRuntime {
+                kind: host_runtime.kind(),
+                resolved_path: host_runtime.resolved_path().to_path_buf(),
+                file_size_bytes: metadata.len(),
+            },
+        );
+        Ok(())
+    }
+
     fn refresh_model_sampling_runtime(&mut self) -> Result<()> {
         if let Some(model) = self.model.as_mut() {
             let runtime = self
@@ -663,6 +748,16 @@ impl InferenceEngine {
             } else {
                 SamplingHookSource::None
             };
+        let declares_host_runtime = plugin.manifest.runtime.library_path.is_some()
+            || plugin.manifest.runtime.wasm_path.is_some();
+        let registered_host_runtime = !plugin.registered_host_runtimes().is_empty();
+        let materialized_host_runtime = self
+            .host_plugin_runtimes
+            .contains_key(&plugin.manifest.name);
+        let host_runtime_kind = plugin
+            .registered_host_runtimes()
+            .first()
+            .map(|runtime| host_runtime_kind_to_control_plane(runtime.kind()));
 
         PluginRuntimeStatus {
             name: plugin.manifest.name.clone(),
@@ -676,6 +771,10 @@ impl InferenceEngine {
             sampling_hook_source,
             registered_sampling_hook,
             effective_sampling_hook: active_inference_rewriter && registered_sampling_hook,
+            declares_host_runtime,
+            registered_host_runtime,
+            materialized_host_runtime,
+            host_runtime_kind,
             materialized_legacy_runtime: self
                 .legacy_text_plugin_runtimes
                 .contains_key(&plugin.manifest.name),
@@ -691,6 +790,13 @@ impl InferenceEngine {
                 .iter()
                 .any(|active| active == &plugin.manifest.name),
         }
+    }
+}
+
+fn host_runtime_kind_to_control_plane(kind: RegisteredHostRuntimeKind) -> PluginHostRuntimeKind {
+    match kind {
+        RegisteredHostRuntimeKind::DynamicLibrary => PluginHostRuntimeKind::DynamicLibrary,
+        RegisteredHostRuntimeKind::WasmModule => PluginHostRuntimeKind::WasmModule,
     }
 }
 
@@ -729,6 +835,7 @@ mod tests {
             model_path: None,
             default_inference_params: InferenceParams::default(),
             active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
             legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
@@ -822,6 +929,7 @@ workflow = true
             model_path: None,
             default_inference_params: InferenceParams::default(),
             active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
             legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
@@ -900,6 +1008,7 @@ logit = 42.0
             model_path: None,
             default_inference_params: InferenceParams::default(),
             active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
             legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
@@ -947,6 +1056,7 @@ logit = 42.0
             model_path: None,
             default_inference_params: InferenceParams::default(),
             active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
             legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
@@ -984,6 +1094,7 @@ logit = 42.0
             model_path: None,
             default_inference_params: InferenceParams::default(),
             active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
             legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
@@ -1023,6 +1134,7 @@ logit = 42.0
             model_path: None,
             default_inference_params: InferenceParams::default(),
             active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
             legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
@@ -1075,6 +1187,7 @@ logit = 42.0
             model_path: None,
             default_inference_params: InferenceParams::default(),
             active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
             legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
@@ -1103,6 +1216,7 @@ logit = 42.0
             model_path: None,
             default_inference_params: InferenceParams::default(),
             active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
             legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
@@ -1135,6 +1249,7 @@ logit = 42.0
             model_path: None,
             default_inference_params: InferenceParams::default(),
             active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
             legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
@@ -1240,6 +1355,7 @@ activate_on_load = ["inference"]
             model_path: None,
             default_inference_params: InferenceParams::default(),
             active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
             legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
@@ -1259,6 +1375,13 @@ activate_on_load = ["inference"]
         );
         assert!(detail.status.registered_sampling_hook);
         assert!(detail.status.effective_sampling_hook);
+        assert!(detail.status.declares_host_runtime);
+        assert!(detail.status.registered_host_runtime);
+        assert!(detail.status.materialized_host_runtime);
+        assert_eq!(
+            detail.status.host_runtime_kind,
+            Some(PluginHostRuntimeKind::DynamicLibrary)
+        );
         assert!(detail.status.active_inference_rewriter);
         assert_eq!(
             detail.declared_core_rewriters,
@@ -1280,6 +1403,7 @@ activate_on_load = ["inference"]
         );
         assert_eq!(detail.runtime_artifacts.legacy_runtime_path, None);
         assert_eq!(detail.runtime_artifacts.host_runtimes.len(), 1);
+        assert!(detail.runtime_artifacts.materialized_host_runtime.is_some());
         assert_eq!(
             detail.runtime_artifacts.host_runtimes[0].kind,
             PluginHostRuntimeKind::DynamicLibrary
@@ -1292,6 +1416,15 @@ activate_on_load = ["inference"]
             Path::new(&detail.runtime_artifacts.host_runtimes[0].resolved_path)
                 .ends_with(Path::new("runtime").join("plugin.dll"))
         );
+        assert_eq!(
+            detail
+                .runtime_artifacts
+                .materialized_host_runtime
+                .as_ref()
+                .expect("materialized host runtime")
+                .file_size_bytes,
+            6
+        );
         assert_eq!(detail.model_providers, vec!["private-registry".to_string()]);
         assert_eq!(detail.inference_hooks, vec!["sampling-profile".to_string()]);
         assert_eq!(detail.workflows, vec!["agent.pipeline".to_string()]);
@@ -1300,6 +1433,178 @@ activate_on_load = ["inference"]
         assert_eq!(detail.ui.panels, vec!["inspector".to_string()]);
         assert_eq!(detail.ui.windows, vec!["governance".to_string()]);
         assert_eq!(detail.ui.widgets, vec!["status-pill".to_string()]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn engine_materializes_host_runtime_on_activation_and_reuses_cache() {
+        let dir = unique_temp_dir("materialized-host-runtime");
+        fs::create_dir_all(dir.join("hosted-workflow").join("runtime")).expect("mkdir");
+        fs::write(
+            dir.join("hosted-workflow")
+                .join("runtime")
+                .join("plugin.dll"),
+            b"binary",
+        )
+        .expect("write runtime");
+        fs::write(
+            dir.join("hosted-workflow").join("manifest.toml"),
+            r#"
+name = "hosted-workflow"
+version = "1.0.0"
+api_version = "1.0"
+
+[core_rewriters]
+workflow = true
+plugin_manager = true
+
+[runtime]
+library_path = "runtime/plugin.dll"
+"#,
+        )
+        .expect("write manifest");
+
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        engine
+            .load_plugin_manifest_file(dir.join("hosted-workflow").join("manifest.toml"))
+            .expect("load plugin");
+
+        let before = engine
+            .plugin_runtime_detail("hosted-workflow")
+            .expect("detail before activation");
+        assert!(before.status.declares_host_runtime);
+        assert!(before.status.registered_host_runtime);
+        assert!(!before.status.materialized_host_runtime);
+        assert_eq!(
+            before.status.host_runtime_kind,
+            Some(PluginHostRuntimeKind::DynamicLibrary)
+        );
+        assert!(before.runtime_artifacts.materialized_host_runtime.is_none());
+
+        engine
+            .activate_core_rewriter(CoreComponent::Workflow, "hosted-workflow")
+            .expect("activate workflow");
+
+        let after = engine
+            .plugin_runtime_detail("hosted-workflow")
+            .expect("detail after activation");
+        assert!(after.status.materialized_host_runtime);
+        assert_eq!(
+            after.status.host_runtime_kind,
+            Some(PluginHostRuntimeKind::DynamicLibrary)
+        );
+        let materialized = after
+            .runtime_artifacts
+            .materialized_host_runtime
+            .as_ref()
+            .expect("materialized host runtime");
+        assert_eq!(materialized.kind, PluginHostRuntimeKind::DynamicLibrary);
+        assert_eq!(materialized.file_size_bytes, 6);
+        assert!(Path::new(&materialized.resolved_path).ends_with("plugin.dll"));
+
+        fs::remove_file(
+            dir.join("hosted-workflow")
+                .join("runtime")
+                .join("plugin.dll"),
+        )
+        .expect("remove runtime after materialization");
+
+        engine
+            .activate_core_rewriter(CoreComponent::PluginManager, "hosted-workflow")
+            .expect("reuse materialized runtime");
+
+        let reused = engine
+            .plugin_runtime_detail("hosted-workflow")
+            .expect("detail after reuse");
+        assert!(reused.status.materialized_host_runtime);
+        assert_eq!(
+            reused
+                .runtime_artifacts
+                .materialized_host_runtime
+                .as_ref()
+                .expect("materialized runtime")
+                .file_size_bytes,
+            6
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn engine_defers_invalid_wasm_host_runtime_failure_until_activation() {
+        let dir = unique_temp_dir("invalid-wasm-runtime");
+        fs::create_dir_all(dir.join("hosted-wasm").join("runtime")).expect("mkdir");
+        fs::write(
+            dir.join("hosted-wasm").join("runtime").join("plugin.wasm"),
+            b"not-wasm",
+        )
+        .expect("write runtime");
+        fs::write(
+            dir.join("hosted-wasm").join("manifest.toml"),
+            r#"
+name = "hosted-wasm"
+version = "1.0.0"
+api_version = "1.0"
+
+[core_rewriters]
+workflow = true
+
+[runtime]
+wasm_path = "runtime/plugin.wasm"
+"#,
+        )
+        .expect("write manifest");
+
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        engine
+            .load_plugin_manifest_file(dir.join("hosted-wasm").join("manifest.toml"))
+            .expect("load plugin");
+
+        let before = engine
+            .plugin_runtime_detail("hosted-wasm")
+            .expect("detail before activation");
+        assert!(before.status.declares_host_runtime);
+        assert!(before.status.registered_host_runtime);
+        assert!(!before.status.materialized_host_runtime);
+        assert_eq!(
+            before.status.host_runtime_kind,
+            Some(PluginHostRuntimeKind::WasmModule)
+        );
+
+        let err = engine
+            .activate_core_rewriter(CoreComponent::Workflow, "hosted-wasm")
+            .expect_err("invalid wasm should fail during materialization");
+        assert!(err.to_string().contains("wasm magic header"));
+        assert_eq!(engine.active_core_rewriter(CoreComponent::Workflow), None);
+
+        let after = engine
+            .plugin_runtime_detail("hosted-wasm")
+            .expect("detail after failed activation");
+        assert!(!after.status.materialized_host_runtime);
+        assert!(after.runtime_artifacts.materialized_host_runtime.is_none());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1327,6 +1632,7 @@ activate_on_load = ["inference"]
             model_path: None,
             default_inference_params: InferenceParams::default(),
             active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
             legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
@@ -1407,6 +1713,7 @@ activate_on_load = ["inference"]
             model_path: None,
             default_inference_params: InferenceParams::default(),
             active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
             legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
@@ -1479,6 +1786,7 @@ activate_on_load = ["inference"]
             model_path: None,
             default_inference_params: InferenceParams::default(),
             active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
             legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
@@ -1532,6 +1840,7 @@ activate_on_load = ["inference"]
             model_path: None,
             default_inference_params: InferenceParams::default(),
             active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
             legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
@@ -1568,6 +1877,7 @@ activate_on_load = ["inference"]
             model_path: None,
             default_inference_params: InferenceParams::default(),
             active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
             legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 

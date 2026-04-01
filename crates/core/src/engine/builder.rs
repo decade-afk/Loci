@@ -189,6 +189,7 @@ impl InferenceEngineBuilder {
                 ..Default::default()
             },
             active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
             legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 

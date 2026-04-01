@@ -676,6 +676,10 @@ mod tests {
         assert_eq!(response.status_code, 200);
         let value: Value = serde_json::from_slice(&response.body).expect("json");
         assert_eq!(value["status"]["name"], "managed-inference");
+        assert_eq!(value["status"]["declares_host_runtime"], true);
+        assert_eq!(value["status"]["registered_host_runtime"], false);
+        assert_eq!(value["status"]["materialized_host_runtime"], false);
+        assert_eq!(value["status"]["host_runtime_kind"], Value::Null);
         assert_eq!(value["declared_core_rewriters"], json!(["inference"]));
         assert_eq!(
             value["runtime_artifacts"]["library_path"],
@@ -689,6 +693,11 @@ mod tests {
         assert_eq!(
             value["runtime_artifacts"]["legacy_runtime_path"],
             "legacy/compat.dll"
+        );
+        assert_eq!(value["runtime_artifacts"]["host_runtimes"], json!([]));
+        assert_eq!(
+            value["runtime_artifacts"]["materialized_host_runtime"],
+            Value::Null
         );
         assert_eq!(value["workflows"], json!(["agent.pipeline"]));
         assert_eq!(value["custom_nodes"], json!(["node.rewrite"]));
