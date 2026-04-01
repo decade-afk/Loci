@@ -405,11 +405,24 @@ mod tests {
                 inference: true,
                 ..Default::default()
             },
-            runtime: PluginRuntime::default(),
+            runtime: PluginRuntime {
+                library_path: Some("runtime/plugin.dll".to_string()),
+                wasm_path: Some("runtime/plugin.wasm".to_string()),
+                sampling_profile: Some("sampling-hook.toml".to_string()),
+            },
             bootstrap: PluginBootstrap::default(),
-            compatibility: PluginCompatibility::default(),
+            compatibility: PluginCompatibility {
+                legacy_runtime_path: Some("legacy/compat.dll".to_string()),
+                ..Default::default()
+            },
         };
         manifest.contributes.inference_hooks = vec!["sampling-profile".to_string()];
+        manifest.contributes.workflows = vec!["agent.pipeline".to_string()];
+        manifest.contributes.custom_nodes = vec!["node.rewrite".to_string()];
+        manifest.contributes.commands = vec!["plugins.reload".to_string()];
+        manifest.contributes.ui_contributes.panels = vec!["inspector".to_string()];
+        manifest.contributes.ui_contributes.windows = vec!["governance".to_string()];
+        manifest.contributes.ui_contributes.widgets = vec!["status-pill".to_string()];
         engine
             .register_plugin(RegisteredPlugin::new(manifest))
             .expect("register plugin");
@@ -561,6 +574,22 @@ mod tests {
         let value: Value = serde_json::from_slice(&response.body).expect("json");
         assert_eq!(value["status"]["name"], "managed-inference");
         assert_eq!(value["declared_core_rewriters"], json!(["inference"]));
+        assert_eq!(value["runtime_artifacts"]["library_path"], "runtime/plugin.dll");
+        assert_eq!(value["runtime_artifacts"]["wasm_path"], "runtime/plugin.wasm");
+        assert_eq!(
+            value["runtime_artifacts"]["sampling_profile"],
+            "sampling-hook.toml"
+        );
+        assert_eq!(
+            value["runtime_artifacts"]["legacy_runtime_path"],
+            "legacy/compat.dll"
+        );
+        assert_eq!(value["workflows"], json!(["agent.pipeline"]));
+        assert_eq!(value["custom_nodes"], json!(["node.rewrite"]));
+        assert_eq!(value["commands"], json!(["plugins.reload"]));
+        assert_eq!(value["ui"]["panels"], json!(["inspector"]));
+        assert_eq!(value["ui"]["windows"], json!(["governance"]));
+        assert_eq!(value["ui"]["widgets"], json!(["status-pill"]));
     }
 
     #[test]
