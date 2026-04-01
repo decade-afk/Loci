@@ -151,8 +151,36 @@ impl SamplingHook for LegacySamplingCompatHook {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegisteredHostRuntimeKind {
+    DynamicLibrary,
+    WasmModule,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RegisteredHostRuntime {
+    kind: RegisteredHostRuntimeKind,
+    declared_path: String,
+    resolved_path: PathBuf,
+}
+
+impl RegisteredHostRuntime {
+    pub(crate) fn kind(&self) -> RegisteredHostRuntimeKind {
+        self.kind
+    }
+
+    pub(crate) fn declared_path(&self) -> &str {
+        &self.declared_path
+    }
+
+    pub(crate) fn resolved_path(&self) -> &Path {
+        &self.resolved_path
+    }
+}
+
 #[derive(Clone, Default)]
 struct RegisteredPluginRuntime {
+    host_runtimes: Vec<RegisteredHostRuntime>,
     sampling_hook: Option<Arc<dyn SamplingHook>>,
     legacy_text_compat: Option<Arc<dyn LegacyTextCompat>>,
 }
@@ -310,6 +338,10 @@ impl RegisteredPlugin {
             .legacy_capabilities
             .iter()
             .any(|candidate| candidate == capability)
+    }
+
+    pub(crate) fn registered_host_runtimes(&self) -> &[RegisteredHostRuntime] {
+        &self.runtime.host_runtimes
     }
 }
 
@@ -639,7 +671,7 @@ fn resolve_runtime_artifact_path(manifest_path: &Path, relative_path: &str) -> P
 fn validate_runtime_artifact_within_plugin_root(
     manifest_path: &Path,
     artifact_path: &Path,
-) -> Result<()> {
+) -> Result<PathBuf> {
     let plugin_root = manifest_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("plugin manifest has no parent"))?;
@@ -653,6 +685,13 @@ fn validate_runtime_artifact_within_plugin_root(
         )
     })?;
 
+    if !canonical_artifact.is_file() {
+        bail!(
+            "runtime artifact `{}` is not a file",
+            canonical_artifact.display()
+        );
+    }
+
     if !canonical_artifact.starts_with(&canonical_root) {
         bail!(
             "runtime artifact `{}` escapes plugin root `{}`",
@@ -661,7 +700,23 @@ fn validate_runtime_artifact_within_plugin_root(
         );
     }
 
-    Ok(())
+    Ok(canonical_artifact)
+}
+
+fn register_host_runtime_artifact(
+    manifest_path: &Path,
+    relative_path: &str,
+    kind: RegisteredHostRuntimeKind,
+) -> Result<RegisteredHostRuntime> {
+    let artifact_path = resolve_runtime_artifact_path(manifest_path, relative_path);
+    let resolved_path =
+        validate_runtime_artifact_within_plugin_root(manifest_path, &artifact_path)?;
+
+    Ok(RegisteredHostRuntime {
+        kind,
+        declared_path: relative_path.to_string(),
+        resolved_path,
+    })
 }
 
 fn load_registered_plugin_runtime(
@@ -670,16 +725,9 @@ fn load_registered_plugin_runtime(
 ) -> Result<RegisteredPluginRuntime> {
     validate_plugin_manifest(manifest)?;
 
-    if manifest.runtime.library_path.is_some() {
+    if manifest.runtime.library_path.is_some() && manifest.runtime.wasm_path.is_some() {
         bail!(
-            "plugin `{}` declares runtime.library_path but dynamic library runtime loading is not implemented in the new architecture yet",
-            manifest.name
-        );
-    }
-
-    if manifest.runtime.wasm_path.is_some() {
-        bail!(
-            "plugin `{}` declares runtime.wasm_path but wasm runtime loading is not implemented in the new architecture yet",
+            "plugin `{}` declares both runtime.library_path and runtime.wasm_path; declare exactly one executable host runtime artifact",
             manifest.name
         );
     }
@@ -699,13 +747,31 @@ fn load_registered_plugin_runtime(
         .as_deref()
         .map(|profile_path| {
             let profile_path = resolve_runtime_artifact_path(manifest_path, profile_path);
-            validate_runtime_artifact_within_plugin_root(manifest_path, &profile_path)?;
+            let profile_path =
+                validate_runtime_artifact_within_plugin_root(manifest_path, &profile_path)?;
             let profile = load_sampling_hook_profile(&profile_path)?;
             Ok::<Arc<dyn SamplingHook>, anyhow::Error>(Arc::new(ProfiledSamplingHook::new(profile)))
         })
         .transpose()?;
 
+    let mut host_runtimes = Vec::new();
+    if let Some(library_path) = manifest.runtime.library_path.as_deref() {
+        host_runtimes.push(register_host_runtime_artifact(
+            manifest_path,
+            library_path,
+            RegisteredHostRuntimeKind::DynamicLibrary,
+        )?);
+    }
+    if let Some(wasm_path) = manifest.runtime.wasm_path.as_deref() {
+        host_runtimes.push(register_host_runtime_artifact(
+            manifest_path,
+            wasm_path,
+            RegisteredHostRuntimeKind::WasmModule,
+        )?);
+    }
+
     Ok(RegisteredPluginRuntime {
+        host_runtimes,
         sampling_hook,
         legacy_text_compat: None,
     })
@@ -1051,6 +1117,7 @@ pub(crate) fn registered_legacy_text_plugin_for_tests(
         manifest_path: None,
         root_dir: None,
         runtime: RegisteredPluginRuntime {
+            host_runtimes: Vec::new(),
             sampling_hook: None,
             legacy_text_compat: Some(Arc::new(TestLegacyTextCompat {
                 plugin_name: plugin_name.to_string(),
@@ -1530,9 +1597,14 @@ sampling_profile = "../outside.toml"
     }
 
     #[test]
-    fn load_plugin_manifest_file_rejects_unimplemented_runtime_kinds() {
-        let dir = unique_temp_dir("unsupported-runtime");
-        fs::create_dir_all(dir.join("plugin")).expect("mkdir");
+    fn load_plugin_manifest_file_registers_dynamic_library_runtime_metadata() {
+        let dir = unique_temp_dir("dynamic-runtime");
+        fs::create_dir_all(dir.join("plugin").join("runtime")).expect("mkdir");
+        fs::write(
+            dir.join("plugin").join("runtime").join("plugin.dll"),
+            b"binary",
+        )
+        .expect("write runtime");
         fs::write(
             dir.join("plugin").join(MANIFEST_FILE_NAME),
             r#"
@@ -1541,7 +1613,111 @@ version = "1.0.0"
 api_version = "1.0"
 
 [runtime]
-library_path = "plugin.dll"
+library_path = "runtime/plugin.dll"
+"#,
+        )
+        .expect("write manifest");
+
+        let plugin =
+            load_plugin_manifest_file(dir.join("plugin").join(MANIFEST_FILE_NAME)).expect("load");
+
+        assert_eq!(plugin.runtime.host_runtimes.len(), 1);
+        assert_eq!(
+            plugin.runtime.host_runtimes[0].kind,
+            RegisteredHostRuntimeKind::DynamicLibrary
+        );
+        assert_eq!(
+            plugin.runtime.host_runtimes[0].declared_path,
+            "runtime/plugin.dll"
+        );
+        assert!(plugin.runtime.host_runtimes[0]
+            .resolved_path
+            .ends_with(Path::new("runtime").join("plugin.dll")));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_plugin_manifest_file_registers_wasm_runtime_metadata() {
+        let dir = unique_temp_dir("wasm-runtime");
+        fs::create_dir_all(dir.join("plugin").join("runtime")).expect("mkdir");
+        fs::write(
+            dir.join("plugin").join("runtime").join("plugin.wasm"),
+            b"\0asm",
+        )
+        .expect("write runtime");
+        fs::write(
+            dir.join("plugin").join(MANIFEST_FILE_NAME),
+            r#"
+name = "wasm-plugin"
+version = "1.0.0"
+api_version = "1.0"
+
+[runtime]
+wasm_path = "runtime/plugin.wasm"
+"#,
+        )
+        .expect("write manifest");
+
+        let plugin =
+            load_plugin_manifest_file(dir.join("plugin").join(MANIFEST_FILE_NAME)).expect("load");
+
+        assert_eq!(plugin.runtime.host_runtimes.len(), 1);
+        assert_eq!(
+            plugin.runtime.host_runtimes[0].kind,
+            RegisteredHostRuntimeKind::WasmModule
+        );
+        assert_eq!(
+            plugin.runtime.host_runtimes[0].declared_path,
+            "runtime/plugin.wasm"
+        );
+        assert!(plugin.runtime.host_runtimes[0]
+            .resolved_path
+            .ends_with(Path::new("runtime").join("plugin.wasm")));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_plugin_manifest_file_rejects_host_runtime_outside_plugin_root() {
+        let dir = unique_temp_dir("escaped-runtime-sidecar");
+        fs::create_dir_all(dir.join("plugin")).expect("mkdir");
+        fs::write(dir.join("outside.dll"), b"binary").expect("write outside runtime");
+        fs::write(
+            dir.join("plugin").join(MANIFEST_FILE_NAME),
+            r#"
+name = "escaped-runtime-plugin"
+version = "1.0.0"
+api_version = "1.0"
+
+[runtime]
+library_path = "../outside.dll"
+"#,
+        )
+        .expect("write manifest");
+
+        let err = load_plugin_manifest_file(dir.join("plugin").join(MANIFEST_FILE_NAME))
+            .expect_err("load should fail");
+
+        assert!(err.to_string().contains("escapes plugin root"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_plugin_manifest_file_rejects_multiple_host_runtime_artifacts() {
+        let dir = unique_temp_dir("multiple-host-runtimes");
+        fs::create_dir_all(dir.join("plugin")).expect("mkdir");
+        fs::write(
+            dir.join("plugin").join(MANIFEST_FILE_NAME),
+            r#"
+name = "hybrid-runtime-plugin"
+version = "1.0.0"
+api_version = "1.0"
+
+[runtime]
+library_path = "runtime/plugin.dll"
+wasm_path = "runtime/plugin.wasm"
 "#,
         )
         .expect("write manifest");
@@ -1551,7 +1727,7 @@ library_path = "plugin.dll"
 
         assert!(err
             .to_string()
-            .contains("dynamic library runtime loading is not implemented"));
+            .contains("declare exactly one executable host runtime artifact"));
 
         let _ = fs::remove_dir_all(&dir);
     }

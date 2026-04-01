@@ -48,12 +48,27 @@ pub struct PluginRuntimeDetail {
     pub legacy_capabilities: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginHostRuntimeKind {
+    DynamicLibrary,
+    WasmModule,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PluginHostRuntimeRegistration {
+    pub kind: PluginHostRuntimeKind,
+    pub declared_path: String,
+    pub resolved_path: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PluginRuntimeArtifacts {
     pub library_path: Option<String>,
     pub wasm_path: Option<String>,
     pub sampling_profile: Option<String>,
     pub legacy_runtime_path: Option<String>,
+    pub host_runtimes: Vec<PluginHostRuntimeRegistration>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

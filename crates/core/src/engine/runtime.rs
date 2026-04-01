@@ -2,9 +2,9 @@ use crate::backend::{
     BackendCapabilities, BackendParams, BackendRegistry, InferenceParams, Model, ModelMetadata,
 };
 use crate::control_plane::{
-    CoreRewriterStatus, ModelRuntimeInfo, PluginRuntimeArtifacts, PluginRuntimeDetail,
-    PluginRuntimeStatus, PluginUiContributionStatus, RuntimeSnapshot, SamplingHookSource,
-    WorkflowInventoryStatus,
+    CoreRewriterStatus, ModelRuntimeInfo, PluginHostRuntimeKind, PluginHostRuntimeRegistration,
+    PluginRuntimeArtifacts, PluginRuntimeDetail, PluginRuntimeStatus, PluginUiContributionStatus,
+    RuntimeSnapshot, SamplingHookSource, WorkflowInventoryStatus,
 };
 use crate::core::CoreRegistry;
 use crate::engine::types::{GenerationParams, ModelInfo};
@@ -12,7 +12,7 @@ use crate::error::{LociError, Result};
 use crate::model::{ModelConfig, ModelLoadStrategy};
 use crate::plugin::{
     discover_plugin_bundle_files, legacy_sampling_hook_from_compat, load_plugin_bundle_file,
-    load_plugin_manifest_file, RegisteredPlugin, SamplingHook,
+    load_plugin_manifest_file, RegisteredHostRuntimeKind, RegisteredPlugin, SamplingHook,
 };
 use loci_legacy_plugin_compat::{load_legacy_text_plugin_compat, LegacyTextCompat};
 use loci_plugin_api::{CoreComponent, PlatformTrack};
@@ -263,6 +263,22 @@ impl InferenceEngine {
                 wasm_path: plugin.manifest.runtime.wasm_path.clone(),
                 sampling_profile: plugin.manifest.runtime.sampling_profile.clone(),
                 legacy_runtime_path: plugin.manifest.compatibility.legacy_runtime_path.clone(),
+                host_runtimes: plugin
+                    .registered_host_runtimes()
+                    .iter()
+                    .map(|runtime| PluginHostRuntimeRegistration {
+                        kind: match runtime.kind() {
+                            RegisteredHostRuntimeKind::DynamicLibrary => {
+                                PluginHostRuntimeKind::DynamicLibrary
+                            }
+                            RegisteredHostRuntimeKind::WasmModule => {
+                                PluginHostRuntimeKind::WasmModule
+                            }
+                        },
+                        declared_path: runtime.declared_path().to_string(),
+                        resolved_path: runtime.resolved_path().display().to_string(),
+                    })
+                    .collect(),
             },
             model_providers: plugin.manifest.contributes.model_providers.clone(),
             inference_hooks: plugin.manifest.contributes.inference_hooks.clone(),
@@ -690,6 +706,7 @@ mod tests {
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
+    use std::path::Path;
     use std::sync::Arc;
 
     fn unique_temp_dir(name: &str) -> PathBuf {
@@ -1167,6 +1184,54 @@ logit = 42.0
 
     #[test]
     fn engine_plugin_runtime_detail_reports_governance_metadata() {
+        let dir = unique_temp_dir("governed-runtime-detail");
+        fs::create_dir_all(dir.join("governed-inference").join("runtime")).expect("mkdir");
+        fs::write(
+            dir.join("governed-inference")
+                .join("runtime")
+                .join("plugin.dll"),
+            b"binary",
+        )
+        .expect("write runtime");
+        fs::write(
+            dir.join("governed-inference").join("sampling-hook.toml"),
+            "post_sample_override = 4\n",
+        )
+        .expect("write profile");
+        fs::write(
+            dir.join("governed-inference").join("manifest.toml"),
+            r#"
+name = "governed-inference"
+version = "1.2.3"
+api_version = "1.0"
+target_tracks = ["ai_infra"]
+
+[contributes]
+model_providers = ["private-registry"]
+inference_hooks = ["sampling-profile"]
+workflows = ["agent.pipeline"]
+custom_nodes = ["node.rewrite"]
+commands = ["plugins.reload"]
+
+[contributes.ui_contributes]
+panels = ["inspector"]
+windows = ["governance"]
+widgets = ["status-pill"]
+
+[core_rewriters]
+inference = true
+workflow = true
+
+[runtime]
+library_path = "runtime/plugin.dll"
+sampling_profile = "sampling-hook.toml"
+
+[bootstrap]
+activate_on_load = ["inference"]
+"#,
+        )
+        .expect("write manifest");
+
         let mut engine = InferenceEngine {
             registry: Box::new(DefaultCoreRegistry::default()),
             backend_registry: BackendRegistry::with_builtin_backends(),
@@ -1179,44 +1244,7 @@ logit = 42.0
         };
 
         engine
-            .register_plugin(RegisteredPlugin::new(PluginManifest {
-                name: "governed-inference".to_string(),
-                version: "1.2.3".to_string(),
-                api_version: "1.0".to_string(),
-                min_host_version: None,
-                max_host_version: None,
-                target_tracks: vec![PlatformTrack::AiInfra],
-                contributes: ContributionPoints {
-                    model_providers: vec!["private-registry".to_string()],
-                    inference_hooks: vec!["sampling-profile".to_string()],
-                    workflows: vec!["agent.pipeline".to_string()],
-                    custom_nodes: vec!["node.rewrite".to_string()],
-                    commands: vec!["plugins.reload".to_string()],
-                    ui_contributes: loci_plugin_api::UiContributionPoints {
-                        panels: vec!["inspector".to_string()],
-                        windows: vec!["governance".to_string()],
-                        widgets: vec!["status-pill".to_string()],
-                    },
-                    ..Default::default()
-                },
-                core_rewriters: CoreRewriters {
-                    inference: true,
-                    workflow: true,
-                    ..Default::default()
-                },
-                runtime: PluginRuntime {
-                    library_path: Some("runtime/plugin.dll".to_string()),
-                    wasm_path: Some("runtime/plugin.wasm".to_string()),
-                    sampling_profile: Some("sampling-hook.toml".to_string()),
-                },
-                bootstrap: PluginBootstrap {
-                    activate_on_load: vec![CoreComponent::Inference],
-                },
-                compatibility: PluginCompatibility {
-                    legacy_runtime_path: Some("legacy/compat.dll".to_string()),
-                    ..Default::default()
-                },
-            }))
+            .load_plugin_manifest_file(dir.join("governed-inference").join("manifest.toml"))
             .expect("register plugin");
 
         let detail = engine
@@ -1224,10 +1252,13 @@ logit = 42.0
             .expect("detail should exist");
 
         assert_eq!(detail.status.name, "governed-inference");
-        assert!(!detail.status.declares_sampling_hook);
-        assert_eq!(detail.status.sampling_hook_source, SamplingHookSource::None);
-        assert!(!detail.status.registered_sampling_hook);
-        assert!(!detail.status.effective_sampling_hook);
+        assert!(detail.status.declares_sampling_hook);
+        assert_eq!(
+            detail.status.sampling_hook_source,
+            SamplingHookSource::NativeRuntime
+        );
+        assert!(detail.status.registered_sampling_hook);
+        assert!(detail.status.effective_sampling_hook);
         assert!(detail.status.active_inference_rewriter);
         assert_eq!(
             detail.declared_core_rewriters,
@@ -1242,17 +1273,24 @@ logit = 42.0
             detail.runtime_artifacts.library_path.as_deref(),
             Some("runtime/plugin.dll")
         );
-        assert_eq!(
-            detail.runtime_artifacts.wasm_path.as_deref(),
-            Some("runtime/plugin.wasm")
-        );
+        assert_eq!(detail.runtime_artifacts.wasm_path, None);
         assert_eq!(
             detail.runtime_artifacts.sampling_profile.as_deref(),
             Some("sampling-hook.toml")
         );
+        assert_eq!(detail.runtime_artifacts.legacy_runtime_path, None);
+        assert_eq!(detail.runtime_artifacts.host_runtimes.len(), 1);
         assert_eq!(
-            detail.runtime_artifacts.legacy_runtime_path.as_deref(),
-            Some("legacy/compat.dll")
+            detail.runtime_artifacts.host_runtimes[0].kind,
+            PluginHostRuntimeKind::DynamicLibrary
+        );
+        assert_eq!(
+            detail.runtime_artifacts.host_runtimes[0].declared_path,
+            "runtime/plugin.dll"
+        );
+        assert!(
+            Path::new(&detail.runtime_artifacts.host_runtimes[0].resolved_path)
+                .ends_with(Path::new("runtime").join("plugin.dll"))
         );
         assert_eq!(detail.model_providers, vec!["private-registry".to_string()]);
         assert_eq!(detail.inference_hooks, vec!["sampling-profile".to_string()]);
@@ -1262,6 +1300,8 @@ logit = 42.0
         assert_eq!(detail.ui.panels, vec!["inspector".to_string()]);
         assert_eq!(detail.ui.windows, vec!["governance".to_string()]);
         assert_eq!(detail.ui.widgets, vec!["status-pill".to_string()]);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     struct ForceTokenHook;

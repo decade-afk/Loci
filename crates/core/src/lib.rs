@@ -17,10 +17,11 @@ pub use crate::control_plane::{
     CoreRewriterActivationRequest, CoreRewriterActivationStatus, CoreRewriterInventoryStatus,
     CoreRewriterStatus, InferenceActivationStatus, LegacyTextPluginActivationStatus,
     ManagementHealthStatus, ModelLoadConfig, ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus,
-    ModelLoadStrategyRequest, ModelRuntimeInfo, PluginLoadRequest, PluginLoadSourceKind,
-    PluginLoadStatus, PluginRuntimeArtifacts, PluginRuntimeDetail, PluginRuntimeStatus,
-    PluginUiContributionStatus, RuntimeSnapshot, SamplingHookSource, TextGenerationParams,
-    TextGenerationRequest, TextGenerationResponse, WorkflowInventoryStatus,
+    ModelLoadStrategyRequest, ModelRuntimeInfo, PluginHostRuntimeKind,
+    PluginHostRuntimeRegistration, PluginLoadRequest, PluginLoadSourceKind, PluginLoadStatus,
+    PluginRuntimeArtifacts, PluginRuntimeDetail, PluginRuntimeStatus, PluginUiContributionStatus,
+    RuntimeSnapshot, SamplingHookSource, TextGenerationParams, TextGenerationRequest,
+    TextGenerationResponse, WorkflowInventoryStatus,
 };
 pub use crate::core::{
     CoreRegistry, DefaultCoreRegistry, EventBus, HardwareAbstraction, ModelRepository,

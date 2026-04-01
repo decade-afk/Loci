@@ -421,7 +421,7 @@ mod tests {
             },
             runtime: PluginRuntime {
                 library_path: Some("runtime/plugin.dll".to_string()),
-                wasm_path: Some("runtime/plugin.wasm".to_string()),
+                wasm_path: None,
                 sampling_profile: Some("sampling-hook.toml".to_string()),
             },
             bootstrap: PluginBootstrap::default(),
@@ -681,10 +681,7 @@ mod tests {
             value["runtime_artifacts"]["library_path"],
             "runtime/plugin.dll"
         );
-        assert_eq!(
-            value["runtime_artifacts"]["wasm_path"],
-            "runtime/plugin.wasm"
-        );
+        assert_eq!(value["runtime_artifacts"]["wasm_path"], Value::Null);
         assert_eq!(
             value["runtime_artifacts"]["sampling_profile"],
             "sampling-hook.toml"

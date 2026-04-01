@@ -357,7 +357,7 @@ mod tests {
             },
             runtime: PluginRuntime {
                 library_path: Some("runtime/plugin.dll".to_string()),
-                wasm_path: Some("runtime/plugin.wasm".to_string()),
+                wasm_path: None,
                 sampling_profile: Some("sampling-hook.toml".to_string()),
             },
             bootstrap: PluginBootstrap::default(),
@@ -951,10 +951,7 @@ target_tracks = ["ai_agent"]
             detail.runtime_artifacts.library_path.as_deref(),
             Some("runtime/plugin.dll")
         );
-        assert_eq!(
-            detail.runtime_artifacts.wasm_path.as_deref(),
-            Some("runtime/plugin.wasm")
-        );
+        assert_eq!(detail.runtime_artifacts.wasm_path, None);
         assert_eq!(
             detail.runtime_artifacts.sampling_profile.as_deref(),
             Some("sampling-hook.toml")
