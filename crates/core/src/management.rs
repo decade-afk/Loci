@@ -1,10 +1,10 @@
 use crate::backend::BackendCapabilities;
 use crate::control_plane::{
-    CoreRewriterStatus, InferenceActivationStatus, LegacyTextPluginActivationStatus,
-    ManagementHealthStatus, ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus,
-    ModelLoadStrategyRequest, PluginLoadRequest, PluginLoadSourceKind, PluginLoadStatus,
-    PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot, TextGenerationRequest,
-    TextGenerationResponse,
+    CoreRewriterActivationRequest, CoreRewriterActivationStatus, CoreRewriterStatus,
+    InferenceActivationStatus, LegacyTextPluginActivationStatus, ManagementHealthStatus,
+    ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus, ModelLoadStrategyRequest,
+    PluginLoadRequest, PluginLoadSourceKind, PluginLoadStatus, PluginRuntimeDetail,
+    PluginRuntimeStatus, RuntimeSnapshot, TextGenerationRequest, TextGenerationResponse,
 };
 use crate::engine::InferenceEngine;
 use crate::error::{LociError, Result};
@@ -63,13 +63,40 @@ impl ManagementService {
         &self,
         plugin_name: &str,
     ) -> Result<InferenceActivationStatus> {
+        let status = self.activate_core_rewriter(CoreRewriterActivationRequest {
+            component: CoreComponent::Inference,
+            plugin_name: plugin_name.to_string(),
+        })?;
+
+        Ok(InferenceActivationStatus {
+            status: status.status,
+            component: status.component,
+            plugin_name: status.plugin_name,
+            active_inference: status.active_inference,
+        })
+    }
+
+    pub fn activate_core_rewriter(
+        &self,
+        request: CoreRewriterActivationRequest,
+    ) -> Result<CoreRewriterActivationStatus> {
         self.with_engine_mut(|engine| {
-            engine.activate_inference_plugin(plugin_name)?;
-            Ok(InferenceActivationStatus {
+            let component = request.component;
+            let plugin_name = request.plugin_name;
+
+            match component {
+                CoreComponent::Inference => engine.activate_inference_plugin(&plugin_name)?,
+                _ => engine.activate_core_rewriter(component, &plugin_name)?,
+            }
+
+            let snapshot = engine.runtime_snapshot();
+
+            Ok(CoreRewriterActivationStatus {
                 status: "activated",
-                component: CoreComponent::Inference,
-                plugin_name: plugin_name.to_string(),
-                active_inference: engine.runtime_snapshot().active_inference,
+                component,
+                plugin_name,
+                active_inference: snapshot.active_inference,
+                configured_core_rewriters: snapshot.configured_core_rewriters,
             })
         })
     }
@@ -303,6 +330,29 @@ mod tests {
         ManagementService::new(engine)
     }
 
+    fn workflow_service() -> ManagementService {
+        let mut engine = InferenceEngine::builder().build().expect("build engine");
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "workflow-override".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiAgent],
+                contributes: Default::default(),
+                core_rewriters: CoreRewriters {
+                    workflow: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
+            }))
+            .expect("register plugin");
+        ManagementService::new(engine)
+    }
+
     fn legacy_service() -> ManagementService {
         let mut engine = InferenceEngine::builder().build().expect("build engine");
         engine
@@ -325,6 +375,47 @@ mod tests {
         engine
             .load_model("mock", "demo.gguf", BackendParams::default())
             .expect("load model");
+        ManagementService::new(engine)
+    }
+
+    fn combined_rewriter_service() -> ManagementService {
+        let mut engine = InferenceEngine::builder().build().expect("build engine");
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "managed-inference".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiInfra],
+                contributes: Default::default(),
+                core_rewriters: CoreRewriters {
+                    inference: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
+            }))
+            .expect("register inference plugin");
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "workflow-override".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiAgent],
+                contributes: Default::default(),
+                core_rewriters: CoreRewriters {
+                    workflow: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
+            }))
+            .expect("register workflow plugin");
         ManagementService::new(engine)
     }
 
@@ -552,6 +643,104 @@ target_tracks = ["ai_agent"]
                 component: CoreComponent::Inference,
                 plugin_name: "managed-inference".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn service_activates_generic_workflow_rewriter() {
+        let service = workflow_service();
+        let status = service
+            .activate_core_rewriter(CoreRewriterActivationRequest {
+                component: CoreComponent::Workflow,
+                plugin_name: "workflow-override".to_string(),
+            })
+            .expect("activate workflow");
+
+        assert_eq!(status.status, "activated");
+        assert_eq!(status.component, CoreComponent::Workflow);
+        assert_eq!(status.plugin_name, "workflow-override");
+        assert_eq!(status.active_inference, None);
+        assert_eq!(
+            status.configured_core_rewriters,
+            vec![CoreRewriterStatus {
+                component: CoreComponent::Workflow,
+                plugin_name: "workflow-override".to_string(),
+            }]
+        );
+        assert_eq!(
+            service
+                .configured_core_rewriters()
+                .expect("configured rewriters"),
+            vec![CoreRewriterStatus {
+                component: CoreComponent::Workflow,
+                plugin_name: "workflow-override".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn service_generic_inference_activation_preserves_legacy_sampling_materialization() {
+        let service = legacy_sampling_service();
+        let activation = service
+            .activate_core_rewriter(CoreRewriterActivationRequest {
+                component: CoreComponent::Inference,
+                plugin_name: "legacy-sampler".to_string(),
+            })
+            .expect("activate legacy sampler through generic seam");
+
+        assert_eq!(activation.status, "activated");
+        assert_eq!(activation.component, CoreComponent::Inference);
+        assert_eq!(activation.plugin_name, "legacy-sampler");
+        assert_eq!(
+            activation.active_inference.as_deref(),
+            Some("legacy-sampler")
+        );
+        assert_eq!(
+            activation.configured_core_rewriters,
+            vec![CoreRewriterStatus {
+                component: CoreComponent::Inference,
+                plugin_name: "legacy-sampler".to_string(),
+            }]
+        );
+
+        let detail = service
+            .plugin_detail("legacy-sampler")
+            .expect("detail query")
+            .expect("plugin detail");
+        assert!(detail.status.materialized_legacy_runtime);
+        assert!(detail.status.registered_sampling_hook);
+        assert!(detail.status.effective_sampling_hook);
+    }
+
+    #[test]
+    fn service_generic_activation_status_reports_complete_rewriter_snapshot() {
+        let service = combined_rewriter_service();
+        service
+            .activate_core_rewriter(CoreRewriterActivationRequest {
+                component: CoreComponent::Workflow,
+                plugin_name: "workflow-override".to_string(),
+            })
+            .expect("activate workflow");
+
+        let activation = service
+            .activate_core_rewriter(CoreRewriterActivationRequest {
+                component: CoreComponent::Inference,
+                plugin_name: "managed-inference".to_string(),
+            })
+            .expect("activate inference");
+
+        assert_eq!(
+            activation.configured_core_rewriters,
+            vec![
+                CoreRewriterStatus {
+                    component: CoreComponent::Inference,
+                    plugin_name: "managed-inference".to_string(),
+                },
+                CoreRewriterStatus {
+                    component: CoreComponent::Workflow,
+                    plugin_name: "workflow-override".to_string(),
+                },
+            ]
         );
     }
 

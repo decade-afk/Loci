@@ -14,8 +14,9 @@ pub use crate::backend::{
     InferenceParams, Model, ModelMetadata,
 };
 pub use crate::control_plane::{
-    CoreRewriterStatus, InferenceActivationStatus, LegacyTextPluginActivationStatus,
-    ManagementHealthStatus, ModelLoadConfig, ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus,
+    CoreRewriterActivationRequest, CoreRewriterActivationStatus, CoreRewriterStatus,
+    InferenceActivationStatus, LegacyTextPluginActivationStatus, ManagementHealthStatus,
+    ModelLoadConfig, ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus,
     ModelLoadStrategyRequest, ModelRuntimeInfo, PluginLoadRequest, PluginLoadSourceKind,
     PluginLoadStatus, PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot,
     SamplingHookSource, TextGenerationParams, TextGenerationRequest, TextGenerationResponse,

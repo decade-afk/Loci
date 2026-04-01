@@ -1,4 +1,7 @@
-use loci_core::{ManagementService, ModelLoadRequest, PluginLoadRequest, TextGenerationRequest};
+use loci_core::{
+    CoreRewriterActivationRequest, ManagementService, ModelLoadRequest, PluginLoadRequest,
+    TextGenerationRequest,
+};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -138,6 +141,21 @@ pub fn handle_management_request(
                 Err(error) => json_response(400, json!({ "error": error.to_string() })),
             }
         }
+        ("POST", "/v1/core/rewriters/activate") => {
+            let activation_request = match core_rewriter_activation_request_from_body(&request.body)
+            {
+                Ok(activation_request) => activation_request,
+                Err(error) => return json_response(400, json!({ "error": error.to_string() })),
+            };
+
+            match service.activate_core_rewriter(activation_request) {
+                Ok(status) => match serde_json::to_value(status) {
+                    Ok(status) => json_response(200, status),
+                    Err(error) => json_response(500, json!({ "error": error.to_string() })),
+                },
+                Err(error) => json_response(400, json!({ "error": error.to_string() })),
+            }
+        }
         ("POST", "/v1/core/inference/activate") => {
             let plugin_name = match plugin_name_from_body(&request.body) {
                 Ok(plugin_name) => plugin_name,
@@ -217,6 +235,12 @@ fn model_load_request_from_body(body: &[u8]) -> anyhow::Result<ModelLoadRequest>
 }
 
 fn plugin_load_request_from_body(body: &[u8]) -> anyhow::Result<PluginLoadRequest> {
+    serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON body: {error}"))
+}
+
+fn core_rewriter_activation_request_from_body(
+    body: &[u8],
+) -> anyhow::Result<CoreRewriterActivationRequest> {
     serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON body: {error}"))
 }
 
@@ -388,6 +412,29 @@ mod tests {
         manifest.contributes.inference_hooks = vec!["sampling-profile".to_string()];
         engine
             .register_plugin(RegisteredPlugin::new(manifest))
+            .expect("register plugin");
+        ManagementService::new(engine)
+    }
+
+    fn workflow_service() -> ManagementService {
+        let mut engine = InferenceEngine::builder().build().expect("build engine");
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "workflow-override".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiAgent],
+                contributes: Default::default(),
+                core_rewriters: CoreRewriters {
+                    workflow: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
+            }))
             .expect("register plugin");
         ManagementService::new(engine)
     }
@@ -737,6 +784,7 @@ target_tracks = ["ai_infra"]
         let value: Value = serde_json::from_slice(&response.body).expect("json");
         assert_eq!(value["component"], "inference");
         assert_eq!(value["active_inference"], "managed-inference");
+        assert!(value.get("configured_core_rewriters").is_none());
 
         let runtime = handle_management_request(
             &service,
@@ -751,6 +799,84 @@ target_tracks = ["ai_infra"]
             rewriters,
             json!([{ "component": "inference", "plugin_name": "managed-inference" }])
         );
+    }
+
+    #[test]
+    fn core_rewriter_activate_route_switches_non_inference_component() {
+        let service = workflow_service();
+        let response = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/core/rewriters/activate".to_string(),
+                body: br#"{"component":"workflow","plugin_name":"workflow-override"}"#.to_vec(),
+            },
+        );
+
+        assert_eq!(response.status_code, 200);
+        let value: Value = serde_json::from_slice(&response.body).expect("json");
+        assert_eq!(value["component"], "workflow");
+        assert_eq!(value["plugin_name"], "workflow-override");
+        assert_eq!(value["active_inference"], Value::Null);
+        assert_eq!(
+            value["configured_core_rewriters"],
+            json!([{ "component": "workflow", "plugin_name": "workflow-override" }])
+        );
+
+        let runtime = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/core/rewriters".to_string(),
+                body: Vec::new(),
+            },
+        );
+        let rewriters: Value = serde_json::from_slice(&runtime.body).expect("json");
+        assert_eq!(
+            rewriters,
+            json!([{ "component": "workflow", "plugin_name": "workflow-override" }])
+        );
+    }
+
+    #[test]
+    fn core_rewriter_activate_route_supports_inference_component() {
+        let service = plugin_service();
+        let response = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/core/rewriters/activate".to_string(),
+                body: br#"{"component":"inference","plugin_name":"managed-inference"}"#.to_vec(),
+            },
+        );
+
+        assert_eq!(response.status_code, 200);
+        let value: Value = serde_json::from_slice(&response.body).expect("json");
+        assert_eq!(value["component"], "inference");
+        assert_eq!(value["active_inference"], "managed-inference");
+        assert_eq!(
+            value["configured_core_rewriters"],
+            json!([{ "component": "inference", "plugin_name": "managed-inference" }])
+        );
+    }
+
+    #[test]
+    fn generic_core_rewriter_route_rejects_missing_component() {
+        let response = handle_management_request(
+            &workflow_service(),
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/core/rewriters/activate".to_string(),
+                body: br#"{"plugin_name":"workflow-override"}"#.to_vec(),
+            },
+        );
+
+        assert_eq!(response.status_code, 400);
+        let value: Value = serde_json::from_slice(&response.body).expect("json");
+        assert!(value["error"]
+            .as_str()
+            .expect("error string")
+            .contains("component"));
     }
 
     #[test]

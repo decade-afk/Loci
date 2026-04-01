@@ -71,11 +71,26 @@ pub struct ManagementHealthStatus {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CoreRewriterActivationStatus {
+    pub status: &'static str,
+    pub component: CoreComponent,
+    pub plugin_name: String,
+    pub active_inference: Option<String>,
+    pub configured_core_rewriters: Vec<CoreRewriterStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct InferenceActivationStatus {
     pub status: &'static str,
     pub component: CoreComponent,
     pub plugin_name: String,
     pub active_inference: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoreRewriterActivationRequest {
+    pub component: CoreComponent,
+    pub plugin_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
