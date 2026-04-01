@@ -4,6 +4,7 @@ use crate::core::{CoreRegistry, DefaultCoreRegistry};
 use crate::engine::runtime::InferenceEngine;
 use crate::error::Result;
 use crate::model::{ModelConfig, ModelLoadStrategy};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 pub struct InferenceEngineBuilder {
@@ -169,9 +170,9 @@ impl InferenceEngineBuilder {
     }
 
     pub fn build(self) -> Result<InferenceEngine> {
-        let backend_registry = self.backend_registry.unwrap_or_else(|| {
-            BackendRegistry::with_builtin_backends()
-        });
+        let backend_registry = self
+            .backend_registry
+            .unwrap_or_else(|| BackendRegistry::with_builtin_backends());
 
         let mut engine = InferenceEngine {
             registry: self
@@ -187,6 +188,8 @@ impl InferenceEngineBuilder {
                 n_threads: self.n_threads,
                 ..Default::default()
             },
+            active_legacy_text_plugins: BTreeSet::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
         if let Some(model_config) = self.model_config {

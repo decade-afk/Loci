@@ -7,7 +7,9 @@ use crate::plugin::{
     discover_plugin_bundle_files, load_plugin_bundle_file, load_plugin_manifest_file,
     RegisteredPlugin, SamplingHook,
 };
+use loci_legacy_plugin_compat::{load_legacy_text_plugin_compat, LegacyTextCompat};
 use loci_plugin_api::{CoreComponent, PlatformTrack};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -18,6 +20,8 @@ pub struct InferenceEngine {
     pub(crate) model: Option<Box<dyn Model>>,
     pub(crate) model_path: Option<PathBuf>,
     pub(crate) default_inference_params: InferenceParams,
+    pub(crate) active_legacy_text_plugins: BTreeSet<String>,
+    pub(crate) legacy_text_plugin_runtimes: BTreeMap<String, Arc<dyn LegacyTextCompat>>,
 }
 
 impl InferenceEngine {
@@ -139,6 +143,100 @@ impl InferenceEngine {
         self.registry.active_core_rewriter(component)
     }
 
+    pub fn activate_legacy_text_plugin(&mut self, plugin_name: &str) -> Result<()> {
+        let (manifest_name, manifest_version, legacy_runtime_path, legacy_capabilities, runtime) = {
+            let plugin = self
+                .registry
+                .plugin_manager()
+                .get(plugin_name)
+                .ok_or_else(|| {
+                    LociError::from(anyhow::anyhow!("plugin not registered: {plugin_name}"))
+                })?;
+
+            if !plugin.is_legacy_compat_bundle() {
+                return Err(LociError::from(anyhow::anyhow!(
+                    "plugin `{plugin_name}` is not a legacy compatibility bundle"
+                )));
+            }
+
+            if plugin.declares_legacy_capability("on_token") {
+                return Err(LociError::from(anyhow::anyhow!(
+                    "plugin `{plugin_name}` declares legacy `on_token`, but streaming compat is not implemented"
+                )));
+            }
+
+            if !plugin.supports_legacy_pre_generate() && !plugin.supports_legacy_post_generate() {
+                return Err(LociError::from(anyhow::anyhow!(
+                    "plugin `{plugin_name}` does not expose supported legacy pre/post text hooks"
+                )));
+            }
+
+            (
+                plugin.manifest.name.clone(),
+                plugin.manifest.version.clone(),
+                plugin.legacy_runtime_path().map(str::to_string),
+                plugin.manifest.compatibility.legacy_capabilities.clone(),
+                plugin.legacy_text_compat_runtime(),
+            )
+        };
+
+        if self.active_legacy_text_plugins.contains(plugin_name) {
+            return Ok(());
+        }
+
+        let runtime = if let Some(runtime) = runtime {
+            runtime
+        } else {
+            let runtime_path = legacy_runtime_path.ok_or_else(|| {
+                LociError::from(anyhow::anyhow!(
+                    "plugin `{plugin_name}` does not declare a legacy runtime path"
+                ))
+            })?;
+            load_legacy_text_plugin_compat(
+                Path::new(&runtime_path),
+                &manifest_name,
+                &manifest_version,
+                &legacy_capabilities,
+            )
+            .map_err(LociError::from)?
+            .ok_or_else(|| {
+                LociError::from(anyhow::anyhow!(
+                    "plugin `{plugin_name}` does not provide a supported legacy text compat runtime"
+                ))
+            })?
+        };
+
+        self.legacy_text_plugin_runtimes
+            .insert(plugin_name.to_string(), runtime);
+        self.active_legacy_text_plugins
+            .insert(plugin_name.to_string());
+        Ok(())
+    }
+
+    pub fn deactivate_legacy_text_plugin(&mut self, plugin_name: &str) -> Result<()> {
+        let existed = self.active_legacy_text_plugins.remove(plugin_name);
+        if existed {
+            return Ok(());
+        }
+
+        Err(LociError::from(anyhow::anyhow!(
+            "legacy text plugin not active: {plugin_name}"
+        )))
+    }
+
+    pub fn active_legacy_text_plugins(&self) -> Vec<String> {
+        self.registry
+            .plugin_manager()
+            .list()
+            .iter()
+            .filter(|plugin| {
+                self.active_legacy_text_plugins
+                    .contains(&plugin.manifest.name)
+            })
+            .map(|plugin| plugin.manifest.name.clone())
+            .collect()
+    }
+
     pub fn load_plugin_manifest_file<P: AsRef<Path>>(&mut self, manifest_path: P) -> Result<()> {
         let plugin = load_plugin_manifest_file(manifest_path).map_err(LociError::from)?;
         self.register_plugin(plugin)
@@ -210,11 +308,13 @@ impl InferenceEngine {
     }
 
     pub fn generate(&mut self, prompt: &str, params: &InferenceParams) -> Result<String> {
+        let prompt = self.apply_legacy_pre_generate(prompt)?;
         let model = self
             .model
             .as_mut()
             .ok_or_else(|| LociError::InferenceError("no model loaded".to_string()))?;
-        model.infer_text(prompt, params)
+        let response = model.infer_text(&prompt, params)?;
+        self.apply_legacy_post_generate(&response)
     }
 
     pub fn generate_legacy(&mut self, prompt: &str, params: GenerationParams) -> Result<String> {
@@ -233,6 +333,56 @@ impl InferenceEngine {
             model.attach_sampling_runtime(runtime)?;
         }
         Ok(())
+    }
+
+    fn apply_legacy_pre_generate(&self, prompt: &str) -> Result<String> {
+        let mut prompt = prompt.to_string();
+        for plugin in self.registry.plugin_manager().list() {
+            if !self
+                .active_legacy_text_plugins
+                .contains(&plugin.manifest.name)
+                || !plugin.supports_legacy_pre_generate()
+            {
+                continue;
+            }
+
+            let runtime = self
+                .legacy_text_plugin_runtimes
+                .get(&plugin.manifest.name)
+                .ok_or_else(|| {
+                    LociError::from(anyhow::anyhow!(
+                        "legacy text runtime missing for active plugin `{}`",
+                        plugin.manifest.name
+                    ))
+                })?;
+            prompt = runtime.pre_generate(&prompt).map_err(LociError::from)?;
+        }
+        Ok(prompt)
+    }
+
+    fn apply_legacy_post_generate(&self, response: &str) -> Result<String> {
+        let mut response = response.to_string();
+        for plugin in self.registry.plugin_manager().list() {
+            if !self
+                .active_legacy_text_plugins
+                .contains(&plugin.manifest.name)
+                || !plugin.supports_legacy_post_generate()
+            {
+                continue;
+            }
+
+            let runtime = self
+                .legacy_text_plugin_runtimes
+                .get(&plugin.manifest.name)
+                .ok_or_else(|| {
+                    LociError::from(anyhow::anyhow!(
+                        "legacy text runtime missing for active plugin `{}`",
+                        plugin.manifest.name
+                    ))
+                })?;
+            response = runtime.post_generate(&response).map_err(LociError::from)?;
+        }
+        Ok(response)
     }
 
     fn generation_params_to_inference(&self, params: GenerationParams) -> InferenceParams {
@@ -270,11 +420,13 @@ impl InferenceEngine {
 mod tests {
     use super::*;
     use crate::core::DefaultCoreRegistry;
+    use crate::plugin::registered_legacy_text_plugin_for_tests;
     use crate::sampler::LogitsView;
     use loci_plugin_api::{
         ContributionPoints, CoreRewriters, PluginBootstrap, PluginCompatibility, PluginManifest,
         PluginRuntime,
     };
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::sync::Arc;
 
@@ -297,6 +449,8 @@ mod tests {
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
         engine
@@ -372,6 +526,8 @@ workflow = true
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
         let loaded = engine.load_plugins_from_dir(&dir).expect("load plugins");
@@ -430,6 +586,8 @@ logit = 42.0
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
         let loaded = engine.load_plugins_from_dir(&dir).expect("load plugins");
@@ -475,6 +633,8 @@ logit = 42.0
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
         let loaded = engine.load_plugins_from_dir(&dir).expect("load plugins");
@@ -483,6 +643,86 @@ logit = 42.0
         assert_eq!(engine.sampling_hook_count(), 0);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn engine_legacy_text_plugin_requires_explicit_activation() {
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        engine
+            .register_plugin(registered_legacy_text_plugin_for_tests(
+                "legacy-text",
+                &["pre_generate", "post_generate"],
+            ))
+            .expect("register legacy text plugin");
+        engine
+            .load_model("mock", "demo.gguf", BackendParams::default())
+            .expect("load model");
+
+        let inactive_output = engine
+            .generate("hello", &InferenceParams::default())
+            .expect("generate without activation");
+        assert!(inactive_output.starts_with("mock:hello"));
+        assert_eq!(engine.active_legacy_text_plugins(), Vec::<String>::new());
+
+        engine
+            .activate_legacy_text_plugin("legacy-text")
+            .expect("activate legacy text plugin");
+        assert_eq!(
+            engine.active_legacy_text_plugins(),
+            vec!["legacy-text".to_string()]
+        );
+
+        let active_output = engine
+            .generate("hello", &InferenceParams::default())
+            .expect("generate with activation");
+        assert!(active_output.starts_with("mock:[legacy-text:pre]hello"));
+        assert!(active_output.ends_with("[legacy-text:post]"));
+
+        engine
+            .deactivate_legacy_text_plugin("legacy-text")
+            .expect("deactivate legacy text plugin");
+        let deactivated_output = engine
+            .generate("hello", &InferenceParams::default())
+            .expect("generate after deactivation");
+        assert!(deactivated_output.starts_with("mock:hello"));
+    }
+
+    #[test]
+    fn engine_rejects_legacy_text_activation_when_on_token_is_declared() {
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        engine
+            .register_plugin(registered_legacy_text_plugin_for_tests(
+                "legacy-stream",
+                &["pre_generate", "on_token"],
+            ))
+            .expect("register legacy stream plugin");
+
+        let err = engine
+            .activate_legacy_text_plugin("legacy-stream")
+            .expect_err("activation should fail");
+        assert!(err
+            .to_string()
+            .contains("streaming compat is not implemented"));
     }
 
     struct ForceTokenHook;
@@ -507,6 +747,8 @@ logit = 42.0
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
         engine
@@ -560,6 +802,8 @@ logit = 42.0
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
         let err = engine
@@ -594,6 +838,8 @@ logit = 42.0
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
         };
 
         engine

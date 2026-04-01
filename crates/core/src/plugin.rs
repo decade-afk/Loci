@@ -1,7 +1,7 @@
 use crate::error::Result as CoreResult;
 use crate::sampler::LogitsView;
 use anyhow::{bail, Context, Result};
-use loci_legacy_plugin_compat::{load_legacy_text_plugin_sampling_compat, LegacySamplingCompat};
+use loci_legacy_plugin_compat::{load_legacy_text_plugin_compat, LegacyTextCompat};
 use loci_plugin_api::{
     ContributionPoints, CoreComponent, CoreRewriters, LegacyRuntimeBridge, PlatformTrack,
     PluginBootstrap, PluginCompatibility, PluginManifest, PluginRuntime, PluginSourceFormat,
@@ -19,6 +19,12 @@ const LEGACY_PLUGIN_ABI_VERSION: u32 = 1;
 const LEGACY_DYNAMIC_EXTENSIONS: &[&str] = &["dll", "so", "dylib"];
 const LEGACY_WASM_EXTENSIONS: &[&str] = &["wasm"];
 const LEGACY_SAMPLING_CAPABILITIES: &[&str] = &["transform_logits", "post_sample"];
+const LEGACY_TEXT_COMPAT_CAPABILITIES: &[&str] = &[
+    "pre_generate",
+    "post_generate",
+    "transform_logits",
+    "post_sample",
+];
 
 pub trait SamplingHook: Send + Sync {
     fn transform_logits(
@@ -118,11 +124,11 @@ fn default_legacy_plugin_abi_version() -> u32 {
 
 #[derive(Clone)]
 struct LegacySamplingCompatHook {
-    compat: Arc<dyn LegacySamplingCompat>,
+    compat: Arc<dyn LegacyTextCompat>,
 }
 
 impl LegacySamplingCompatHook {
-    fn new(compat: Arc<dyn LegacySamplingCompat>) -> Self {
+    fn new(compat: Arc<dyn LegacyTextCompat>) -> Self {
         Self { compat }
     }
 }
@@ -148,6 +154,7 @@ impl SamplingHook for LegacySamplingCompatHook {
 #[derive(Clone, Default)]
 struct RegisteredPluginRuntime {
     sampling_hook: Option<Arc<dyn SamplingHook>>,
+    legacy_text_compat: Option<Arc<dyn LegacyTextCompat>>,
 }
 
 #[derive(Clone, Default)]
@@ -250,6 +257,26 @@ impl RegisteredPlugin {
         self.manifest.compatibility.legacy_runtime_path.as_deref()
     }
 
+    pub fn has_legacy_text_compat_runtime(&self) -> bool {
+        self.runtime.legacy_text_compat.is_some()
+    }
+
+    pub fn supports_legacy_pre_generate(&self) -> bool {
+        self.manifest
+            .compatibility
+            .legacy_capabilities
+            .iter()
+            .any(|candidate| candidate == "pre_generate")
+    }
+
+    pub fn supports_legacy_post_generate(&self) -> bool {
+        self.manifest
+            .compatibility
+            .legacy_capabilities
+            .iter()
+            .any(|candidate| candidate == "post_generate")
+    }
+
     fn with_manifest_location(mut self, manifest_path: PathBuf) -> Self {
         self.root_dir = manifest_path.parent().map(Path::to_path_buf);
         self.manifest_path = Some(manifest_path);
@@ -263,6 +290,18 @@ impl RegisteredPlugin {
 
     fn sampling_hook(&self) -> Option<Arc<dyn SamplingHook>> {
         self.runtime.sampling_hook.as_ref().map(Arc::clone)
+    }
+
+    pub(crate) fn legacy_text_compat_runtime(&self) -> Option<Arc<dyn LegacyTextCompat>> {
+        self.runtime.legacy_text_compat.as_ref().map(Arc::clone)
+    }
+
+    pub(crate) fn declares_legacy_capability(&self, capability: &str) -> bool {
+        self.manifest
+            .compatibility
+            .legacy_capabilities
+            .iter()
+            .any(|candidate| candidate == capability)
     }
 }
 
@@ -431,6 +470,19 @@ fn legacy_sampling_capabilities(contract: &LegacyPluginContractManifest) -> Vec<
         .collect()
 }
 
+fn legacy_text_compat_capabilities(contract: &LegacyPluginContractManifest) -> Vec<String> {
+    if contract.kind != LegacyPluginContractKind::TextPlugin {
+        return Vec::new();
+    }
+
+    contract
+        .capabilities
+        .iter()
+        .filter(|capability| LEGACY_TEXT_COMPAT_CAPABILITIES.contains(&capability.as_str()))
+        .cloned()
+        .collect()
+}
+
 fn build_legacy_contract_candidates(path: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -525,9 +577,11 @@ fn convert_legacy_contract_manifest(
     runtime_artifact_path: &Path,
     contract: &LegacyPluginContractManifest,
 ) -> PluginManifest {
+    let compat_capabilities = legacy_text_compat_capabilities(contract);
     let sampling_capabilities = legacy_sampling_capabilities(contract);
-    let enables_sampling_bridge =
-        is_legacy_dynamic_library(runtime_artifact_path) && !sampling_capabilities.is_empty();
+    let enables_text_compat_bridge =
+        is_legacy_dynamic_library(runtime_artifact_path) && !compat_capabilities.is_empty();
+    let enables_sampling_bridge = enables_text_compat_bridge && !sampling_capabilities.is_empty();
 
     PluginManifest {
         name: contract.name.clone(),
@@ -552,8 +606,8 @@ fn convert_legacy_contract_manifest(
             legacy_abi_version: Some(contract.abi_version),
             legacy_runtime_path: Some(runtime_artifact_path.to_string_lossy().to_string()),
             legacy_capabilities: contract.capabilities.clone(),
-            runtime_bridge: if enables_sampling_bridge {
-                LegacyRuntimeBridge::LegacyTextSamplingV1
+            runtime_bridge: if enables_text_compat_bridge {
+                LegacyRuntimeBridge::LegacyTextPluginV1
             } else {
                 LegacyRuntimeBridge::None
             },
@@ -637,27 +691,56 @@ fn load_registered_plugin_runtime(
         })
         .transpose()?;
 
-    Ok(RegisteredPluginRuntime { sampling_hook })
+    Ok(RegisteredPluginRuntime {
+        sampling_hook,
+        legacy_text_compat: None,
+    })
 }
 
 fn load_legacy_plugin_runtime(
     runtime_artifact_path: &Path,
     manifest: &PluginManifest,
 ) -> Result<RegisteredPluginRuntime> {
-    if manifest.compatibility.runtime_bridge != LegacyRuntimeBridge::LegacyTextSamplingV1 {
+    if manifest.compatibility.runtime_bridge != LegacyRuntimeBridge::LegacyTextPluginV1 {
         return Ok(RegisteredPluginRuntime::default());
     }
 
-    let compat = load_legacy_text_plugin_sampling_compat(
+    if !manifest
+        .compatibility
+        .legacy_capabilities
+        .iter()
+        .any(|capability| LEGACY_SAMPLING_CAPABILITIES.contains(&capability.as_str()))
+    {
+        return Ok(RegisteredPluginRuntime {
+            sampling_hook: None,
+            legacy_text_compat: None,
+        });
+    }
+
+    let compat = load_legacy_text_plugin_compat(
         runtime_artifact_path,
         &manifest.name,
         &manifest.version,
         &manifest.compatibility.legacy_capabilities,
     )?;
-    let sampling_hook = compat
-        .map(|compat| Arc::new(LegacySamplingCompatHook::new(compat)) as Arc<dyn SamplingHook>);
+    let sampling_hook = compat.as_ref().and_then(|compat| {
+        if manifest
+            .compatibility
+            .legacy_capabilities
+            .iter()
+            .any(|capability| LEGACY_SAMPLING_CAPABILITIES.contains(&capability.as_str()))
+        {
+            Some(Arc::new(LegacySamplingCompatHook::new(Arc::clone(compat)))
+                as Arc<dyn SamplingHook>)
+        } else {
+            None
+        }
+    });
 
-    Ok(RegisteredPluginRuntime { sampling_hook })
+    Ok(RegisteredPluginRuntime {
+        sampling_hook,
+        legacy_text_compat: compat,
+    })
 }
 
 fn load_legacy_plugin_bundle(runtime_artifact_path: &Path) -> Result<RegisteredPlugin> {
@@ -924,6 +1007,82 @@ impl crate::core::PluginManager for InMemoryPluginManager {
 }
 
 #[cfg(test)]
+struct TestLegacyTextCompat {
+    plugin_name: String,
+}
+
+#[cfg(test)]
+impl LegacyTextCompat for TestLegacyTextCompat {
+    fn pre_generate(&self, prompt: &str) -> Result<String> {
+        Ok(format!("[{}:pre]{prompt}", self.plugin_name))
+    }
+
+    fn post_generate(&self, response: &str) -> Result<String> {
+        Ok(format!("{response}[{}:post]", self.plugin_name))
+    }
+
+    fn transform_logits(&self, _logits: &mut [f32], _context_tokens: &[i32]) -> Result<()> {
+        Ok(())
+    }
+
+    fn post_sample(&self, token_id: i32) -> Result<i32> {
+        Ok(token_id)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn registered_legacy_text_plugin_for_tests(
+    plugin_name: &str,
+    capabilities: &[&str],
+) -> RegisteredPlugin {
+    RegisteredPlugin {
+        manifest: PluginManifest {
+            name: plugin_name.to_string(),
+            version: "1.0.0".to_string(),
+            api_version: HOST_PLUGIN_API_VERSION.to_string(),
+            min_host_version: None,
+            max_host_version: None,
+            target_tracks: vec![PlatformTrack::AiInfra],
+            contributes: ContributionPoints {
+                inference_hooks: capabilities
+                    .iter()
+                    .filter(|capability| LEGACY_SAMPLING_CAPABILITIES.contains(capability))
+                    .map(|capability| (*capability).to_string())
+                    .collect(),
+                ..Default::default()
+            },
+            core_rewriters: CoreRewriters {
+                inference: capabilities
+                    .iter()
+                    .any(|capability| LEGACY_SAMPLING_CAPABILITIES.contains(capability)),
+                ..Default::default()
+            },
+            runtime: PluginRuntime::default(),
+            bootstrap: PluginBootstrap::default(),
+            compatibility: PluginCompatibility {
+                source_format: PluginSourceFormat::LegacyContract,
+                legacy_kind: Some("text_plugin".to_string()),
+                legacy_abi_version: Some(LEGACY_PLUGIN_ABI_VERSION),
+                legacy_runtime_path: Some(format!("plugins/{plugin_name}.dll")),
+                legacy_capabilities: capabilities
+                    .iter()
+                    .map(|capability| (*capability).to_string())
+                    .collect(),
+                runtime_bridge: LegacyRuntimeBridge::LegacyTextPluginV1,
+            },
+        },
+        manifest_path: None,
+        root_dir: None,
+        runtime: RegisteredPluginRuntime {
+            sampling_hook: None,
+            legacy_text_compat: Some(Arc::new(TestLegacyTextCompat {
+                plugin_name: plugin_name.to_string(),
+            })),
+        },
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::PluginManager;
@@ -1074,9 +1233,12 @@ api_version = "1.0"
         );
         assert_eq!(
             plugin.manifest.compatibility.runtime_bridge,
-            LegacyRuntimeBridge::None
+            LegacyRuntimeBridge::LegacyTextPluginV1
         );
         assert!(!plugin.declares_inference_sampling_runtime());
+        assert!(!plugin.has_legacy_text_compat_runtime());
+        assert!(plugin.supports_legacy_pre_generate());
+        assert!(plugin.supports_legacy_post_generate());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1117,8 +1279,11 @@ api_version = "1.0"
         );
         assert_eq!(
             manifest.compatibility.runtime_bridge,
-            LegacyRuntimeBridge::LegacyTextSamplingV1
+            LegacyRuntimeBridge::LegacyTextPluginV1
         );
+        let plugin = RegisteredPlugin::new(manifest);
+        assert!(!plugin.supports_legacy_pre_generate());
+        assert!(plugin.supports_legacy_post_generate());
     }
 
     #[test]

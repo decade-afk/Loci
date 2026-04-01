@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 
 type PluginConstructor = unsafe extern "C" fn() -> DynamicPluginOpaque;
 
-pub trait LegacySamplingCompat: Send + Sync {
+pub trait LegacyTextCompat: Send + Sync {
+    fn pre_generate(&self, prompt: &str) -> Result<String>;
+    fn post_generate(&self, response: &str) -> Result<String>;
     fn transform_logits(&self, logits: &mut [f32], context_tokens: &[i32]) -> Result<()>;
     fn post_sample(&self, token_id: i32) -> Result<i32>;
 }
@@ -14,6 +16,8 @@ pub trait LegacySamplingCompat: Send + Sync {
 struct LoadedLegacyTextPlugin {
     plugin: Mutex<Option<Box<dyn Plugin>>>,
     _library: Option<Arc<Library>>,
+    supports_pre_generate: bool,
+    supports_post_generate: bool,
     supports_transform_logits: bool,
     supports_post_sample: bool,
 }
@@ -42,7 +46,31 @@ impl Drop for LoadedLegacyTextPlugin {
     }
 }
 
-impl LegacySamplingCompat for LoadedLegacyTextPlugin {
+impl LegacyTextCompat for LoadedLegacyTextPlugin {
+    fn pre_generate(&self, prompt: &str) -> Result<String> {
+        if !self.supports_pre_generate {
+            return Ok(prompt.to_string());
+        }
+
+        self.with_plugin(|plugin| {
+            plugin
+                .pre_generate(prompt)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
+        })
+    }
+
+    fn post_generate(&self, response: &str) -> Result<String> {
+        if !self.supports_post_generate {
+            return Ok(response.to_string());
+        }
+
+        self.with_plugin(|plugin| {
+            plugin
+                .post_generate(response)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
+        })
+    }
+
     fn transform_logits(&self, logits: &mut [f32], context_tokens: &[i32]) -> Result<()> {
         if !self.supports_transform_logits {
             return Ok(());
@@ -69,15 +97,21 @@ impl LegacySamplingCompat for LoadedLegacyTextPlugin {
     }
 }
 
-pub fn load_legacy_text_plugin_sampling_compat(
+pub fn load_legacy_text_plugin_compat(
     runtime_artifact_path: &Path,
     expected_name: &str,
     expected_version: &str,
     capabilities: &[String],
-) -> Result<Option<Arc<dyn LegacySamplingCompat>>> {
+) -> Result<Option<Arc<dyn LegacyTextCompat>>> {
+    let supports_pre_generate = capabilities.iter().any(|cap| cap == "pre_generate");
+    let supports_post_generate = capabilities.iter().any(|cap| cap == "post_generate");
     let supports_transform_logits = capabilities.iter().any(|cap| cap == "transform_logits");
     let supports_post_sample = capabilities.iter().any(|cap| cap == "post_sample");
-    if !supports_transform_logits && !supports_post_sample {
+    if !supports_pre_generate
+        && !supports_post_generate
+        && !supports_transform_logits
+        && !supports_post_sample
+    {
         return Ok(None);
     }
 
@@ -134,6 +168,8 @@ pub fn load_legacy_text_plugin_sampling_compat(
     Ok(Some(Arc::new(LoadedLegacyTextPlugin {
         plugin: Mutex::new(Some(plugin)),
         _library: Some(Arc::new(library)),
+        supports_pre_generate,
+        supports_post_generate,
         supports_transform_logits,
         supports_post_sample,
     })))
@@ -152,6 +188,14 @@ mod tests {
 
         fn version(&self) -> &str {
             "1.0.0"
+        }
+
+        fn pre_generate(&self, prompt: &str) -> loci_legacy_plugin_api::error::Result<String> {
+            Ok(format!("[pre]{prompt}"))
+        }
+
+        fn post_generate(&self, response: &str) -> loci_legacy_plugin_api::error::Result<String> {
+            Ok(format!("{response}[post]"))
         }
 
         fn transform_logits(
@@ -173,15 +217,25 @@ mod tests {
         let compat = LoadedLegacyTextPlugin {
             plugin: Mutex::new(Some(Box::new(LegacySamplerPlugin))),
             _library: None,
+            supports_pre_generate: true,
+            supports_post_generate: true,
             supports_transform_logits: true,
             supports_post_sample: true,
         };
 
+        assert_eq!(
+            compat.pre_generate("hello").expect("pre generate"),
+            "[pre]hello"
+        );
         let mut logits = vec![1.0, 2.0, 3.0];
         compat
             .transform_logits(&mut logits, &[])
             .expect("transform logits");
         assert_eq!(logits[1], 77.0);
         assert_eq!(compat.post_sample(1).expect("post sample"), 9);
+        assert_eq!(
+            compat.post_generate("world").expect("post generate"),
+            "world[post]"
+        );
     }
 }

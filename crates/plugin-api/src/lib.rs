@@ -92,7 +92,7 @@ pub enum PluginSourceFormat {
 pub enum LegacyRuntimeBridge {
     #[default]
     None,
-    LegacyTextSamplingV1,
+    LegacyTextPluginV1,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -299,11 +299,11 @@ mod tests {
                     "transform_logits".to_string(),
                     "post_sample".to_string(),
                 ],
-                runtime_bridge: LegacyRuntimeBridge::LegacyTextSamplingV1,
+                runtime_bridge: LegacyRuntimeBridge::LegacyTextPluginV1,
             },
         };
 
         assert!(manifest.is_legacy_compat_manifest());
-        assert!(manifest.uses_legacy_runtime_bridge(LegacyRuntimeBridge::LegacyTextSamplingV1));
+        assert!(manifest.uses_legacy_runtime_bridge(LegacyRuntimeBridge::LegacyTextPluginV1));
     }
 }
