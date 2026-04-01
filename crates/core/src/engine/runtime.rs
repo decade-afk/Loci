@@ -7,8 +7,8 @@ use crate::engine::types::{GenerationParams, ModelInfo};
 use crate::error::{LociError, Result};
 use crate::model::{ModelConfig, ModelLoadStrategy};
 use crate::plugin::{
-    discover_plugin_bundle_files, load_plugin_bundle_file, load_plugin_manifest_file,
-    RegisteredPlugin, SamplingHook,
+    discover_plugin_bundle_files, legacy_sampling_hook_from_compat, load_plugin_bundle_file,
+    load_plugin_manifest_file, RegisteredPlugin, SamplingHook,
 };
 use loci_legacy_plugin_compat::{load_legacy_text_plugin_compat, LegacyTextCompat};
 use loci_plugin_api::{CoreComponent, PlatformTrack};
@@ -147,11 +147,12 @@ impl InferenceEngine {
     }
 
     pub fn activate_inference_plugin(&mut self, plugin_name: &str) -> Result<()> {
+        self.ensure_legacy_sampling_hook(plugin_name)?;
         self.activate_core_rewriter(CoreComponent::Inference, plugin_name)
     }
 
     pub fn activate_legacy_text_plugin(&mut self, plugin_name: &str) -> Result<()> {
-        let (manifest_name, manifest_version, legacy_runtime_path, legacy_capabilities, runtime) = {
+        {
             let plugin = self
                 .registry
                 .plugin_manager()
@@ -177,41 +178,13 @@ impl InferenceEngine {
                     "plugin `{plugin_name}` does not expose supported legacy pre/post text hooks"
                 )));
             }
-
-            (
-                plugin.manifest.name.clone(),
-                plugin.manifest.version.clone(),
-                plugin.legacy_runtime_path().map(str::to_string),
-                plugin.manifest.compatibility.legacy_capabilities.clone(),
-                plugin.legacy_text_compat_runtime(),
-            )
-        };
+        }
 
         if self.active_legacy_text_plugins.contains(plugin_name) {
             return Ok(());
         }
 
-        let runtime = if let Some(runtime) = runtime {
-            runtime
-        } else {
-            let runtime_path = legacy_runtime_path.ok_or_else(|| {
-                LociError::from(anyhow::anyhow!(
-                    "plugin `{plugin_name}` does not declare a legacy runtime path"
-                ))
-            })?;
-            load_legacy_text_plugin_compat(
-                Path::new(&runtime_path),
-                &manifest_name,
-                &manifest_version,
-                &legacy_capabilities,
-            )
-            .map_err(LociError::from)?
-            .ok_or_else(|| {
-                LociError::from(anyhow::anyhow!(
-                    "plugin `{plugin_name}` does not provide a supported legacy text compat runtime"
-                ))
-            })?
-        };
+        let runtime = self.materialize_legacy_text_runtime(plugin_name)?;
 
         self.legacy_text_plugin_runtimes
             .insert(plugin_name.to_string(), runtime);
@@ -409,6 +382,96 @@ impl InferenceEngine {
         self.generate(prompt, &inference_params)
     }
 
+    fn ensure_legacy_sampling_hook(&mut self, plugin_name: &str) -> Result<()> {
+        let requires_legacy_sampling = {
+            let plugin = self
+                .registry
+                .plugin_manager()
+                .get(plugin_name)
+                .ok_or_else(|| {
+                    LociError::from(anyhow::anyhow!("plugin not registered: {plugin_name}"))
+                })?;
+
+            plugin.is_legacy_compat_bundle() && plugin.supports_legacy_sampling()
+        };
+
+        if !requires_legacy_sampling {
+            return Ok(());
+        }
+
+        let hook_registered = self
+            .registry
+            .plugin_manager()
+            .sampling_runtime_for_inference(Some(plugin_name))
+            .hook_count()
+            > 0;
+        if hook_registered {
+            return Ok(());
+        }
+
+        let compat = self.materialize_legacy_text_runtime(plugin_name)?;
+        self.register_sampling_hook(plugin_name, legacy_sampling_hook_from_compat(compat))
+    }
+
+    fn materialize_legacy_text_runtime(
+        &mut self,
+        plugin_name: &str,
+    ) -> Result<Arc<dyn LegacyTextCompat>> {
+        if let Some(runtime) = self.legacy_text_plugin_runtimes.get(plugin_name) {
+            return Ok(Arc::clone(runtime));
+        }
+
+        let (manifest_name, manifest_version, legacy_runtime_path, legacy_capabilities, runtime) = {
+            let plugin = self
+                .registry
+                .plugin_manager()
+                .get(plugin_name)
+                .ok_or_else(|| {
+                    LociError::from(anyhow::anyhow!("plugin not registered: {plugin_name}"))
+                })?;
+
+            if !plugin.is_legacy_compat_bundle() {
+                return Err(LociError::from(anyhow::anyhow!(
+                    "plugin `{plugin_name}` is not a legacy compatibility bundle"
+                )));
+            }
+
+            (
+                plugin.manifest.name.clone(),
+                plugin.manifest.version.clone(),
+                plugin.legacy_runtime_path().map(str::to_string),
+                plugin.manifest.compatibility.legacy_capabilities.clone(),
+                plugin.legacy_text_compat_runtime(),
+            )
+        };
+
+        let runtime = if let Some(runtime) = runtime {
+            runtime
+        } else {
+            let runtime_path = legacy_runtime_path.ok_or_else(|| {
+                LociError::from(anyhow::anyhow!(
+                    "plugin `{plugin_name}` does not declare a legacy runtime path"
+                ))
+            })?;
+            load_legacy_text_plugin_compat(
+                Path::new(&runtime_path),
+                &manifest_name,
+                &manifest_version,
+                &legacy_capabilities,
+            )
+            .map_err(LociError::from)?
+            .ok_or_else(|| {
+                LociError::from(anyhow::anyhow!(
+                    "plugin `{plugin_name}` does not provide a supported legacy compat runtime"
+                ))
+            })?
+        };
+
+        self.legacy_text_plugin_runtimes
+            .insert(plugin_name.to_string(), Arc::clone(&runtime));
+        Ok(runtime)
+    }
+
     fn refresh_model_sampling_runtime(&mut self) -> Result<()> {
         if let Some(model) = self.model.as_mut() {
             let runtime = self
@@ -511,7 +574,12 @@ impl InferenceEngine {
             source_format: plugin.manifest.compatibility.source_format,
             runtime_bridge: plugin.manifest.compatibility.runtime_bridge,
             declares_inference_rewriter: plugin.declares_core_rewriter(CoreComponent::Inference),
-            has_sampling_hook: plugin.has_sampling_hook(),
+            has_sampling_hook: self
+                .registry
+                .plugin_manager()
+                .sampling_runtime_for_inference(Some(&plugin.manifest.name))
+                .hook_count()
+                > 0,
             is_legacy_compat: plugin.is_legacy_compat_bundle(),
             legacy_text_candidate: self
                 .legacy_text_plugin_candidates()
@@ -750,6 +818,51 @@ logit = 42.0
         assert_eq!(loaded, 1);
         assert_eq!(engine.plugin_names(), vec!["rot13_dynamic".to_string()]);
         assert_eq!(engine.sampling_hook_count(), 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn engine_loads_legacy_sampling_bundle_as_metadata_until_activation() {
+        let dir = unique_temp_dir("legacy-sampling-bundle");
+        fs::create_dir_all(dir.join("legacy-sampler")).expect("mkdir");
+        fs::write(dir.join("legacy-sampler").join("sampler.dll"), b"binary")
+            .expect("write runtime");
+        fs::write(
+            dir.join("legacy-sampler").join("sampler.loci-plugin.json"),
+            r#"{
+  "name": "legacy_sampler",
+  "version": "1.0.0",
+  "kind": "text_plugin",
+  "abi_version": 1,
+  "capabilities": ["transform_logits", "post_sample"]
+}"#,
+        )
+        .expect("write contract");
+
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        let loaded = engine.load_plugins_from_dir(&dir).expect("load plugins");
+        assert_eq!(loaded, 1);
+        assert_eq!(engine.plugin_names(), vec!["legacy_sampler".to_string()]);
+        assert_eq!(engine.sampling_hook_count(), 0);
+        assert!(!engine.runtime_snapshot().plugins[0].has_sampling_hook);
+
+        let err = engine
+            .activate_inference_plugin("legacy_sampler")
+            .expect_err("activation should materialize runtime and fail on invalid binary");
+        assert!(err
+            .to_string()
+            .contains("failed to load legacy plugin library"));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1046,6 +1159,60 @@ logit = 42.0
                 plugin_name: "hooked-plugin".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn engine_materializes_legacy_sampling_runtime_on_inference_activation() {
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        engine
+            .register_plugin(registered_legacy_text_plugin_for_tests(
+                "legacy-sampler",
+                &["transform_logits", "post_sample"],
+            ))
+            .expect("register legacy sampler");
+        engine
+            .load_model("mock", "demo.gguf", BackendParams::default())
+            .expect("load model");
+
+        let before = engine.runtime_snapshot();
+        assert!(!before.plugins[0].has_sampling_hook);
+        assert_eq!(engine.sampling_hook_count(), 0);
+
+        let inactive_output = engine
+            .generate("hello", &InferenceParams::default())
+            .expect("generate without activation");
+        assert!(inactive_output.contains("hooks=0"));
+
+        engine
+            .activate_inference_plugin("legacy-sampler")
+            .expect("activate legacy sampler");
+
+        let after = engine.runtime_snapshot();
+        assert!(after.plugins[0].has_sampling_hook);
+        assert_eq!(
+            after.configured_core_rewriters,
+            vec![CoreRewriterStatus {
+                component: CoreComponent::Inference,
+                plugin_name: "legacy-sampler".to_string(),
+            }]
+        );
+
+        let active_output = engine
+            .generate("hello", &InferenceParams::default())
+            .expect("generate with activation");
+        assert!(active_output.contains("hooks=1"));
+        assert_eq!(engine.sampling_hook_count(), 1);
+        assert!(engine.active_legacy_text_plugins().is_empty());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::error::Result as CoreResult;
 use crate::sampler::LogitsView;
 use anyhow::{bail, Context, Result};
-use loci_legacy_plugin_compat::{load_legacy_text_plugin_compat, LegacyTextCompat};
+use loci_legacy_plugin_compat::LegacyTextCompat;
 use loci_plugin_api::{
     ContributionPoints, CoreComponent, CoreRewriters, LegacyRuntimeBridge, PlatformTrack,
     PluginBootstrap, PluginCompatibility, PluginManifest, PluginRuntime, PluginSourceFormat,
@@ -277,6 +277,14 @@ impl RegisteredPlugin {
             .any(|candidate| candidate == "post_generate")
     }
 
+    pub fn supports_legacy_sampling(&self) -> bool {
+        self.manifest
+            .compatibility
+            .legacy_capabilities
+            .iter()
+            .any(|candidate| LEGACY_SAMPLING_CAPABILITIES.contains(&candidate.as_str()))
+    }
+
     fn with_manifest_location(mut self, manifest_path: PathBuf) -> Self {
         self.root_dir = manifest_path.parent().map(Path::to_path_buf);
         self.manifest_path = Some(manifest_path);
@@ -303,6 +311,12 @@ impl RegisteredPlugin {
             .iter()
             .any(|candidate| candidate == capability)
     }
+}
+
+pub(crate) fn legacy_sampling_hook_from_compat(
+    compat: Arc<dyn LegacyTextCompat>,
+) -> Arc<dyn SamplingHook> {
+    Arc::new(LegacySamplingCompatHook::new(compat))
 }
 
 #[derive(Debug, Clone)]
@@ -698,49 +712,12 @@ fn load_registered_plugin_runtime(
 }
 
 fn load_legacy_plugin_runtime(
-    runtime_artifact_path: &Path,
-    manifest: &PluginManifest,
+    _runtime_artifact_path: &Path,
+    _manifest: &PluginManifest,
 ) -> Result<RegisteredPluginRuntime> {
-    if manifest.compatibility.runtime_bridge != LegacyRuntimeBridge::LegacyTextPluginV1 {
-        return Ok(RegisteredPluginRuntime::default());
-    }
-
-    if !manifest
-        .compatibility
-        .legacy_capabilities
-        .iter()
-        .any(|capability| LEGACY_SAMPLING_CAPABILITIES.contains(&capability.as_str()))
-    {
-        return Ok(RegisteredPluginRuntime {
-            sampling_hook: None,
-            legacy_text_compat: None,
-        });
-    }
-
-    let compat = load_legacy_text_plugin_compat(
-        runtime_artifact_path,
-        &manifest.name,
-        &manifest.version,
-        &manifest.compatibility.legacy_capabilities,
-    )?;
-    let sampling_hook = compat.as_ref().and_then(|compat| {
-        if manifest
-            .compatibility
-            .legacy_capabilities
-            .iter()
-            .any(|capability| LEGACY_SAMPLING_CAPABILITIES.contains(&capability.as_str()))
-        {
-            Some(Arc::new(LegacySamplingCompatHook::new(Arc::clone(compat)))
-                as Arc<dyn SamplingHook>)
-        } else {
-            None
-        }
-    });
-
-    Ok(RegisteredPluginRuntime {
-        sampling_hook,
-        legacy_text_compat: compat,
-    })
+    // Legacy bundles register governance metadata only. Runtime materialization
+    // happens during explicit activation in the engine.
+    Ok(RegisteredPluginRuntime::default())
 }
 
 fn load_legacy_plugin_bundle(runtime_artifact_path: &Path) -> Result<RegisteredPlugin> {
@@ -1239,6 +1216,35 @@ api_version = "1.0"
         assert!(!plugin.has_legacy_text_compat_runtime());
         assert!(plugin.supports_legacy_pre_generate());
         assert!(plugin.supports_legacy_post_generate());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_legacy_sampling_bundle_keeps_runtime_unmaterialized() {
+        let dir = unique_temp_dir("legacy-sampling-discover");
+        fs::create_dir_all(dir.join("legacy-sampler")).expect("mkdir");
+        fs::write(dir.join("legacy-sampler").join("sampler.dll"), b"binary")
+            .expect("write runtime");
+        fs::write(
+            dir.join("legacy-sampler").join("sampler.loci-plugin.json"),
+            r#"{
+  "name": "legacy_sampler",
+  "version": "1.0.0",
+  "kind": "text_plugin",
+  "abi_version": 1,
+  "capabilities": ["transform_logits", "post_sample"]
+}"#,
+        )
+        .expect("write contract");
+
+        let plugin = load_plugin_bundle_file(dir.join("legacy-sampler").join("sampler.dll"))
+            .expect("load legacy sampling bundle");
+        assert!(plugin.is_legacy_compat_bundle());
+        assert!(plugin.declares_inference_sampling_runtime());
+        assert!(plugin.supports_legacy_sampling());
+        assert!(!plugin.has_sampling_hook());
+        assert!(!plugin.has_legacy_text_compat_runtime());
 
         let _ = fs::remove_dir_all(&dir);
     }
