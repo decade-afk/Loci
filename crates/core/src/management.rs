@@ -1,5 +1,6 @@
 use crate::backend::BackendCapabilities;
 use crate::control_plane::{
+    CommandExecutionRequest, CommandExecutionStatus, CommandInventoryStatus,
     CoreRewriterActivationRequest, CoreRewriterActivationStatus, CoreRewriterInventoryStatus,
     CoreRewriterStatus, InferenceActivationStatus, LegacyTextPluginActivationStatus,
     ManagementHealthStatus, ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus,
@@ -81,6 +82,38 @@ impl ManagementService {
 
     pub fn workflow_inventory(&self) -> Result<WorkflowInventoryStatus> {
         self.with_engine(|engine| Ok(engine.workflow_inventory()))
+    }
+
+    pub fn command_inventory(&self) -> Result<CommandInventoryStatus> {
+        self.with_engine(|engine| Ok(engine.command_inventory()))
+    }
+
+    pub fn run_command(&self, request: CommandExecutionRequest) -> Result<CommandExecutionStatus> {
+        self.with_engine(|engine| {
+            let command = request.command.trim().to_string();
+            if command.is_empty() {
+                return Err(LociError::InvalidArgument(
+                    "command must not be empty".to_string(),
+                ));
+            }
+
+            let routed_plugin_name = engine
+                .active_core_rewriter(CoreComponent::PluginManager)
+                .ok_or_else(|| {
+                    LociError::from(anyhow::anyhow!(
+                        "no active plugin manager rewriter is configured"
+                    ))
+                })?
+                .to_string();
+
+            engine.run_command(&command)?;
+
+            Ok(CommandExecutionStatus {
+                status: "accepted",
+                command,
+                routed_plugin_name,
+            })
+        })
     }
 
     pub fn activate_inference_plugin(
@@ -471,6 +504,32 @@ mod tests {
         ManagementService::new(engine)
     }
 
+    fn plugin_manager_service() -> ManagementService {
+        let mut engine = InferenceEngine::builder().build().expect("build engine");
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "command-router".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiInfra],
+                contributes: crate::ContributionPoints {
+                    commands: vec!["plugins.reload".to_string(), "plugins.audit".to_string()],
+                    ..Default::default()
+                },
+                core_rewriters: CoreRewriters {
+                    plugin_manager: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
+            }))
+            .expect("register plugin manager plugin");
+        ManagementService::new(engine)
+    }
+
     #[test]
     fn service_reports_health() {
         let service = empty_service();
@@ -568,6 +627,72 @@ mod tests {
                 workflows: vec!["agent.plan".to_string(), "agent.review".to_string()],
             }
         );
+    }
+
+    #[test]
+    fn service_reports_command_inventory_from_active_plugin_manager() {
+        let service = plugin_manager_service();
+        assert_eq!(
+            service.command_inventory().expect("command inventory"),
+            CommandInventoryStatus {
+                active_plugin_manager: None,
+                commands: Vec::new(),
+            }
+        );
+
+        service
+            .activate_core_rewriter(CoreRewriterActivationRequest {
+                component: CoreComponent::PluginManager,
+                plugin_name: "command-router".to_string(),
+            })
+            .expect("activate plugin manager");
+
+        assert_eq!(
+            service.command_inventory().expect("command inventory"),
+            CommandInventoryStatus {
+                active_plugin_manager: Some("command-router".to_string()),
+                commands: vec!["plugins.reload".to_string(), "plugins.audit".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn service_routes_commands_only_through_active_plugin_manager() {
+        let service = plugin_manager_service();
+
+        let missing_activation = service
+            .run_command(CommandExecutionRequest {
+                command: "plugins.reload".to_string(),
+            })
+            .expect_err("command should require active plugin manager");
+        assert!(missing_activation
+            .to_string()
+            .contains("no active plugin manager rewriter"));
+
+        service
+            .activate_core_rewriter(CoreRewriterActivationRequest {
+                component: CoreComponent::PluginManager,
+                plugin_name: "command-router".to_string(),
+            })
+            .expect("activate plugin manager");
+
+        let status = service
+            .run_command(CommandExecutionRequest {
+                command: "plugins.reload".to_string(),
+            })
+            .expect("run declared command");
+        assert_eq!(status.status, "accepted");
+        assert_eq!(status.command, "plugins.reload");
+        assert_eq!(status.routed_plugin_name, "command-router");
+
+        let undeclared = service
+            .run_command(CommandExecutionRequest {
+                command: "plugins.missing".to_string(),
+            })
+            .expect_err("undeclared command should fail");
+        assert!(undeclared
+            .to_string()
+            .contains("is not declared by active plugin manager"));
     }
 
     #[test]

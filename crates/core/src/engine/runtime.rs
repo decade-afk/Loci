@@ -2,10 +2,10 @@ use crate::backend::{
     BackendCapabilities, BackendParams, BackendRegistry, InferenceParams, Model, ModelMetadata,
 };
 use crate::control_plane::{
-    CoreRewriterStatus, ModelRuntimeInfo, PluginHostRuntimeKind, PluginHostRuntimeMaterialization,
-    PluginHostRuntimeRegistration, PluginRuntimeArtifacts, PluginRuntimeDetail,
-    PluginRuntimeStatus, PluginUiContributionStatus, RuntimeSnapshot, SamplingHookSource,
-    WorkflowInventoryStatus,
+    CommandInventoryStatus, CoreRewriterStatus, ModelRuntimeInfo, PluginHostRuntimeKind,
+    PluginHostRuntimeMaterialization, PluginHostRuntimeRegistration, PluginRuntimeArtifacts,
+    PluginRuntimeDetail, PluginRuntimeStatus, PluginUiContributionStatus, RuntimeSnapshot,
+    SamplingHookSource, WorkflowInventoryStatus,
 };
 use crate::core::CoreRegistry;
 use crate::engine::types::{GenerationParams, ModelInfo};
@@ -93,8 +93,62 @@ impl InferenceEngine {
     }
 
     pub fn run_command(&self, command: &str) -> Result<String> {
-        self.registry.event_bus().publish(command)?;
-        Ok(format!("command accepted: {command}"))
+        let command = command.trim();
+        if command.is_empty() {
+            return Err(LociError::InvalidArgument(
+                "command must not be empty".to_string(),
+            ));
+        }
+
+        let plugin_name = self
+            .active_core_rewriter(CoreComponent::PluginManager)
+            .ok_or_else(|| {
+                LociError::from(anyhow::anyhow!(
+                    "no active plugin manager rewriter is configured"
+                ))
+            })?;
+        let plugin = self
+            .registry
+            .plugin_manager()
+            .get(plugin_name)
+            .ok_or_else(|| {
+                LociError::from(anyhow::anyhow!(
+                    "active plugin manager rewriter `{plugin_name}` is not registered"
+                ))
+            })?;
+
+        if !plugin
+            .manifest
+            .contributes
+            .commands
+            .iter()
+            .any(|candidate| candidate == command)
+        {
+            return Err(LociError::from(anyhow::anyhow!(
+                "command `{command}` is not declared by active plugin manager `{plugin_name}`"
+            )));
+        }
+
+        self.registry
+            .event_bus()
+            .publish(&format!("plugin_manager/{plugin_name}/{command}"))?;
+        Ok(format!("command accepted by {plugin_name}: {command}"))
+    }
+
+    pub fn command_inventory(&self) -> CommandInventoryStatus {
+        let active_plugin_manager = self
+            .active_core_rewriter(CoreComponent::PluginManager)
+            .map(str::to_string);
+        let commands = active_plugin_manager
+            .as_deref()
+            .and_then(|plugin_name| self.registry.plugin_manager().get(plugin_name))
+            .map(|plugin| plugin.manifest.contributes.commands.clone())
+            .unwrap_or_default();
+
+        CommandInventoryStatus {
+            active_plugin_manager,
+            commands,
+        }
     }
 
     pub fn plugin_count(&self) -> usize {
@@ -897,6 +951,126 @@ mod tests {
                 workflows: vec!["agent.plan".to_string(), "agent.review".to_string()],
             }
         );
+    }
+
+    #[test]
+    fn engine_reports_command_inventory_from_active_plugin_manager() {
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "command-router".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiInfra],
+                contributes: ContributionPoints {
+                    commands: vec!["plugins.reload".to_string(), "plugins.audit".to_string()],
+                    ..Default::default()
+                },
+                core_rewriters: CoreRewriters {
+                    plugin_manager: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
+            }))
+            .expect("register");
+
+        assert_eq!(
+            engine.command_inventory(),
+            CommandInventoryStatus {
+                active_plugin_manager: None,
+                commands: Vec::new(),
+            }
+        );
+
+        engine
+            .activate_core_rewriter(CoreComponent::PluginManager, "command-router")
+            .expect("activate plugin manager");
+
+        assert_eq!(
+            engine.command_inventory(),
+            CommandInventoryStatus {
+                active_plugin_manager: Some("command-router".to_string()),
+                commands: vec!["plugins.reload".to_string(), "plugins.audit".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn engine_runs_only_declared_commands_through_active_plugin_manager() {
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "command-router".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiInfra],
+                contributes: ContributionPoints {
+                    commands: vec!["plugins.reload".to_string()],
+                    ..Default::default()
+                },
+                core_rewriters: CoreRewriters {
+                    plugin_manager: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
+            }))
+            .expect("register");
+
+        let missing_activation = engine
+            .run_command("plugins.reload")
+            .expect_err("active plugin manager should be required");
+        assert!(missing_activation
+            .to_string()
+            .contains("no active plugin manager rewriter"));
+
+        engine
+            .activate_core_rewriter(CoreComponent::PluginManager, "command-router")
+            .expect("activate plugin manager");
+
+        let accepted = engine
+            .run_command("plugins.reload")
+            .expect("run declared command");
+        assert_eq!(
+            accepted,
+            "command accepted by command-router: plugins.reload"
+        );
+
+        let undeclared = engine
+            .run_command("plugins.missing")
+            .expect_err("undeclared command should fail");
+        assert!(undeclared
+            .to_string()
+            .contains("is not declared by active plugin manager"));
     }
 
     #[test]

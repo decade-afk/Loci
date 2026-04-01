@@ -1,6 +1,6 @@
 use loci_core::{
-    CoreRewriterActivationRequest, ManagementService, ModelLoadRequest, PluginLoadRequest,
-    TextGenerationRequest,
+    CommandExecutionRequest, CoreRewriterActivationRequest, ManagementService, ModelLoadRequest,
+    PluginLoadRequest, TextGenerationRequest,
 };
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -92,6 +92,13 @@ pub fn handle_management_request(
             },
             Err(error) => json_response(500, json!({ "error": error.to_string() })),
         },
+        ("GET", "/v1/commands") => match service.command_inventory() {
+            Ok(commands) => match serde_json::to_value(commands) {
+                Ok(commands) => json_response(200, commands),
+                Err(error) => json_response(500, json!({ "error": error.to_string() })),
+            },
+            Err(error) => json_response(500, json!({ "error": error.to_string() })),
+        },
         ("GET", "/v1/core/rewriters") => match service.configured_core_rewriters() {
             Ok(rewriters) => match serde_json::to_value(rewriters) {
                 Ok(rewriters) => json_response(200, rewriters),
@@ -150,6 +157,20 @@ pub fn handle_management_request(
             match service.generate_text(generation_request) {
                 Ok(response) => match serde_json::to_value(response) {
                     Ok(response) => json_response(200, response),
+                    Err(error) => json_response(500, json!({ "error": error.to_string() })),
+                },
+                Err(error) => json_response(400, json!({ "error": error.to_string() })),
+            }
+        }
+        ("POST", "/v1/commands/run") => {
+            let command_request = match command_execution_request_from_body(&request.body) {
+                Ok(command_request) => command_request,
+                Err(error) => return json_response(400, json!({ "error": error.to_string() })),
+            };
+
+            match service.run_command(command_request) {
+                Ok(status) => match serde_json::to_value(status) {
+                    Ok(status) => json_response(200, status),
                     Err(error) => json_response(500, json!({ "error": error.to_string() })),
                 },
                 Err(error) => json_response(400, json!({ "error": error.to_string() })),
@@ -259,6 +280,10 @@ fn core_rewriter_activation_request_from_body(
 }
 
 fn text_generation_request_from_body(body: &[u8]) -> anyhow::Result<TextGenerationRequest> {
+    serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON body: {error}"))
+}
+
+fn command_execution_request_from_body(body: &[u8]) -> anyhow::Result<CommandExecutionRequest> {
     serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON body: {error}"))
 }
 
@@ -510,6 +535,32 @@ mod tests {
         ManagementService::new(engine)
     }
 
+    fn command_service() -> ManagementService {
+        let mut engine = InferenceEngine::builder().build().expect("build engine");
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "command-router".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiInfra],
+                contributes: loci_core::ContributionPoints {
+                    commands: vec!["plugins.reload".to_string(), "plugins.audit".to_string()],
+                    ..Default::default()
+                },
+                core_rewriters: CoreRewriters {
+                    plugin_manager: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
+            }))
+            .expect("register plugin manager plugin");
+        ManagementService::new(engine)
+    }
+
     struct ForceTokenHook;
 
     impl SamplingHook for ForceTokenHook {}
@@ -644,6 +695,109 @@ mod tests {
             after_value["workflows"],
             json!(["agent.plan", "agent.review"])
         );
+    }
+
+    #[test]
+    fn commands_route_returns_active_plugin_manager_inventory() {
+        let service = command_service();
+        let before = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/commands".to_string(),
+                body: Vec::new(),
+            },
+        );
+
+        assert_eq!(before.status_code, 200);
+        let before_value: Value = serde_json::from_slice(&before.body).expect("json");
+        assert_eq!(before_value["active_plugin_manager"], Value::Null);
+        assert_eq!(before_value["commands"], json!([]));
+
+        let activation = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/core/rewriters/activate".to_string(),
+                body: br#"{"component":"plugin_manager","plugin_name":"command-router"}"#.to_vec(),
+            },
+        );
+        assert_eq!(activation.status_code, 200);
+
+        let after = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/commands".to_string(),
+                body: Vec::new(),
+            },
+        );
+
+        assert_eq!(after.status_code, 200);
+        let after_value: Value = serde_json::from_slice(&after.body).expect("json");
+        assert_eq!(after_value["active_plugin_manager"], "command-router");
+        assert_eq!(
+            after_value["commands"],
+            json!(["plugins.reload", "plugins.audit"])
+        );
+    }
+
+    #[test]
+    fn command_run_route_requires_active_plugin_manager_and_declared_command() {
+        let service = command_service();
+        let missing_activation = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/commands/run".to_string(),
+                body: br#"{"command":"plugins.reload"}"#.to_vec(),
+            },
+        );
+        assert_eq!(missing_activation.status_code, 400);
+        let missing_value: Value = serde_json::from_slice(&missing_activation.body).expect("json");
+        assert!(missing_value["error"]
+            .as_str()
+            .expect("error")
+            .contains("no active plugin manager rewriter"));
+
+        let activation = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/core/rewriters/activate".to_string(),
+                body: br#"{"component":"plugin_manager","plugin_name":"command-router"}"#.to_vec(),
+            },
+        );
+        assert_eq!(activation.status_code, 200);
+
+        let success = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/commands/run".to_string(),
+                body: br#"{"command":"plugins.reload"}"#.to_vec(),
+            },
+        );
+        assert_eq!(success.status_code, 200);
+        let success_value: Value = serde_json::from_slice(&success.body).expect("json");
+        assert_eq!(success_value["status"], "accepted");
+        assert_eq!(success_value["command"], "plugins.reload");
+        assert_eq!(success_value["routed_plugin_name"], "command-router");
+
+        let undeclared = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/commands/run".to_string(),
+                body: br#"{"command":"plugins.missing"}"#.to_vec(),
+            },
+        );
+        assert_eq!(undeclared.status_code, 400);
+        let undeclared_value: Value = serde_json::from_slice(&undeclared.body).expect("json");
+        assert!(undeclared_value["error"]
+            .as_str()
+            .expect("error")
+            .contains("is not declared by active plugin manager"));
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub use crate::backend::{
     InferenceParams, Model, ModelMetadata,
 };
 pub use crate::control_plane::{
+    CommandExecutionRequest, CommandExecutionStatus, CommandInventoryStatus,
     CoreRewriterActivationRequest, CoreRewriterActivationStatus, CoreRewriterInventoryStatus,
     CoreRewriterStatus, InferenceActivationStatus, LegacyTextPluginActivationStatus,
     ManagementHealthStatus, ModelLoadConfig, ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus,

@@ -110,6 +110,12 @@ pub struct WorkflowInventoryStatus {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CommandInventoryStatus {
+    pub active_plugin_manager: Option<String>,
+    pub commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RuntimeSnapshot {
     pub plugin_count: usize,
     pub loaded_plugin_names: Vec<String>,
@@ -257,6 +263,18 @@ pub struct TextGenerationResponse {
     pub active_model_path: Option<String>,
     pub active_model_info: Option<ModelRuntimeInfo>,
     pub active_inference: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommandExecutionRequest {
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CommandExecutionStatus {
+    pub status: &'static str,
+    pub command: String,
+    pub routed_plugin_name: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
