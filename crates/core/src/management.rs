@@ -1,9 +1,12 @@
 use crate::control_plane::{
     CoreRewriterStatus, InferenceActivationStatus, LegacyTextPluginActivationStatus,
-    ManagementHealthStatus, PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot,
+    ManagementHealthStatus, ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus,
+    ModelLoadStrategyRequest, PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot,
 };
 use crate::engine::InferenceEngine;
 use crate::error::{LociError, Result};
+use crate::model::{ModelConfig, ModelLoadStrategy};
+use crate::GpuSplitMode;
 use loci_plugin_api::CoreComponent;
 use std::sync::{Arc, Mutex};
 
@@ -63,6 +66,26 @@ impl ManagementService {
         })
     }
 
+    pub fn load_model(&self, request: ModelLoadRequest) -> Result<ModelLoadStatus> {
+        self.with_engine_mut(|engine| {
+            let config = model_config_from_request(request.config)?;
+            let backend_name = request.backend_name;
+            let model_path = config.model_path.display().to_string();
+            engine.load_model_config(&backend_name, &config)?;
+
+            Ok(ModelLoadStatus {
+                status: "loaded",
+                backend_name,
+                model_path,
+                active_backend: engine.active_backend().map(str::to_string),
+                active_model_path: engine
+                    .model_path()
+                    .map(|model_path| model_path.display().to_string()),
+                active_model_info: engine.model_runtime_info(),
+            })
+        })
+    }
+
     pub fn activate_legacy_text_plugin(
         &self,
         plugin_name: &str,
@@ -106,6 +129,40 @@ impl ManagementService {
             .map_err(|_| LociError::from(anyhow::anyhow!("engine mutex poisoned")))?;
         f(&mut engine)
     }
+}
+
+fn model_config_from_request(
+    request: crate::control_plane::ModelLoadConfig,
+) -> Result<ModelConfig> {
+    let load_strategy = match request.load_strategy {
+        ModelLoadStrategyRequest::Strict => ModelLoadStrategy::Strict,
+        ModelLoadStrategyRequest::AutoReduceGpuLayers { step } => {
+            ModelLoadStrategy::AutoReduceGpuLayers { step }
+        }
+    };
+
+    let config = ModelConfig {
+        model_path: request.model_path.into(),
+        n_ctx: request.n_ctx,
+        n_threads: request.n_threads,
+        n_batch: request.n_batch,
+        use_gpu: request.use_gpu,
+        n_gpu_layers: request.n_gpu_layers,
+        use_mmap: request.use_mmap,
+        use_mlock: request.use_mlock,
+        kv_offload: request.kv_offload,
+        op_offload: request.op_offload,
+        split_mode: match request.split_mode {
+            ModelLoadSplitMode::None => GpuSplitMode::None,
+            ModelLoadSplitMode::Layer => GpuSplitMode::Layer,
+            ModelLoadSplitMode::Row => GpuSplitMode::Row,
+        },
+        main_gpu: request.main_gpu,
+        tensor_split: request.tensor_split,
+        load_strategy,
+    };
+    config.validate()?;
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -183,7 +240,52 @@ mod tests {
         let service = empty_service();
         let snapshot = service.runtime_snapshot().expect("snapshot");
         assert_eq!(snapshot.plugin_count, 0);
+        assert_eq!(snapshot.active_model_path, None);
+        assert_eq!(snapshot.active_model_info, None);
         assert!(snapshot.configured_core_rewriters.is_empty());
+    }
+
+    #[test]
+    fn service_loads_model_from_control_plane_request() {
+        let service = empty_service();
+        let status = service
+            .load_model(ModelLoadRequest {
+                backend_name: "mock".to_string(),
+                config: crate::ModelLoadConfig {
+                    model_path: "demo.gguf".to_string(),
+                    use_gpu: false,
+                    n_gpu_layers: 0,
+                    kv_offload: false,
+                    op_offload: false,
+                    split_mode: crate::ModelLoadSplitMode::None,
+                    ..Default::default()
+                },
+            })
+            .expect("load model");
+
+        assert_eq!(status.status, "loaded");
+        assert_eq!(status.backend_name, "mock");
+        assert_eq!(status.model_path, "demo.gguf");
+        assert_eq!(status.active_backend.as_deref(), Some("mock"));
+        assert_eq!(status.active_model_path.as_deref(), Some("demo.gguf"));
+        assert_eq!(
+            status
+                .active_model_info
+                .as_ref()
+                .map(|info| info.architecture.as_str()),
+            Some("mock")
+        );
+
+        let snapshot = service.runtime_snapshot().expect("snapshot");
+        assert_eq!(snapshot.active_backend.as_deref(), Some("mock"));
+        assert_eq!(snapshot.active_model_path.as_deref(), Some("demo.gguf"));
+        assert_eq!(
+            snapshot
+                .active_model_info
+                .as_ref()
+                .map(|info| info.architecture.as_str()),
+            Some("mock")
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use loci_core::ManagementService;
+use loci_core::{ManagementService, ModelLoadRequest};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -89,6 +89,20 @@ pub fn handle_management_request(
             },
             Err(error) => json_response(500, json!({ "error": error.to_string() })),
         },
+        ("POST", "/v1/model/load") => {
+            let load_request = match model_load_request_from_body(&request.body) {
+                Ok(load_request) => load_request,
+                Err(error) => return json_response(400, json!({ "error": error.to_string() })),
+            };
+
+            match service.load_model(load_request) {
+                Ok(status) => match serde_json::to_value(status) {
+                    Ok(status) => json_response(200, status),
+                    Err(error) => json_response(500, json!({ "error": error.to_string() })),
+                },
+                Err(error) => json_response(400, json!({ "error": error.to_string() })),
+            }
+        }
         ("POST", "/v1/core/inference/activate") => {
             let plugin_name = match plugin_name_from_body(&request.body) {
                 Ok(plugin_name) => plugin_name,
@@ -161,6 +175,10 @@ fn plugin_name_from_body(body: &[u8]) -> anyhow::Result<String> {
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("JSON body must contain string field `plugin_name`"))?;
     Ok(plugin_name.to_string())
+}
+
+fn model_load_request_from_body(body: &[u8]) -> anyhow::Result<ModelLoadRequest> {
+    serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON body: {error}"))
 }
 
 fn status_reason(status_code: u16) -> &'static str {
@@ -384,6 +402,8 @@ mod tests {
         assert_eq!(response.status_code, 200);
         let value: Value = serde_json::from_slice(&response.body).expect("json");
         assert_eq!(value["plugin_count"], 0);
+        assert_eq!(value["active_model_path"], Value::Null);
+        assert_eq!(value["active_model_info"], Value::Null);
         assert_eq!(value["legacy_text_candidates"], json!([]));
     }
 
@@ -473,6 +493,52 @@ mod tests {
         assert_eq!(after_value["status"]["registered_sampling_hook"], true);
         assert_eq!(after_value["status"]["effective_sampling_hook"], true);
         assert_eq!(after_value["status"]["active_inference_rewriter"], true);
+    }
+
+    #[test]
+    fn model_load_route_loads_model_and_returns_runtime_details() {
+        let service = empty_service();
+        let response = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/model/load".to_string(),
+                body: br#"{
+                    "backend_name":"mock",
+                    "config":{
+                        "model_path":"demo.gguf",
+                        "use_gpu":false,
+                        "n_gpu_layers":0,
+                        "kv_offload":false,
+                        "op_offload":false,
+                        "split_mode":"none"
+                    }
+                }"#
+                .to_vec(),
+            },
+        );
+
+        assert_eq!(response.status_code, 200);
+        let value: Value = serde_json::from_slice(&response.body).expect("json");
+        assert_eq!(value["status"], "loaded");
+        assert_eq!(value["backend_name"], "mock");
+        assert_eq!(value["model_path"], "demo.gguf");
+        assert_eq!(value["active_backend"], "mock");
+        assert_eq!(value["active_model_path"], "demo.gguf");
+        assert_eq!(value["active_model_info"]["architecture"], "mock");
+
+        let runtime = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/runtime".to_string(),
+                body: Vec::new(),
+            },
+        );
+        let runtime_value: Value = serde_json::from_slice(&runtime.body).expect("json");
+        assert_eq!(runtime_value["active_backend"], "mock");
+        assert_eq!(runtime_value["active_model_path"], "demo.gguf");
+        assert_eq!(runtime_value["active_model_info"]["architecture"], "mock");
     }
 
     #[test]

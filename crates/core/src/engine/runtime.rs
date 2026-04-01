@@ -1,7 +1,7 @@
 use crate::backend::{BackendParams, BackendRegistry, InferenceParams, Model, ModelMetadata};
 use crate::control_plane::{
-    CoreRewriterStatus, PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot,
-    SamplingHookSource,
+    CoreRewriterStatus, ModelRuntimeInfo, PluginRuntimeDetail, PluginRuntimeStatus,
+    RuntimeSnapshot, SamplingHookSource,
 };
 use crate::core::CoreRegistry;
 use crate::engine::types::{GenerationParams, ModelInfo};
@@ -267,6 +267,10 @@ impl InferenceEngine {
             .active_core_rewriter(CoreComponent::Inference)
             .map(str::to_string);
         let active_backend = self.active_backend().map(str::to_string);
+        let active_model_path = self
+            .model_path()
+            .map(|model_path| model_path.display().to_string());
+        let active_model_info = self.model_runtime_info();
         let loaded_plugin_names = self.plugin_names();
         let configured_core_rewriters = self
             .registry
@@ -291,6 +295,8 @@ impl InferenceEngine {
             plugin_count: loaded_plugin_names.len(),
             loaded_plugin_names,
             active_backend,
+            active_model_path,
+            active_model_info,
             active_inference,
             configured_core_rewriters,
             legacy_text_candidates,
@@ -555,8 +561,23 @@ impl InferenceEngine {
         self.active_backend.as_deref()
     }
 
+    pub fn model_path(&self) -> Option<&Path> {
+        self.model_path.as_deref()
+    }
+
     pub fn model_metadata(&self) -> Option<ModelMetadata> {
         self.model.as_ref().map(|model| model.metadata())
+    }
+
+    pub fn model_runtime_info(&self) -> Option<ModelRuntimeInfo> {
+        self.model_metadata().map(|metadata| ModelRuntimeInfo {
+            architecture: metadata.architecture,
+            n_vocab: metadata.n_vocab,
+            n_ctx_train: metadata.n_ctx_train,
+            n_embd: metadata.n_embd,
+            n_layer: metadata.n_layer,
+            param_count: metadata.param_count,
+        })
     }
 
     pub fn model_info(&self) -> Option<ModelInfo> {
