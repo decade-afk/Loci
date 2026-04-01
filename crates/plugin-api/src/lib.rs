@@ -87,6 +87,14 @@ pub enum PluginSourceFormat {
     LegacyContract,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyRuntimeBridge {
+    #[default]
+    None,
+    LegacyTextSamplingV1,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PluginCompatibility {
     #[serde(default)]
@@ -97,6 +105,10 @@ pub struct PluginCompatibility {
     pub legacy_abi_version: Option<u32>,
     #[serde(default)]
     pub legacy_runtime_path: Option<String>,
+    #[serde(default)]
+    pub legacy_capabilities: Vec<String>,
+    #[serde(default)]
+    pub runtime_bridge: LegacyRuntimeBridge,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -183,6 +195,10 @@ impl PluginManifest {
 
     pub fn is_legacy_compat_manifest(&self) -> bool {
         self.compatibility.source_format == PluginSourceFormat::LegacyContract
+    }
+
+    pub fn uses_legacy_runtime_bridge(&self, bridge: LegacyRuntimeBridge) -> bool {
+        self.compatibility.runtime_bridge == bridge
     }
 }
 
@@ -279,9 +295,15 @@ mod tests {
                 legacy_kind: Some("text_plugin".to_string()),
                 legacy_abi_version: Some(1),
                 legacy_runtime_path: Some("plugins/legacy.dll".to_string()),
+                legacy_capabilities: vec![
+                    "transform_logits".to_string(),
+                    "post_sample".to_string(),
+                ],
+                runtime_bridge: LegacyRuntimeBridge::LegacyTextSamplingV1,
             },
         };
 
         assert!(manifest.is_legacy_compat_manifest());
+        assert!(manifest.uses_legacy_runtime_bridge(LegacyRuntimeBridge::LegacyTextSamplingV1));
     }
 }

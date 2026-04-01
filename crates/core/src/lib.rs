@@ -25,6 +25,6 @@ pub use crate::plugin::{
 };
 pub use crate::sampler::{sample_token, LogitsView, SamplingParams};
 pub use loci_plugin_api::{
-    CoreComponent, CoreRewriters, PlatformTrack, PluginBootstrap, PluginCompatibility,
-    PluginManifest, PluginRuntime, PluginSourceFormat,
+    CoreComponent, CoreRewriters, LegacyRuntimeBridge, PlatformTrack, PluginBootstrap,
+    PluginCompatibility, PluginManifest, PluginRuntime, PluginSourceFormat,
 };

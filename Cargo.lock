@@ -175,6 +175,7 @@ dependencies = [
  "bindgen",
  "cc",
  "cmake",
+ "loci-legacy-plugin-compat",
  "loci-plugin-api",
  "serde",
  "serde_json",
@@ -187,6 +188,23 @@ name = "loci-ffi"
 version = "0.1.0"
 dependencies = [
  "loci-core",
+]
+
+[[package]]
+name = "loci-legacy-plugin-api"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "loci-legacy-plugin-compat"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libloading",
+ "loci-legacy-plugin-api",
 ]
 
 [[package]]

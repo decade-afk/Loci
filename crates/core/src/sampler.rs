@@ -54,6 +54,10 @@ impl<'a> LogitsView<'a> {
         self.logits
     }
 
+    pub fn as_mut_slice(&mut self) -> &mut [f32] {
+        self.logits
+    }
+
     pub fn apply_temperature(&mut self, temperature: f32) {
         if (temperature - 1.0).abs() < f32::EPSILON {
             return;
