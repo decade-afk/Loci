@@ -165,6 +165,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "loci-core",
+ "serde_json",
 ]
 
 [[package]]

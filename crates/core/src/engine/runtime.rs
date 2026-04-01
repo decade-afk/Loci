@@ -1,6 +1,6 @@
 use crate::backend::{BackendParams, BackendRegistry, InferenceParams, Model, ModelMetadata};
 use crate::core::CoreRegistry;
-use crate::engine::types::{GenerationParams, ModelInfo};
+use crate::engine::types::{GenerationParams, ModelInfo, PluginRuntimeStatus, RuntimeSnapshot};
 use crate::error::{LociError, Result};
 use crate::model::{ModelConfig, ModelLoadStrategy};
 use crate::plugin::{
@@ -250,6 +250,48 @@ impl InferenceEngine {
             })
             .map(|plugin| plugin.manifest.name.clone())
             .collect()
+    }
+
+    pub fn runtime_snapshot(&self) -> RuntimeSnapshot {
+        let active_inference = self
+            .active_core_rewriter(CoreComponent::Inference)
+            .map(str::to_string);
+        let active_backend = self.active_backend().map(str::to_string);
+        let legacy_text_candidates = self.legacy_text_plugin_candidates();
+        let active_legacy_text = self.active_legacy_text_plugins();
+        let loaded_plugin_names = self.plugin_names();
+        let plugins = self
+            .registry
+            .plugin_manager()
+            .list()
+            .iter()
+            .map(|plugin| PluginRuntimeStatus {
+                name: plugin.manifest.name.clone(),
+                version: plugin.manifest.version.clone(),
+                supports_ai_infra: plugin.supports_track(PlatformTrack::AiInfra),
+                supports_ai_agent: plugin.supports_track(PlatformTrack::AiAgent),
+                declares_inference_rewriter: plugin
+                    .declares_core_rewriter(CoreComponent::Inference),
+                has_sampling_hook: plugin.has_sampling_hook(),
+                is_legacy_compat: plugin.is_legacy_compat_bundle(),
+                legacy_text_candidate: legacy_text_candidates
+                    .iter()
+                    .any(|candidate| candidate == &plugin.manifest.name),
+                active_legacy_text: active_legacy_text
+                    .iter()
+                    .any(|active| active == &plugin.manifest.name),
+            })
+            .collect();
+
+        RuntimeSnapshot {
+            plugin_count: loaded_plugin_names.len(),
+            loaded_plugin_names,
+            active_backend,
+            active_inference,
+            legacy_text_candidates,
+            active_legacy_text,
+            plugins,
+        }
     }
 
     pub fn load_plugin_manifest_file<P: AsRef<Path>>(&mut self, manifest_path: P) -> Result<()> {
@@ -770,6 +812,50 @@ logit = 42.0
             engine.legacy_text_plugin_candidates(),
             vec!["legacy-prepost".to_string()]
         );
+    }
+
+    #[test]
+    fn engine_runtime_snapshot_reports_plugin_and_activation_state() {
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        engine
+            .register_plugin(registered_legacy_text_plugin_for_tests(
+                "legacy-prepost",
+                &["pre_generate", "post_generate"],
+            ))
+            .expect("register legacy plugin");
+        engine
+            .activate_legacy_text_plugin("legacy-prepost")
+            .expect("activate legacy plugin");
+
+        let snapshot = engine.runtime_snapshot();
+        assert_eq!(snapshot.plugin_count, 1);
+        assert_eq!(
+            snapshot.loaded_plugin_names,
+            vec!["legacy-prepost".to_string()]
+        );
+        assert_eq!(
+            snapshot.legacy_text_candidates,
+            vec!["legacy-prepost".to_string()]
+        );
+        assert_eq!(
+            snapshot.active_legacy_text,
+            vec!["legacy-prepost".to_string()]
+        );
+        assert_eq!(snapshot.plugins.len(), 1);
+        assert!(snapshot.plugins[0].is_legacy_compat);
+        assert!(snapshot.plugins[0].legacy_text_candidate);
+        assert!(snapshot.plugins[0].active_legacy_text);
+        assert!(!snapshot.plugins[0].declares_inference_rewriter);
     }
 
     struct ForceTokenHook;

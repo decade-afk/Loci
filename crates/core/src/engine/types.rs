@@ -1,4 +1,5 @@
 use crate::backend::InferenceParams;
+use serde::Serialize;
 
 #[derive(Debug, Clone)]
 pub struct GenerationParams {
@@ -42,4 +43,28 @@ pub struct ModelInfo {
     pub n_vocab: u32,
     pub n_ctx_train: u32,
     pub n_embd: u32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PluginRuntimeStatus {
+    pub name: String,
+    pub version: String,
+    pub supports_ai_infra: bool,
+    pub supports_ai_agent: bool,
+    pub declares_inference_rewriter: bool,
+    pub has_sampling_hook: bool,
+    pub is_legacy_compat: bool,
+    pub legacy_text_candidate: bool,
+    pub active_legacy_text: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RuntimeSnapshot {
+    pub plugin_count: usize,
+    pub loaded_plugin_names: Vec<String>,
+    pub active_backend: Option<String>,
+    pub active_inference: Option<String>,
+    pub legacy_text_candidates: Vec<String>,
+    pub active_legacy_text: Vec<String>,
+    pub plugins: Vec<PluginRuntimeStatus>,
 }

@@ -1,11 +1,16 @@
-use loci_core::{CoreComponent, InferenceEngine, PlatformTrack};
+use loci_core::{InferenceEngine, PlatformTrack};
+use serde_json::{json, Value};
 use std::env;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CliArgs {
     plugin_dir: PathBuf,
     activate_legacy_text_plugins: Vec<String>,
+    management_bind: Option<String>,
 }
 
 impl Default for CliArgs {
@@ -13,8 +18,23 @@ impl Default for CliArgs {
         Self {
             plugin_dir: PathBuf::from("plugins"),
             activate_legacy_text_plugins: Vec::new(),
+            management_bind: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HttpRequest {
+    method: String,
+    path: String,
+    body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HttpResponse {
+    status_code: u16,
+    content_type: &'static str,
+    body: Vec<u8>,
 }
 
 fn parse_args<I>(args: I) -> anyhow::Result<CliArgs>
@@ -38,6 +58,12 @@ where
                 })?;
                 parsed.activate_legacy_text_plugins.push(value);
             }
+            "--management-bind" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--management-bind requires an address"))?;
+                parsed.management_bind = Some(value);
+            }
             other => {
                 return Err(anyhow::anyhow!("unknown argument: {other}"));
             }
@@ -55,6 +81,228 @@ fn comma_or_none(values: &[String]) -> String {
     }
 }
 
+fn status_reason(status_code: u16) -> &'static str {
+    match status_code {
+        200 => "OK",
+        400 => "Bad Request",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        500 => "Internal Server Error",
+        _ => "Unknown",
+    }
+}
+
+fn json_response(status_code: u16, value: Value) -> HttpResponse {
+    HttpResponse {
+        status_code,
+        content_type: "application/json; charset=utf-8",
+        body: serde_json::to_vec(&value)
+            .unwrap_or_else(|_| b"{\"error\":\"serialization failure\"}".to_vec()),
+    }
+}
+
+fn text_response(status_code: u16, body: impl Into<Vec<u8>>) -> HttpResponse {
+    HttpResponse {
+        status_code,
+        content_type: "text/plain; charset=utf-8",
+        body: body.into(),
+    }
+}
+
+fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> anyhow::Result<()> {
+    let header = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        response.status_code,
+        status_reason(response.status_code),
+        response.content_type,
+        response.body.len()
+    );
+    stream.write_all(header.as_bytes())?;
+    stream.write_all(&response.body)?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn read_http_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 1024];
+    let mut header_end = None;
+
+    while header_end.is_none() {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        header_end = find_header_end(&buffer);
+        if buffer.len() > 1024 * 1024 {
+            return Err(anyhow::anyhow!("request headers too large"));
+        }
+    }
+
+    let header_end = header_end
+        .ok_or_else(|| anyhow::anyhow!("invalid HTTP request: missing header terminator"))?;
+    let header_bytes = &buffer[..header_end];
+    let header_text = std::str::from_utf8(header_bytes)
+        .map_err(|_| anyhow::anyhow!("invalid HTTP request header encoding"))?;
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing HTTP request line"))?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing HTTP method"))?
+        .to_string();
+    let path = request_parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing HTTP path"))?
+        .to_string();
+
+    let content_length = lines
+        .filter_map(|line| line.split_once(':'))
+        .find_map(|(name, value)| {
+            if name.eq_ignore_ascii_case("content-length") {
+                Some(value.trim())
+            } else {
+                None
+            }
+        })
+        .map(|value| value.parse::<usize>())
+        .transpose()
+        .map_err(|_| anyhow::anyhow!("invalid content-length"))?
+        .unwrap_or(0);
+
+    let mut body = buffer[(header_end + 4)..].to_vec();
+    while body.len() < content_length {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..read]);
+    }
+
+    if body.len() < content_length {
+        return Err(anyhow::anyhow!("incomplete HTTP request body"));
+    }
+    body.truncate(content_length);
+
+    Ok(HttpRequest { method, path, body })
+}
+
+fn plugin_name_from_body(body: &[u8]) -> anyhow::Result<String> {
+    let payload: Value = serde_json::from_slice(body)
+        .map_err(|error| anyhow::anyhow!("invalid JSON body: {error}"))?;
+    let plugin_name = payload
+        .get("plugin_name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("JSON body must contain string field `plugin_name`"))?;
+    Ok(plugin_name.to_string())
+}
+
+fn handle_management_request(
+    engine: &Arc<Mutex<InferenceEngine>>,
+    request: HttpRequest,
+) -> HttpResponse {
+    match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/health") => json_response(200, json!({ "status": "ok" })),
+        ("GET", "/v1/runtime") => match engine.lock() {
+            Ok(engine) => match serde_json::to_value(engine.runtime_snapshot()) {
+                Ok(snapshot) => json_response(200, snapshot),
+                Err(error) => json_response(500, json!({ "error": error.to_string() })),
+            },
+            Err(_) => json_response(500, json!({ "error": "engine mutex poisoned" })),
+        },
+        ("GET", "/v1/plugins") => match engine.lock() {
+            Ok(engine) => match serde_json::to_value(engine.runtime_snapshot().plugins) {
+                Ok(plugins) => json_response(200, plugins),
+                Err(error) => json_response(500, json!({ "error": error.to_string() })),
+            },
+            Err(_) => json_response(500, json!({ "error": "engine mutex poisoned" })),
+        },
+        ("POST", "/v1/legacy-text/activate") => {
+            let plugin_name = match plugin_name_from_body(&request.body) {
+                Ok(plugin_name) => plugin_name,
+                Err(error) => return json_response(400, json!({ "error": error.to_string() })),
+            };
+
+            match engine.lock() {
+                Ok(mut engine) => match engine.activate_legacy_text_plugin(&plugin_name) {
+                    Ok(()) => json_response(
+                        200,
+                        json!({
+                            "status": "activated",
+                            "plugin_name": plugin_name,
+                            "active_legacy_text": engine.active_legacy_text_plugins(),
+                        }),
+                    ),
+                    Err(error) => json_response(400, json!({ "error": error.to_string() })),
+                },
+                Err(_) => json_response(500, json!({ "error": "engine mutex poisoned" })),
+            }
+        }
+        ("POST", "/v1/legacy-text/deactivate") => {
+            let plugin_name = match plugin_name_from_body(&request.body) {
+                Ok(plugin_name) => plugin_name,
+                Err(error) => return json_response(400, json!({ "error": error.to_string() })),
+            };
+
+            match engine.lock() {
+                Ok(mut engine) => match engine.deactivate_legacy_text_plugin(&plugin_name) {
+                    Ok(()) => json_response(
+                        200,
+                        json!({
+                            "status": "deactivated",
+                            "plugin_name": plugin_name,
+                            "active_legacy_text": engine.active_legacy_text_plugins(),
+                        }),
+                    ),
+                    Err(error) => json_response(400, json!({ "error": error.to_string() })),
+                },
+                Err(_) => json_response(500, json!({ "error": "engine mutex poisoned" })),
+            }
+        }
+        ("POST", _) | ("PUT", _) | ("PATCH", _) | ("DELETE", _) => {
+            json_response(404, json!({ "error": "route not found" }))
+        }
+        ("GET", _) => json_response(404, json!({ "error": "route not found" })),
+        _ => text_response(405, "method not allowed"),
+    }
+}
+
+fn run_management_server(
+    bind_addr: &str,
+    engine: Arc<Mutex<InferenceEngine>>,
+) -> anyhow::Result<()> {
+    let listener = TcpListener::bind(bind_addr)?;
+    println!("management API listening on http://{bind_addr}");
+
+    for stream in listener.incoming() {
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(error) => {
+                eprintln!("management accept error: {error}");
+                continue;
+            }
+        };
+
+        let response = match read_http_request(&mut stream) {
+            Ok(request) => handle_management_request(&engine, request),
+            Err(error) => json_response(400, json!({ "error": error.to_string() })),
+        };
+
+        if let Err(error) = write_http_response(&mut stream, response) {
+            eprintln!("management response error: {error}");
+        }
+    }
+
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let args = parse_args(env::args().skip(1))?;
     let mut engine = InferenceEngine::builder().build()?;
@@ -64,22 +312,23 @@ fn main() -> anyhow::Result<()> {
         engine.activate_legacy_text_plugin(plugin_name)?;
     }
 
-    let active_inference = engine
-        .active_core_rewriter(CoreComponent::Inference)
-        .unwrap_or("none");
-    let legacy_text_candidates = engine.legacy_text_plugin_candidates();
-    let active_legacy_text = engine.active_legacy_text_plugins();
-
+    let snapshot = engine.runtime_snapshot();
     println!(
-        "loci-cli ready; plugins={}, loaded_now={}, infra_plugins={}, agent_plugins={}, active_inference={}, legacy_text_candidates={}, active_legacy_text={}",
-        engine.plugin_count(),
+        "loci-cli ready; plugins={}, loaded_now={}, infra_plugins={}, agent_plugins={}, active_inference={}, legacy_text_candidates={}, active_legacy_text={}, management_bind={}",
+        snapshot.plugin_count,
         loaded,
         engine.plugins_for_track(PlatformTrack::AiInfra).len(),
         engine.plugins_for_track(PlatformTrack::AiAgent).len(),
-        active_inference,
-        comma_or_none(&legacy_text_candidates),
-        comma_or_none(&active_legacy_text),
+        snapshot.active_inference.as_deref().unwrap_or("none"),
+        comma_or_none(&snapshot.legacy_text_candidates),
+        comma_or_none(&snapshot.active_legacy_text),
+        args.management_bind.as_deref().unwrap_or("none"),
     );
+
+    if let Some(bind_addr) = args.management_bind {
+        return run_management_server(&bind_addr, Arc::new(Mutex::new(engine)));
+    }
+
     Ok(())
 }
 
@@ -87,11 +336,17 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    fn empty_engine() -> InferenceEngine {
+        InferenceEngine::builder().build().expect("build engine")
+    }
+
     #[test]
-    fn parse_args_supports_plugin_dir_and_repeated_legacy_activation() {
+    fn parse_args_supports_management_bind_and_repeated_legacy_activation() {
         let parsed = parse_args([
             "--plugin-dir".to_string(),
             "custom-plugins".to_string(),
+            "--management-bind".to_string(),
+            "127.0.0.1:8080".to_string(),
             "--activate-legacy-text-plugin".to_string(),
             "legacy-a".to_string(),
             "--activate-legacy-text-plugin".to_string(),
@@ -104,6 +359,7 @@ mod tests {
             CliArgs {
                 plugin_dir: PathBuf::from("custom-plugins"),
                 activate_legacy_text_plugins: vec!["legacy-a".to_string(), "legacy-b".to_string(),],
+                management_bind: Some("127.0.0.1:8080".to_string()),
             }
         );
     }
@@ -121,5 +377,60 @@ mod tests {
             comma_or_none(&["a".to_string(), "b".to_string()]),
             "a,b".to_string()
         );
+    }
+
+    #[test]
+    fn health_route_returns_ok_json() {
+        let engine = Arc::new(Mutex::new(empty_engine()));
+        let response = handle_management_request(
+            &engine,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/health".to_string(),
+                body: Vec::new(),
+            },
+        );
+
+        assert_eq!(response.status_code, 200);
+        let value: Value = serde_json::from_slice(&response.body).expect("json");
+        assert_eq!(value["status"], "ok");
+    }
+
+    #[test]
+    fn runtime_route_returns_snapshot_json() {
+        let engine = Arc::new(Mutex::new(empty_engine()));
+        let response = handle_management_request(
+            &engine,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/runtime".to_string(),
+                body: Vec::new(),
+            },
+        );
+
+        assert_eq!(response.status_code, 200);
+        let value: Value = serde_json::from_slice(&response.body).expect("json");
+        assert_eq!(value["plugin_count"], 0);
+        assert_eq!(value["legacy_text_candidates"], json!([]));
+    }
+
+    #[test]
+    fn legacy_text_activate_route_rejects_invalid_body() {
+        let engine = Arc::new(Mutex::new(empty_engine()));
+        let response = handle_management_request(
+            &engine,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/legacy-text/activate".to_string(),
+                body: b"{}".to_vec(),
+            },
+        );
+
+        assert_eq!(response.status_code, 400);
+        let value: Value = serde_json::from_slice(&response.body).expect("json");
+        assert!(value["error"]
+            .as_str()
+            .expect("error string")
+            .contains("plugin_name"));
     }
 }

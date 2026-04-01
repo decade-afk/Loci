@@ -15,7 +15,10 @@ pub use crate::core::{
     CoreRegistry, DefaultCoreRegistry, EventBus, HardwareAbstraction, ModelRepository,
     PluginManager, UiHost, WorkflowEngine,
 };
-pub use crate::engine::{GenerationParams, InferenceEngine, InferenceEngineBuilder, ModelInfo};
+pub use crate::engine::{
+    GenerationParams, InferenceEngine, InferenceEngineBuilder, ModelInfo, PluginRuntimeStatus,
+    RuntimeSnapshot,
+};
 pub use crate::error::{LociError, Result};
 pub use crate::model::{ModelConfig, ModelLoadStrategy, ModelLoader};
 pub use crate::plugin::{

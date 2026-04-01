@@ -8,6 +8,7 @@ authors.workspace = true
 [dependencies]
 loci-core = { path = "../core" }
 anyhow.workspace = true
+serde_json.workspace = true
 
 [[bin]]
 name = "loci"
