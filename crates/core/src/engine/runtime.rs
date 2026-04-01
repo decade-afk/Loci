@@ -1,6 +1,9 @@
 use crate::backend::{BackendParams, BackendRegistry, InferenceParams, Model, ModelMetadata};
 use crate::core::CoreRegistry;
-use crate::engine::types::{GenerationParams, ModelInfo, PluginRuntimeStatus, RuntimeSnapshot};
+use crate::engine::types::{
+    CoreRewriterStatus, GenerationParams, ModelInfo, PluginRuntimeDetail, PluginRuntimeStatus,
+    RuntimeSnapshot,
+};
 use crate::error::{LociError, Result};
 use crate::model::{ModelConfig, ModelLoadStrategy};
 use crate::plugin::{
@@ -143,6 +146,10 @@ impl InferenceEngine {
         self.registry.active_core_rewriter(component)
     }
 
+    pub fn activate_inference_plugin(&mut self, plugin_name: &str) -> Result<()> {
+        self.activate_core_rewriter(CoreComponent::Inference, plugin_name)
+    }
+
     pub fn activate_legacy_text_plugin(&mut self, plugin_name: &str) -> Result<()> {
         let (manifest_name, manifest_version, legacy_runtime_path, legacy_capabilities, runtime) = {
             let plugin = self
@@ -252,35 +259,57 @@ impl InferenceEngine {
             .collect()
     }
 
+    pub fn plugin_runtime_detail(&self, plugin_name: &str) -> Option<PluginRuntimeDetail> {
+        let plugin = self.registry.plugin_manager().get(plugin_name)?;
+        let status = self.plugin_runtime_status(plugin);
+        let active_core_rewriters = self
+            .registry
+            .configured_core_rewriters()
+            .into_iter()
+            .filter_map(|(component, active_plugin_name)| {
+                if active_plugin_name == plugin.manifest.name {
+                    Some(component)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Some(PluginRuntimeDetail {
+            status,
+            declared_core_rewriters: plugin.manifest.core_rewriters.declared_components(),
+            auto_activate_components: plugin.auto_activate_components().to_vec(),
+            active_core_rewriters,
+            model_providers: plugin.manifest.contributes.model_providers.clone(),
+            inference_hooks: plugin.manifest.contributes.inference_hooks.clone(),
+            commands: plugin.manifest.contributes.commands.clone(),
+            legacy_capabilities: plugin.manifest.compatibility.legacy_capabilities.clone(),
+        })
+    }
+
     pub fn runtime_snapshot(&self) -> RuntimeSnapshot {
         let active_inference = self
             .active_core_rewriter(CoreComponent::Inference)
             .map(str::to_string);
         let active_backend = self.active_backend().map(str::to_string);
+        let loaded_plugin_names = self.plugin_names();
+        let configured_core_rewriters = self
+            .registry
+            .configured_core_rewriters()
+            .into_iter()
+            .map(|(component, plugin_name)| CoreRewriterStatus {
+                component,
+                plugin_name,
+            })
+            .collect();
         let legacy_text_candidates = self.legacy_text_plugin_candidates();
         let active_legacy_text = self.active_legacy_text_plugins();
-        let loaded_plugin_names = self.plugin_names();
         let plugins = self
             .registry
             .plugin_manager()
             .list()
             .iter()
-            .map(|plugin| PluginRuntimeStatus {
-                name: plugin.manifest.name.clone(),
-                version: plugin.manifest.version.clone(),
-                supports_ai_infra: plugin.supports_track(PlatformTrack::AiInfra),
-                supports_ai_agent: plugin.supports_track(PlatformTrack::AiAgent),
-                declares_inference_rewriter: plugin
-                    .declares_core_rewriter(CoreComponent::Inference),
-                has_sampling_hook: plugin.has_sampling_hook(),
-                is_legacy_compat: plugin.is_legacy_compat_bundle(),
-                legacy_text_candidate: legacy_text_candidates
-                    .iter()
-                    .any(|candidate| candidate == &plugin.manifest.name),
-                active_legacy_text: active_legacy_text
-                    .iter()
-                    .any(|active| active == &plugin.manifest.name),
-            })
+            .map(|plugin| self.plugin_runtime_status(plugin))
             .collect();
 
         RuntimeSnapshot {
@@ -288,6 +317,7 @@ impl InferenceEngine {
             loaded_plugin_names,
             active_backend,
             active_inference,
+            configured_core_rewriters,
             legacy_text_candidates,
             active_legacy_text,
             plugins,
@@ -470,6 +500,28 @@ impl InferenceEngine {
             n_ctx_train: metadata.n_ctx_train,
             n_embd: metadata.n_embd,
         })
+    }
+
+    fn plugin_runtime_status(&self, plugin: &RegisteredPlugin) -> PluginRuntimeStatus {
+        PluginRuntimeStatus {
+            name: plugin.manifest.name.clone(),
+            version: plugin.manifest.version.clone(),
+            supports_ai_infra: plugin.supports_track(PlatformTrack::AiInfra),
+            supports_ai_agent: plugin.supports_track(PlatformTrack::AiAgent),
+            source_format: plugin.manifest.compatibility.source_format,
+            runtime_bridge: plugin.manifest.compatibility.runtime_bridge,
+            declares_inference_rewriter: plugin.declares_core_rewriter(CoreComponent::Inference),
+            has_sampling_hook: plugin.has_sampling_hook(),
+            is_legacy_compat: plugin.is_legacy_compat_bundle(),
+            legacy_text_candidate: self
+                .legacy_text_plugin_candidates()
+                .iter()
+                .any(|candidate| candidate == &plugin.manifest.name),
+            active_legacy_text: self
+                .active_legacy_text_plugins()
+                .iter()
+                .any(|active| active == &plugin.manifest.name),
+        }
     }
 }
 
@@ -852,10 +904,73 @@ logit = 42.0
             vec!["legacy-prepost".to_string()]
         );
         assert_eq!(snapshot.plugins.len(), 1);
+        assert_eq!(
+            snapshot.configured_core_rewriters,
+            Vec::<CoreRewriterStatus>::new()
+        );
         assert!(snapshot.plugins[0].is_legacy_compat);
         assert!(snapshot.plugins[0].legacy_text_candidate);
         assert!(snapshot.plugins[0].active_legacy_text);
         assert!(!snapshot.plugins[0].declares_inference_rewriter);
+    }
+
+    #[test]
+    fn engine_plugin_runtime_detail_reports_governance_metadata() {
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "governed-inference".to_string(),
+                version: "1.2.3".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiInfra],
+                contributes: ContributionPoints {
+                    model_providers: vec!["private-registry".to_string()],
+                    inference_hooks: vec!["sampling-profile".to_string()],
+                    commands: vec!["plugins.reload".to_string()],
+                    ..Default::default()
+                },
+                core_rewriters: CoreRewriters {
+                    inference: true,
+                    workflow: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap {
+                    activate_on_load: vec![CoreComponent::Inference],
+                },
+                compatibility: PluginCompatibility::default(),
+            }))
+            .expect("register plugin");
+
+        let detail = engine
+            .plugin_runtime_detail("governed-inference")
+            .expect("detail should exist");
+
+        assert_eq!(detail.status.name, "governed-inference");
+        assert_eq!(
+            detail.declared_core_rewriters,
+            vec![CoreComponent::Inference, CoreComponent::Workflow]
+        );
+        assert_eq!(
+            detail.auto_activate_components,
+            vec![CoreComponent::Inference]
+        );
+        assert_eq!(detail.active_core_rewriters, vec![CoreComponent::Inference]);
+        assert_eq!(detail.model_providers, vec!["private-registry".to_string()]);
+        assert_eq!(detail.inference_hooks, vec!["sampling-profile".to_string()]);
+        assert_eq!(detail.commands, vec!["plugins.reload".to_string()]);
     }
 
     struct ForceTokenHook;
@@ -916,7 +1031,7 @@ logit = 42.0
         assert_eq!(engine.sampling_hook_count(), 0);
 
         engine
-            .activate_core_rewriter(CoreComponent::Inference, "hooked-plugin")
+            .activate_inference_plugin("hooked-plugin")
             .expect("activate inference rewriter");
 
         let output = engine
@@ -924,6 +1039,13 @@ logit = 42.0
             .expect("generate");
         assert!(output.contains("hooks=1"));
         assert_eq!(engine.sampling_hook_count(), 1);
+        assert_eq!(
+            engine.runtime_snapshot().configured_core_rewriters,
+            vec![CoreRewriterStatus {
+                component: CoreComponent::Inference,
+                plugin_name: "hooked-plugin".to_string(),
+            }]
+        );
     }
 
     #[test]

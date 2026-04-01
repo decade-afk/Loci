@@ -16,8 +16,8 @@ pub use crate::core::{
     PluginManager, UiHost, WorkflowEngine,
 };
 pub use crate::engine::{
-    GenerationParams, InferenceEngine, InferenceEngineBuilder, ModelInfo, PluginRuntimeStatus,
-    RuntimeSnapshot,
+    CoreRewriterStatus, GenerationParams, InferenceEngine, InferenceEngineBuilder, ModelInfo,
+    PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot,
 };
 pub use crate::error::{LociError, Result};
 pub use crate::model::{ModelConfig, ModelLoadStrategy, ModelLoader};

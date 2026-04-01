@@ -204,17 +204,57 @@ fn plugin_name_from_body(body: &[u8]) -> anyhow::Result<String> {
     Ok(plugin_name.to_string())
 }
 
+fn request_path(path: &str) -> &str {
+    path.split('?').next().unwrap_or(path)
+}
+
+fn plugin_name_from_route<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    path.strip_prefix(prefix).and_then(|plugin_name| {
+        if plugin_name.is_empty() || plugin_name.contains('/') {
+            None
+        } else {
+            Some(plugin_name)
+        }
+    })
+}
+
 fn handle_management_request(
     engine: &Arc<Mutex<InferenceEngine>>,
     request: HttpRequest,
 ) -> HttpResponse {
-    match (request.method.as_str(), request.path.as_str()) {
+    let path = request_path(&request.path);
+
+    if request.method == "GET" {
+        if let Some(plugin_name) = plugin_name_from_route(path, "/v1/plugins/") {
+            return match engine.lock() {
+                Ok(engine) => match engine.plugin_runtime_detail(plugin_name) {
+                    Some(detail) => match serde_json::to_value(detail) {
+                        Ok(detail) => json_response(200, detail),
+                        Err(error) => json_response(500, json!({ "error": error.to_string() })),
+                    },
+                    None => json_response(404, json!({ "error": "plugin not found" })),
+                },
+                Err(_) => json_response(500, json!({ "error": "engine mutex poisoned" })),
+            };
+        }
+    }
+
+    match (request.method.as_str(), path) {
         ("GET", "/health") => json_response(200, json!({ "status": "ok" })),
         ("GET", "/v1/runtime") => match engine.lock() {
             Ok(engine) => match serde_json::to_value(engine.runtime_snapshot()) {
                 Ok(snapshot) => json_response(200, snapshot),
                 Err(error) => json_response(500, json!({ "error": error.to_string() })),
             },
+            Err(_) => json_response(500, json!({ "error": "engine mutex poisoned" })),
+        },
+        ("GET", "/v1/core/rewriters") => match engine.lock() {
+            Ok(engine) => {
+                match serde_json::to_value(engine.runtime_snapshot().configured_core_rewriters) {
+                    Ok(rewriters) => json_response(200, rewriters),
+                    Err(error) => json_response(500, json!({ "error": error.to_string() })),
+                }
+            }
             Err(_) => json_response(500, json!({ "error": "engine mutex poisoned" })),
         },
         ("GET", "/v1/plugins") => match engine.lock() {
@@ -224,6 +264,28 @@ fn handle_management_request(
             },
             Err(_) => json_response(500, json!({ "error": "engine mutex poisoned" })),
         },
+        ("POST", "/v1/core/inference/activate") => {
+            let plugin_name = match plugin_name_from_body(&request.body) {
+                Ok(plugin_name) => plugin_name,
+                Err(error) => return json_response(400, json!({ "error": error.to_string() })),
+            };
+
+            match engine.lock() {
+                Ok(mut engine) => match engine.activate_inference_plugin(&plugin_name) {
+                    Ok(()) => json_response(
+                        200,
+                        json!({
+                            "status": "activated",
+                            "component": "inference",
+                            "plugin_name": plugin_name,
+                            "active_inference": engine.runtime_snapshot().active_inference,
+                        }),
+                    ),
+                    Err(error) => json_response(400, json!({ "error": error.to_string() })),
+                },
+                Err(_) => json_response(500, json!({ "error": "engine mutex poisoned" })),
+            }
+        }
         ("POST", "/v1/legacy-text/activate") => {
             let plugin_name = match plugin_name_from_body(&request.body) {
                 Ok(plugin_name) => plugin_name,
@@ -335,9 +397,38 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use loci_core::{
+        CoreRewriters, PluginBootstrap, PluginCompatibility, PluginManifest, PluginRuntime,
+        RegisteredPlugin,
+    };
 
     fn empty_engine() -> InferenceEngine {
         InferenceEngine::builder().build().expect("build engine")
+    }
+
+    fn plugin_engine() -> InferenceEngine {
+        let mut engine = empty_engine();
+        let mut manifest = PluginManifest {
+            name: "managed-inference".to_string(),
+            version: "1.0.0".to_string(),
+            api_version: "1.0".to_string(),
+            min_host_version: None,
+            max_host_version: None,
+            target_tracks: vec![PlatformTrack::AiInfra],
+            contributes: Default::default(),
+            core_rewriters: CoreRewriters {
+                inference: true,
+                ..Default::default()
+            },
+            runtime: PluginRuntime::default(),
+            bootstrap: PluginBootstrap::default(),
+            compatibility: PluginCompatibility::default(),
+        };
+        manifest.contributes.inference_hooks = vec!["sampling-profile".to_string()];
+        engine
+            .register_plugin(RegisteredPlugin::new(manifest))
+            .expect("register plugin");
+        engine
     }
 
     #[test]
@@ -380,6 +471,14 @@ mod tests {
     }
 
     #[test]
+    fn request_path_ignores_query_string() {
+        assert_eq!(
+            request_path("/v1/plugins/demo?verbose=true"),
+            "/v1/plugins/demo"
+        );
+    }
+
+    #[test]
     fn health_route_returns_ok_json() {
         let engine = Arc::new(Mutex::new(empty_engine()));
         let response = handle_management_request(
@@ -412,6 +511,93 @@ mod tests {
         let value: Value = serde_json::from_slice(&response.body).expect("json");
         assert_eq!(value["plugin_count"], 0);
         assert_eq!(value["legacy_text_candidates"], json!([]));
+    }
+
+    #[test]
+    fn plugin_detail_route_returns_not_found_for_unknown_plugin() {
+        let engine = Arc::new(Mutex::new(empty_engine()));
+        let response = handle_management_request(
+            &engine,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/plugins/missing".to_string(),
+                body: Vec::new(),
+            },
+        );
+
+        assert_eq!(response.status_code, 404);
+        let value: Value = serde_json::from_slice(&response.body).expect("json");
+        assert_eq!(value["error"], "plugin not found");
+    }
+
+    #[test]
+    fn plugin_detail_route_returns_detail_payload() {
+        let engine = Arc::new(Mutex::new(plugin_engine()));
+        let response = handle_management_request(
+            &engine,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/plugins/managed-inference?verbose=true".to_string(),
+                body: Vec::new(),
+            },
+        );
+
+        assert_eq!(response.status_code, 200);
+        let value: Value = serde_json::from_slice(&response.body).expect("json");
+        assert_eq!(value["status"]["name"], "managed-inference");
+        assert_eq!(value["declared_core_rewriters"], json!(["inference"]));
+    }
+
+    #[test]
+    fn inference_activate_route_rejects_missing_plugin_name() {
+        let engine = Arc::new(Mutex::new(empty_engine()));
+        let response = handle_management_request(
+            &engine,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/core/inference/activate".to_string(),
+                body: b"{}".to_vec(),
+            },
+        );
+
+        assert_eq!(response.status_code, 400);
+        let value: Value = serde_json::from_slice(&response.body).expect("json");
+        assert!(value["error"]
+            .as_str()
+            .expect("error string")
+            .contains("plugin_name"));
+    }
+
+    #[test]
+    fn inference_activate_route_switches_active_inference_plugin() {
+        let engine = Arc::new(Mutex::new(plugin_engine()));
+        let response = handle_management_request(
+            &engine,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/core/inference/activate".to_string(),
+                body: br#"{"plugin_name":"managed-inference"}"#.to_vec(),
+            },
+        );
+
+        assert_eq!(response.status_code, 200);
+        let value: Value = serde_json::from_slice(&response.body).expect("json");
+        assert_eq!(value["component"], "inference");
+        assert_eq!(value["active_inference"], "managed-inference");
+
+        let runtime = handle_management_request(
+            &engine,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/core/rewriters".to_string(),
+                body: Vec::new(),
+            },
+        );
+        let rewriters: Value = serde_json::from_slice(&runtime.body).expect("json");
+        assert_eq!(
+            rewriters,
+            json!([{ "component": "inference", "plugin_name": "managed-inference" }])
+        );
     }
 
     #[test]
