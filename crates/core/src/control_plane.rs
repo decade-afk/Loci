@@ -131,6 +131,60 @@ pub struct PluginLoadStatus {
     pub active_inference: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TextGenerationParams {
+    #[serde(default = "default_model_n_ctx")]
+    pub n_ctx: u32,
+    #[serde(default = "default_model_n_batch")]
+    pub n_batch: u32,
+    #[serde(default)]
+    pub n_threads: Option<u32>,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_top_p")]
+    pub top_p: f32,
+    #[serde(default)]
+    pub min_p: f32,
+    #[serde(default = "default_top_k")]
+    pub top_k: u32,
+    #[serde(default = "default_repeat_penalty")]
+    pub repeat_penalty: f32,
+}
+
+impl Default for TextGenerationParams {
+    fn default() -> Self {
+        Self {
+            n_ctx: default_model_n_ctx(),
+            n_batch: default_model_n_batch(),
+            n_threads: None,
+            max_tokens: default_max_tokens(),
+            temperature: default_temperature(),
+            top_p: default_top_p(),
+            min_p: 0.0,
+            top_k: default_top_k(),
+            repeat_penalty: default_repeat_penalty(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct TextGenerationRequest {
+    pub prompt: String,
+    #[serde(default)]
+    pub params: TextGenerationParams,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct TextGenerationResponse {
+    pub output: String,
+    pub active_backend: Option<String>,
+    pub active_model_path: Option<String>,
+    pub active_model_info: Option<ModelRuntimeInfo>,
+    pub active_inference: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ModelLoadStrategyRequest {
@@ -235,4 +289,24 @@ const fn default_model_kv_offload() -> bool {
 
 const fn default_model_op_offload() -> bool {
     true
+}
+
+const fn default_max_tokens() -> u32 {
+    512
+}
+
+const fn default_temperature() -> f32 {
+    0.8
+}
+
+const fn default_top_p() -> f32 {
+    0.95
+}
+
+const fn default_top_k() -> u32 {
+    40
+}
+
+const fn default_repeat_penalty() -> f32 {
+    1.1
 }

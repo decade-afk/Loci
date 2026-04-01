@@ -18,7 +18,7 @@ pub use crate::control_plane::{
     ManagementHealthStatus, ModelLoadConfig, ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus,
     ModelLoadStrategyRequest, ModelRuntimeInfo, PluginLoadRequest, PluginLoadSourceKind,
     PluginLoadStatus, PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot,
-    SamplingHookSource,
+    SamplingHookSource, TextGenerationParams, TextGenerationRequest, TextGenerationResponse,
 };
 pub use crate::core::{
     CoreRegistry, DefaultCoreRegistry, EventBus, HardwareAbstraction, ModelRepository,

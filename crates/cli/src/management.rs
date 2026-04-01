@@ -1,4 +1,4 @@
-use loci_core::{ManagementService, ModelLoadRequest, PluginLoadRequest};
+use loci_core::{ManagementService, ModelLoadRequest, PluginLoadRequest, TextGenerationRequest};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -124,6 +124,20 @@ pub fn handle_management_request(
                 Err(error) => json_response(400, json!({ "error": error.to_string() })),
             }
         }
+        ("POST", "/v1/inference/generate") => {
+            let generation_request = match text_generation_request_from_body(&request.body) {
+                Ok(generation_request) => generation_request,
+                Err(error) => return json_response(400, json!({ "error": error.to_string() })),
+            };
+
+            match service.generate_text(generation_request) {
+                Ok(response) => match serde_json::to_value(response) {
+                    Ok(response) => json_response(200, response),
+                    Err(error) => json_response(500, json!({ "error": error.to_string() })),
+                },
+                Err(error) => json_response(400, json!({ "error": error.to_string() })),
+            }
+        }
         ("POST", "/v1/core/inference/activate") => {
             let plugin_name = match plugin_name_from_body(&request.body) {
                 Ok(plugin_name) => plugin_name,
@@ -203,6 +217,10 @@ fn model_load_request_from_body(body: &[u8]) -> anyhow::Result<ModelLoadRequest>
 }
 
 fn plugin_load_request_from_body(body: &[u8]) -> anyhow::Result<PluginLoadRequest> {
+    serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON body: {error}"))
+}
+
+fn text_generation_request_from_body(body: &[u8]) -> anyhow::Result<TextGenerationRequest> {
     serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON body: {error}"))
 }
 
@@ -649,6 +667,58 @@ target_tracks = ["ai_infra"]
         assert_eq!(runtime_value["active_backend"], "mock");
         assert_eq!(runtime_value["active_model_path"], "demo.gguf");
         assert_eq!(runtime_value["active_model_info"]["architecture"], "mock");
+    }
+
+    #[test]
+    fn inference_generate_route_runs_generation_after_model_load() {
+        let service = empty_service();
+        let load = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/model/load".to_string(),
+                body: br#"{
+                    "backend_name":"mock",
+                    "config":{
+                        "model_path":"demo.gguf",
+                        "use_gpu":false,
+                        "n_gpu_layers":0,
+                        "kv_offload":false,
+                        "op_offload":false,
+                        "split_mode":"none"
+                    }
+                }"#
+                .to_vec(),
+            },
+        );
+        assert_eq!(load.status_code, 200);
+
+        let response = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/inference/generate".to_string(),
+                body: serde_json::to_vec(&json!({
+                    "prompt": "hello",
+                    "params": {
+                        "max_tokens": 16,
+                        "temperature": 0.2
+                    }
+                }))
+                .expect("serialize request"),
+            },
+        );
+
+        assert_eq!(response.status_code, 200);
+        let value: Value = serde_json::from_slice(&response.body).expect("json");
+        assert_eq!(value["active_backend"], "mock");
+        assert_eq!(value["active_model_path"], "demo.gguf");
+        assert_eq!(value["active_model_info"]["architecture"], "mock");
+        assert_eq!(value["active_inference"], Value::Null);
+        assert!(value["output"]
+            .as_str()
+            .expect("output string")
+            .contains("mock:hello"));
     }
 
     #[test]

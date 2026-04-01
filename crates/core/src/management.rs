@@ -3,12 +3,13 @@ use crate::control_plane::{
     CoreRewriterStatus, InferenceActivationStatus, LegacyTextPluginActivationStatus,
     ManagementHealthStatus, ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus,
     ModelLoadStrategyRequest, PluginLoadRequest, PluginLoadSourceKind, PluginLoadStatus,
-    PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot,
+    PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot, TextGenerationRequest,
+    TextGenerationResponse,
 };
 use crate::engine::InferenceEngine;
 use crate::error::{LociError, Result};
 use crate::model::{ModelConfig, ModelLoadStrategy};
-use crate::GpuSplitMode;
+use crate::{GpuSplitMode, InferenceParams};
 use loci_plugin_api::CoreComponent;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -122,6 +123,28 @@ impl ManagementService {
         })
     }
 
+    pub fn generate_text(&self, request: TextGenerationRequest) -> Result<TextGenerationResponse> {
+        self.with_engine_mut(|engine| {
+            if request.prompt.trim().is_empty() {
+                return Err(LociError::InvalidArgument(
+                    "prompt must not be empty".to_string(),
+                ));
+            }
+
+            let params = inference_params_from_request(request.params);
+            let output = engine.generate(&request.prompt, &params)?;
+            let snapshot = engine.runtime_snapshot();
+
+            Ok(TextGenerationResponse {
+                output,
+                active_backend: snapshot.active_backend,
+                active_model_path: snapshot.active_model_path,
+                active_model_info: snapshot.active_model_info,
+                active_inference: snapshot.active_inference,
+            })
+        })
+    }
+
     pub fn activate_legacy_text_plugin(
         &self,
         plugin_name: &str,
@@ -208,6 +231,22 @@ fn newly_loaded_plugin_names(before: &[String], after: &[String]) -> Vec<String>
         .filter(|name| !before_set.contains(name.as_str()))
         .cloned()
         .collect()
+}
+
+fn inference_params_from_request(
+    request: crate::control_plane::TextGenerationParams,
+) -> InferenceParams {
+    InferenceParams {
+        n_ctx: request.n_ctx,
+        n_batch: request.n_batch,
+        n_threads: request.n_threads,
+        max_tokens: request.max_tokens,
+        temperature: request.temperature,
+        top_p: request.top_p,
+        min_p: request.min_p,
+        top_k: request.top_k,
+        repeat_penalty: request.repeat_penalty,
+    }
 }
 
 #[cfg(test)]
@@ -357,6 +396,49 @@ mod tests {
                 .map(|info| info.architecture.as_str()),
             Some("mock")
         );
+    }
+
+    #[test]
+    fn service_generates_text_from_control_plane_request() {
+        let service = empty_service();
+        service
+            .load_model(ModelLoadRequest {
+                backend_name: "mock".to_string(),
+                config: crate::ModelLoadConfig {
+                    model_path: "demo.gguf".to_string(),
+                    use_gpu: false,
+                    n_gpu_layers: 0,
+                    kv_offload: false,
+                    op_offload: false,
+                    split_mode: crate::ModelLoadSplitMode::None,
+                    ..Default::default()
+                },
+            })
+            .expect("load model");
+
+        let response = service
+            .generate_text(TextGenerationRequest {
+                prompt: "hello".to_string(),
+                params: crate::TextGenerationParams {
+                    max_tokens: 16,
+                    temperature: 0.2,
+                    ..Default::default()
+                },
+            })
+            .expect("generate");
+
+        assert!(response.output.contains("mock:hello"));
+        assert!(response.output.contains("max_tokens=16"));
+        assert_eq!(response.active_backend.as_deref(), Some("mock"));
+        assert_eq!(response.active_model_path.as_deref(), Some("demo.gguf"));
+        assert_eq!(
+            response
+                .active_model_info
+                .as_ref()
+                .map(|info| info.architecture.as_str()),
+            Some("mock")
+        );
+        assert_eq!(response.active_inference, None);
     }
 
     #[test]
