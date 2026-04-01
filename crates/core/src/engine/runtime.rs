@@ -237,6 +237,21 @@ impl InferenceEngine {
             .collect()
     }
 
+    pub fn legacy_text_plugin_candidates(&self) -> Vec<String> {
+        self.registry
+            .plugin_manager()
+            .list()
+            .iter()
+            .filter(|plugin| {
+                plugin.is_legacy_compat_bundle()
+                    && !plugin.declares_legacy_capability("on_token")
+                    && (plugin.supports_legacy_pre_generate()
+                        || plugin.supports_legacy_post_generate())
+            })
+            .map(|plugin| plugin.manifest.name.clone())
+            .collect()
+    }
+
     pub fn load_plugin_manifest_file<P: AsRef<Path>>(&mut self, manifest_path: P) -> Result<()> {
         let plugin = load_plugin_manifest_file(manifest_path).map_err(LociError::from)?;
         self.register_plugin(plugin)
@@ -723,6 +738,38 @@ logit = 42.0
         assert!(err
             .to_string()
             .contains("streaming compat is not implemented"));
+    }
+
+    #[test]
+    fn engine_lists_only_supported_legacy_text_activation_candidates() {
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        engine
+            .register_plugin(registered_legacy_text_plugin_for_tests(
+                "legacy-prepost",
+                &["pre_generate", "post_generate"],
+            ))
+            .expect("register pre/post legacy plugin");
+        engine
+            .register_plugin(registered_legacy_text_plugin_for_tests(
+                "legacy-stream",
+                &["pre_generate", "on_token"],
+            ))
+            .expect("register on_token legacy plugin");
+
+        assert_eq!(
+            engine.legacy_text_plugin_candidates(),
+            vec!["legacy-prepost".to_string()]
+        );
     }
 
     struct ForceTokenHook;
