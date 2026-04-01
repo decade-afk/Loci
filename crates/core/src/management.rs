@@ -1,30 +1,11 @@
-use crate::engine::{
-    CoreRewriterStatus, InferenceEngine, PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot,
+use crate::control_plane::{
+    CoreRewriterStatus, InferenceActivationStatus, LegacyTextPluginActivationStatus,
+    ManagementHealthStatus, PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot,
 };
+use crate::engine::InferenceEngine;
 use crate::error::{LociError, Result};
 use loci_plugin_api::CoreComponent;
-use serde::Serialize;
 use std::sync::{Arc, Mutex};
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct ManagementHealthStatus {
-    pub status: &'static str,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct InferenceActivationStatus {
-    pub status: &'static str,
-    pub component: CoreComponent,
-    pub plugin_name: String,
-    pub active_inference: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct LegacyTextPluginActivationStatus {
-    pub status: &'static str,
-    pub plugin_name: String,
-    pub active_legacy_text: Vec<String>,
-}
 
 #[derive(Clone)]
 pub struct ManagementService {

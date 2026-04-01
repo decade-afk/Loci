@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod backends;
+pub mod control_plane;
 pub mod core;
 pub mod engine;
 pub mod error;
@@ -12,19 +13,17 @@ pub use crate::backend::{
     BackendCapabilities, BackendParams, BackendRegistry, GpuSplitMode, InferenceBackend,
     InferenceParams, Model, ModelMetadata,
 };
+pub use crate::control_plane::{
+    CoreRewriterStatus, InferenceActivationStatus, LegacyTextPluginActivationStatus,
+    ManagementHealthStatus, PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot,
+};
 pub use crate::core::{
     CoreRegistry, DefaultCoreRegistry, EventBus, HardwareAbstraction, ModelRepository,
     PluginManager, UiHost, WorkflowEngine,
 };
-pub use crate::engine::{
-    CoreRewriterStatus, GenerationParams, InferenceEngine, InferenceEngineBuilder, ModelInfo,
-    PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot,
-};
+pub use crate::engine::{GenerationParams, InferenceEngine, InferenceEngineBuilder, ModelInfo};
 pub use crate::error::{LociError, Result};
-pub use crate::management::{
-    InferenceActivationStatus, LegacyTextPluginActivationStatus, ManagementHealthStatus,
-    ManagementService,
-};
+pub use crate::management::ManagementService;
 pub use crate::model::{ModelConfig, ModelLoadStrategy, ModelLoader};
 pub use crate::plugin::{
     discover_plugin_bundle_files, discover_plugin_manifest_files, load_plugin_bundle_file,

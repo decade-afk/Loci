@@ -1,9 +1,9 @@
 use crate::backend::{BackendParams, BackendRegistry, InferenceParams, Model, ModelMetadata};
-use crate::core::CoreRegistry;
-use crate::engine::types::{
-    CoreRewriterStatus, GenerationParams, ModelInfo, PluginRuntimeDetail, PluginRuntimeStatus,
-    RuntimeSnapshot,
+use crate::control_plane::{
+    CoreRewriterStatus, PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot,
 };
+use crate::core::CoreRegistry;
+use crate::engine::types::{GenerationParams, ModelInfo};
 use crate::error::{LociError, Result};
 use crate::model::{ModelConfig, ModelLoadStrategy};
 use crate::plugin::{
