@@ -1,10 +1,11 @@
 use crate::backend::BackendCapabilities;
 use crate::control_plane::{
-    CoreRewriterActivationRequest, CoreRewriterActivationStatus, CoreRewriterStatus,
-    InferenceActivationStatus, LegacyTextPluginActivationStatus, ManagementHealthStatus,
-    ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus, ModelLoadStrategyRequest,
-    PluginLoadRequest, PluginLoadSourceKind, PluginLoadStatus, PluginRuntimeDetail,
-    PluginRuntimeStatus, RuntimeSnapshot, TextGenerationRequest, TextGenerationResponse,
+    CoreRewriterActivationRequest, CoreRewriterActivationStatus, CoreRewriterInventoryStatus,
+    CoreRewriterStatus, InferenceActivationStatus, LegacyTextPluginActivationStatus,
+    ManagementHealthStatus, ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus,
+    ModelLoadStrategyRequest, PluginLoadRequest, PluginLoadSourceKind, PluginLoadStatus,
+    PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot, TextGenerationRequest,
+    TextGenerationResponse, WorkflowInventoryStatus,
 };
 use crate::engine::InferenceEngine;
 use crate::error::{LociError, Result};
@@ -55,8 +56,31 @@ impl ManagementService {
             .map(|snapshot| snapshot.configured_core_rewriters)
     }
 
+    pub fn core_rewriter_inventory(&self) -> Result<Vec<CoreRewriterInventoryStatus>> {
+        self.with_engine(|engine| {
+            Ok(all_core_components()
+                .into_iter()
+                .map(|component| {
+                    let mut available_plugins = engine.plugins_for_core_component(component);
+                    available_plugins.sort();
+                    CoreRewriterInventoryStatus {
+                        component,
+                        active_plugin_name: engine
+                            .active_core_rewriter(component)
+                            .map(str::to_string),
+                        available_plugins,
+                    }
+                })
+                .collect())
+        })
+    }
+
     pub fn backend_capabilities(&self) -> Result<Vec<BackendCapabilities>> {
         self.with_engine(|engine| Ok(engine.backend_capabilities()))
+    }
+
+    pub fn workflow_inventory(&self) -> Result<WorkflowInventoryStatus> {
+        self.with_engine(|engine| Ok(engine.workflow_inventory()))
     }
 
     pub fn activate_inference_plugin(
@@ -260,6 +284,18 @@ fn newly_loaded_plugin_names(before: &[String], after: &[String]) -> Vec<String>
         .collect()
 }
 
+fn all_core_components() -> [CoreComponent; 7] {
+    [
+        CoreComponent::Inference,
+        CoreComponent::Model,
+        CoreComponent::Hardware,
+        CoreComponent::Workflow,
+        CoreComponent::EventBus,
+        CoreComponent::PluginManager,
+        CoreComponent::UiHost,
+    ]
+}
+
 fn inference_params_from_request(
     request: crate::control_plane::TextGenerationParams,
 ) -> InferenceParams {
@@ -319,11 +355,24 @@ mod tests {
                 inference: true,
                 ..Default::default()
             },
-            runtime: PluginRuntime::default(),
+            runtime: PluginRuntime {
+                library_path: Some("runtime/plugin.dll".to_string()),
+                wasm_path: Some("runtime/plugin.wasm".to_string()),
+                sampling_profile: Some("sampling-hook.toml".to_string()),
+            },
             bootstrap: PluginBootstrap::default(),
-            compatibility: PluginCompatibility::default(),
+            compatibility: PluginCompatibility {
+                legacy_runtime_path: Some("legacy/compat.dll".to_string()),
+                ..Default::default()
+            },
         };
         manifest.contributes.inference_hooks = vec!["sampling-profile".to_string()];
+        manifest.contributes.workflows = vec!["agent.pipeline".to_string()];
+        manifest.contributes.custom_nodes = vec!["node.rewrite".to_string()];
+        manifest.contributes.commands = vec!["plugins.reload".to_string()];
+        manifest.contributes.ui_contributes.panels = vec!["inspector".to_string()];
+        manifest.contributes.ui_contributes.windows = vec!["governance".to_string()];
+        manifest.contributes.ui_contributes.widgets = vec!["status-pill".to_string()];
         engine
             .register_plugin(RegisteredPlugin::new(manifest))
             .expect("register plugin");
@@ -340,7 +389,10 @@ mod tests {
                 min_host_version: None,
                 max_host_version: None,
                 target_tracks: vec![PlatformTrack::AiAgent],
-                contributes: Default::default(),
+                contributes: crate::ContributionPoints {
+                    workflows: vec!["agent.plan".to_string(), "agent.review".to_string()],
+                    ..Default::default()
+                },
                 core_rewriters: CoreRewriters {
                     workflow: true,
                     ..Default::default()
@@ -444,6 +496,78 @@ mod tests {
         assert_eq!(backends.len(), 1);
         assert_eq!(backends[0].name, "mock");
         assert!(backends[0].supports_text);
+    }
+
+    #[test]
+    fn service_reports_core_rewriter_inventory() {
+        let service = combined_rewriter_service();
+        assert_eq!(
+            service.core_rewriter_inventory().expect("inventory"),
+            vec![
+                CoreRewriterInventoryStatus {
+                    component: CoreComponent::Inference,
+                    active_plugin_name: None,
+                    available_plugins: vec!["managed-inference".to_string()],
+                },
+                CoreRewriterInventoryStatus {
+                    component: CoreComponent::Model,
+                    active_plugin_name: None,
+                    available_plugins: Vec::new(),
+                },
+                CoreRewriterInventoryStatus {
+                    component: CoreComponent::Hardware,
+                    active_plugin_name: None,
+                    available_plugins: Vec::new(),
+                },
+                CoreRewriterInventoryStatus {
+                    component: CoreComponent::Workflow,
+                    active_plugin_name: None,
+                    available_plugins: vec!["workflow-override".to_string()],
+                },
+                CoreRewriterInventoryStatus {
+                    component: CoreComponent::EventBus,
+                    active_plugin_name: None,
+                    available_plugins: Vec::new(),
+                },
+                CoreRewriterInventoryStatus {
+                    component: CoreComponent::PluginManager,
+                    active_plugin_name: None,
+                    available_plugins: Vec::new(),
+                },
+                CoreRewriterInventoryStatus {
+                    component: CoreComponent::UiHost,
+                    active_plugin_name: None,
+                    available_plugins: Vec::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn service_reports_workflow_inventory() {
+        let service = workflow_service();
+        assert_eq!(
+            service.workflow_inventory().expect("workflow inventory"),
+            WorkflowInventoryStatus {
+                active_workflow_rewriter: None,
+                workflows: Vec::new(),
+            }
+        );
+
+        service
+            .activate_core_rewriter(CoreRewriterActivationRequest {
+                component: CoreComponent::Workflow,
+                plugin_name: "workflow-override".to_string(),
+            })
+            .expect("activate workflow");
+
+        assert_eq!(
+            service.workflow_inventory().expect("workflow inventory"),
+            WorkflowInventoryStatus {
+                active_workflow_rewriter: Some("workflow-override".to_string()),
+                workflows: vec!["agent.plan".to_string(), "agent.review".to_string()],
+            }
+        );
     }
 
     #[test]
@@ -745,6 +869,64 @@ target_tracks = ["ai_agent"]
     }
 
     #[test]
+    fn service_core_rewriter_inventory_reflects_activation_state() {
+        let service = combined_rewriter_service();
+        service
+            .activate_core_rewriter(CoreRewriterActivationRequest {
+                component: CoreComponent::Workflow,
+                plugin_name: "workflow-override".to_string(),
+            })
+            .expect("activate workflow");
+        service
+            .activate_core_rewriter(CoreRewriterActivationRequest {
+                component: CoreComponent::Inference,
+                plugin_name: "managed-inference".to_string(),
+            })
+            .expect("activate inference");
+
+        assert_eq!(
+            service.core_rewriter_inventory().expect("inventory"),
+            vec![
+                CoreRewriterInventoryStatus {
+                    component: CoreComponent::Inference,
+                    active_plugin_name: Some("managed-inference".to_string()),
+                    available_plugins: vec!["managed-inference".to_string()],
+                },
+                CoreRewriterInventoryStatus {
+                    component: CoreComponent::Model,
+                    active_plugin_name: None,
+                    available_plugins: Vec::new(),
+                },
+                CoreRewriterInventoryStatus {
+                    component: CoreComponent::Hardware,
+                    active_plugin_name: None,
+                    available_plugins: Vec::new(),
+                },
+                CoreRewriterInventoryStatus {
+                    component: CoreComponent::Workflow,
+                    active_plugin_name: Some("workflow-override".to_string()),
+                    available_plugins: vec!["workflow-override".to_string()],
+                },
+                CoreRewriterInventoryStatus {
+                    component: CoreComponent::EventBus,
+                    active_plugin_name: None,
+                    available_plugins: Vec::new(),
+                },
+                CoreRewriterInventoryStatus {
+                    component: CoreComponent::PluginManager,
+                    active_plugin_name: None,
+                    available_plugins: Vec::new(),
+                },
+                CoreRewriterInventoryStatus {
+                    component: CoreComponent::UiHost,
+                    active_plugin_name: None,
+                    available_plugins: Vec::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn service_reports_plugin_detail() {
         let service = inference_service();
         let detail = service
@@ -762,6 +944,28 @@ target_tracks = ["ai_agent"]
         assert!(!detail.status.effective_sampling_hook);
         assert!(!detail.status.active_inference_rewriter);
         assert_eq!(detail.inference_hooks, vec!["sampling-profile".to_string()]);
+        assert_eq!(detail.workflows, vec!["agent.pipeline".to_string()]);
+        assert_eq!(detail.custom_nodes, vec!["node.rewrite".to_string()]);
+        assert_eq!(detail.commands, vec!["plugins.reload".to_string()]);
+        assert_eq!(
+            detail.runtime_artifacts.library_path.as_deref(),
+            Some("runtime/plugin.dll")
+        );
+        assert_eq!(
+            detail.runtime_artifacts.wasm_path.as_deref(),
+            Some("runtime/plugin.wasm")
+        );
+        assert_eq!(
+            detail.runtime_artifacts.sampling_profile.as_deref(),
+            Some("sampling-hook.toml")
+        );
+        assert_eq!(
+            detail.runtime_artifacts.legacy_runtime_path.as_deref(),
+            Some("legacy/compat.dll")
+        );
+        assert_eq!(detail.ui.panels, vec!["inspector".to_string()]);
+        assert_eq!(detail.ui.windows, vec!["governance".to_string()]);
+        assert_eq!(detail.ui.widgets, vec!["status-pill".to_string()]);
         assert_eq!(
             detail.declared_core_rewriters,
             vec![CoreComponent::Inference]

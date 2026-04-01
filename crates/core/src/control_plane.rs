@@ -38,16 +38,48 @@ pub struct PluginRuntimeDetail {
     pub declared_core_rewriters: Vec<CoreComponent>,
     pub auto_activate_components: Vec<CoreComponent>,
     pub active_core_rewriters: Vec<CoreComponent>,
+    pub runtime_artifacts: PluginRuntimeArtifacts,
     pub model_providers: Vec<String>,
     pub inference_hooks: Vec<String>,
+    pub workflows: Vec<String>,
+    pub custom_nodes: Vec<String>,
     pub commands: Vec<String>,
+    pub ui: PluginUiContributionStatus,
     pub legacy_capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PluginRuntimeArtifacts {
+    pub library_path: Option<String>,
+    pub wasm_path: Option<String>,
+    pub sampling_profile: Option<String>,
+    pub legacy_runtime_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PluginUiContributionStatus {
+    pub panels: Vec<String>,
+    pub windows: Vec<String>,
+    pub widgets: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CoreRewriterStatus {
     pub component: CoreComponent,
     pub plugin_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CoreRewriterInventoryStatus {
+    pub component: CoreComponent,
+    pub active_plugin_name: Option<String>,
+    pub available_plugins: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorkflowInventoryStatus {
+    pub active_workflow_rewriter: Option<String>,
+    pub workflows: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

@@ -2,8 +2,8 @@ use crate::backend::{
     BackendCapabilities, BackendParams, BackendRegistry, InferenceParams, Model, ModelMetadata,
 };
 use crate::control_plane::{
-    CoreRewriterStatus, ModelRuntimeInfo, PluginRuntimeDetail, PluginRuntimeStatus,
-    RuntimeSnapshot, SamplingHookSource,
+    CoreRewriterStatus, ModelRuntimeInfo, PluginRuntimeArtifacts, PluginRuntimeDetail,
+    PluginRuntimeStatus, PluginUiContributionStatus, RuntimeSnapshot, SamplingHookSource,
 };
 use crate::core::CoreRegistry;
 use crate::engine::types::{GenerationParams, ModelInfo};
@@ -257,9 +257,22 @@ impl InferenceEngine {
             declared_core_rewriters: plugin.manifest.core_rewriters.declared_components(),
             auto_activate_components: plugin.auto_activate_components().to_vec(),
             active_core_rewriters,
+            runtime_artifacts: PluginRuntimeArtifacts {
+                library_path: plugin.manifest.runtime.library_path.clone(),
+                wasm_path: plugin.manifest.runtime.wasm_path.clone(),
+                sampling_profile: plugin.manifest.runtime.sampling_profile.clone(),
+                legacy_runtime_path: plugin.manifest.compatibility.legacy_runtime_path.clone(),
+            },
             model_providers: plugin.manifest.contributes.model_providers.clone(),
             inference_hooks: plugin.manifest.contributes.inference_hooks.clone(),
+            workflows: plugin.manifest.contributes.workflows.clone(),
+            custom_nodes: plugin.manifest.contributes.custom_nodes.clone(),
             commands: plugin.manifest.contributes.commands.clone(),
+            ui: PluginUiContributionStatus {
+                panels: plugin.manifest.contributes.ui_contributes.panels.clone(),
+                windows: plugin.manifest.contributes.ui_contributes.windows.clone(),
+                widgets: plugin.manifest.contributes.ui_contributes.widgets.clone(),
+            },
             legacy_capabilities: plugin.manifest.compatibility.legacy_capabilities.clone(),
         })
     }
@@ -695,6 +708,7 @@ mod tests {
                 target_tracks: vec![PlatformTrack::AiAgent],
                 contributes: ContributionPoints {
                     model_providers: vec!["rag-local".to_string()],
+                    workflows: vec!["agent.plan".to_string(), "agent.review".to_string()],
                     ..Default::default()
                 },
                 core_rewriters: CoreRewriters {
@@ -720,6 +734,13 @@ mod tests {
             engine.plugins_for_core_component(CoreComponent::Workflow),
             vec!["agent-workflow".to_string()]
         );
+        assert_eq!(
+            engine.workflow_inventory(),
+            WorkflowInventoryStatus {
+                active_workflow_rewriter: None,
+                workflows: Vec::new(),
+            }
+        );
 
         engine
             .activate_core_rewriter(CoreComponent::Workflow, "agent-workflow")
@@ -727,6 +748,13 @@ mod tests {
         assert_eq!(
             engine.active_core_rewriter(CoreComponent::Workflow),
             Some("agent-workflow")
+        );
+        assert_eq!(
+            engine.workflow_inventory(),
+            WorkflowInventoryStatus {
+                active_workflow_rewriter: Some("agent-workflow".to_string()),
+                workflows: vec!["agent.plan".to_string(), "agent.review".to_string()],
+            }
         );
     }
 
@@ -744,6 +772,7 @@ target_tracks = ["ai_agent"]
 
 [contributes]
 model_providers = ["rag-local"]
+workflows = ["agent.plan", "agent.review"]
 
 [core_rewriters]
 workflow = true
@@ -768,6 +797,24 @@ workflow = true
         assert_eq!(
             engine.plugins_for_track(PlatformTrack::AiAgent),
             vec!["agent-plugin".to_string()]
+        );
+        assert_eq!(
+            engine.workflow_inventory(),
+            WorkflowInventoryStatus {
+                active_workflow_rewriter: None,
+                workflows: Vec::new(),
+            }
+        );
+
+        engine
+            .activate_core_rewriter(CoreComponent::Workflow, "agent-plugin")
+            .expect("activate workflow rewriter");
+        assert_eq!(
+            engine.workflow_inventory(),
+            WorkflowInventoryStatus {
+                active_workflow_rewriter: Some("agent-plugin".to_string()),
+                workflows: vec!["agent.plan".to_string(), "agent.review".to_string()],
+            }
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -1125,7 +1172,14 @@ logit = 42.0
                 contributes: ContributionPoints {
                     model_providers: vec!["private-registry".to_string()],
                     inference_hooks: vec!["sampling-profile".to_string()],
+                    workflows: vec!["agent.pipeline".to_string()],
+                    custom_nodes: vec!["node.rewrite".to_string()],
                     commands: vec!["plugins.reload".to_string()],
+                    ui_contributes: loci_plugin_api::UiContributionPoints {
+                        panels: vec!["inspector".to_string()],
+                        windows: vec!["governance".to_string()],
+                        widgets: vec!["status-pill".to_string()],
+                    },
                     ..Default::default()
                 },
                 core_rewriters: CoreRewriters {
@@ -1133,11 +1187,18 @@ logit = 42.0
                     workflow: true,
                     ..Default::default()
                 },
-                runtime: PluginRuntime::default(),
+                runtime: PluginRuntime {
+                    library_path: Some("runtime/plugin.dll".to_string()),
+                    wasm_path: Some("runtime/plugin.wasm".to_string()),
+                    sampling_profile: Some("sampling-hook.toml".to_string()),
+                },
                 bootstrap: PluginBootstrap {
                     activate_on_load: vec![CoreComponent::Inference],
                 },
-                compatibility: PluginCompatibility::default(),
+                compatibility: PluginCompatibility {
+                    legacy_runtime_path: Some("legacy/compat.dll".to_string()),
+                    ..Default::default()
+                },
             }))
             .expect("register plugin");
 
@@ -1160,9 +1221,30 @@ logit = 42.0
             vec![CoreComponent::Inference]
         );
         assert_eq!(detail.active_core_rewriters, vec![CoreComponent::Inference]);
+        assert_eq!(
+            detail.runtime_artifacts.library_path.as_deref(),
+            Some("runtime/plugin.dll")
+        );
+        assert_eq!(
+            detail.runtime_artifacts.wasm_path.as_deref(),
+            Some("runtime/plugin.wasm")
+        );
+        assert_eq!(
+            detail.runtime_artifacts.sampling_profile.as_deref(),
+            Some("sampling-hook.toml")
+        );
+        assert_eq!(
+            detail.runtime_artifacts.legacy_runtime_path.as_deref(),
+            Some("legacy/compat.dll")
+        );
         assert_eq!(detail.model_providers, vec!["private-registry".to_string()]);
         assert_eq!(detail.inference_hooks, vec!["sampling-profile".to_string()]);
+        assert_eq!(detail.workflows, vec!["agent.pipeline".to_string()]);
+        assert_eq!(detail.custom_nodes, vec!["node.rewrite".to_string()]);
         assert_eq!(detail.commands, vec!["plugins.reload".to_string()]);
+        assert_eq!(detail.ui.panels, vec!["inspector".to_string()]);
+        assert_eq!(detail.ui.windows, vec!["governance".to_string()]);
+        assert_eq!(detail.ui.widgets, vec!["status-pill".to_string()]);
     }
 
     struct ForceTokenHook;

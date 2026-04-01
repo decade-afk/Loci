@@ -85,6 +85,13 @@ pub fn handle_management_request(
             },
             Err(error) => json_response(500, json!({ "error": error.to_string() })),
         },
+        ("GET", "/v1/workflows") => match service.workflow_inventory() {
+            Ok(workflows) => match serde_json::to_value(workflows) {
+                Ok(workflows) => json_response(200, workflows),
+                Err(error) => json_response(500, json!({ "error": error.to_string() })),
+            },
+            Err(error) => json_response(500, json!({ "error": error.to_string() })),
+        },
         ("GET", "/v1/core/rewriters") => match service.configured_core_rewriters() {
             Ok(rewriters) => match serde_json::to_value(rewriters) {
                 Ok(rewriters) => json_response(200, rewriters),
@@ -439,7 +446,10 @@ mod tests {
                 min_host_version: None,
                 max_host_version: None,
                 target_tracks: vec![PlatformTrack::AiAgent],
-                contributes: Default::default(),
+                contributes: loci_core::ContributionPoints {
+                    workflows: vec!["agent.plan".to_string(), "agent.review".to_string()],
+                    ..Default::default()
+                },
                 core_rewriters: CoreRewriters {
                     workflow: true,
                     ..Default::default()
@@ -449,6 +459,47 @@ mod tests {
                 compatibility: PluginCompatibility::default(),
             }))
             .expect("register plugin");
+        ManagementService::new(engine)
+    }
+
+    fn combined_service() -> ManagementService {
+        let mut engine = InferenceEngine::builder().build().expect("build engine");
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "managed-inference".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiInfra],
+                contributes: Default::default(),
+                core_rewriters: CoreRewriters {
+                    inference: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
+            }))
+            .expect("register inference plugin");
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "workflow-override".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiAgent],
+                contributes: Default::default(),
+                core_rewriters: CoreRewriters {
+                    workflow: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
+            }))
+            .expect("register workflow plugin");
         ManagementService::new(engine)
     }
 
@@ -544,6 +595,51 @@ mod tests {
     }
 
     #[test]
+    fn workflows_route_returns_effective_workflow_inventory() {
+        let service = workflow_service();
+        let before = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/workflows".to_string(),
+                body: Vec::new(),
+            },
+        );
+
+        assert_eq!(before.status_code, 200);
+        let before_value: Value = serde_json::from_slice(&before.body).expect("json");
+        assert_eq!(before_value["active_workflow_rewriter"], Value::Null);
+        assert_eq!(before_value["workflows"], json!([]));
+
+        let activation = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/core/rewriters/activate".to_string(),
+                body: br#"{"component":"workflow","plugin_name":"workflow-override"}"#.to_vec(),
+            },
+        );
+        assert_eq!(activation.status_code, 200);
+
+        let after = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/workflows".to_string(),
+                body: Vec::new(),
+            },
+        );
+
+        assert_eq!(after.status_code, 200);
+        let after_value: Value = serde_json::from_slice(&after.body).expect("json");
+        assert_eq!(after_value["active_workflow_rewriter"], "workflow-override");
+        assert_eq!(
+            after_value["workflows"],
+            json!(["agent.plan", "agent.review"])
+        );
+    }
+
+    #[test]
     fn plugin_detail_route_returns_not_found_for_unknown_plugin() {
         let response = handle_management_request(
             &empty_service(),
@@ -574,8 +670,14 @@ mod tests {
         let value: Value = serde_json::from_slice(&response.body).expect("json");
         assert_eq!(value["status"]["name"], "managed-inference");
         assert_eq!(value["declared_core_rewriters"], json!(["inference"]));
-        assert_eq!(value["runtime_artifacts"]["library_path"], "runtime/plugin.dll");
-        assert_eq!(value["runtime_artifacts"]["wasm_path"], "runtime/plugin.wasm");
+        assert_eq!(
+            value["runtime_artifacts"]["library_path"],
+            "runtime/plugin.dll"
+        );
+        assert_eq!(
+            value["runtime_artifacts"]["wasm_path"],
+            "runtime/plugin.wasm"
+        );
         assert_eq!(
             value["runtime_artifacts"]["sampling_profile"],
             "sampling-hook.toml"
@@ -886,6 +988,137 @@ target_tracks = ["ai_infra"]
         assert_eq!(
             value["configured_core_rewriters"],
             json!([{ "component": "inference", "plugin_name": "managed-inference" }])
+        );
+    }
+
+    #[test]
+    fn core_rewriter_inventory_route_lists_available_plugins() {
+        let service = combined_service();
+        let response = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/core/rewriters/inventory".to_string(),
+                body: Vec::new(),
+            },
+        );
+
+        assert_eq!(response.status_code, 200);
+        let value: Value = serde_json::from_slice(&response.body).expect("json");
+        assert_eq!(
+            value,
+            json!([
+                {
+                    "component": "inference",
+                    "active_plugin_name": null,
+                    "available_plugins": ["managed-inference"]
+                },
+                {
+                    "component": "model",
+                    "active_plugin_name": null,
+                    "available_plugins": []
+                },
+                {
+                    "component": "hardware",
+                    "active_plugin_name": null,
+                    "available_plugins": []
+                },
+                {
+                    "component": "workflow",
+                    "active_plugin_name": null,
+                    "available_plugins": ["workflow-override"]
+                },
+                {
+                    "component": "event_bus",
+                    "active_plugin_name": null,
+                    "available_plugins": []
+                },
+                {
+                    "component": "plugin_manager",
+                    "active_plugin_name": null,
+                    "available_plugins": []
+                },
+                {
+                    "component": "ui_host",
+                    "active_plugin_name": null,
+                    "available_plugins": []
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn core_rewriter_inventory_route_reflects_activation_state() {
+        let service = combined_service();
+        let workflow_activation = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/core/rewriters/activate".to_string(),
+                body: br#"{"component":"workflow","plugin_name":"workflow-override"}"#.to_vec(),
+            },
+        );
+        assert_eq!(workflow_activation.status_code, 200);
+
+        let inference_activation = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/core/inference/activate".to_string(),
+                body: br#"{"plugin_name":"managed-inference"}"#.to_vec(),
+            },
+        );
+        assert_eq!(inference_activation.status_code, 200);
+
+        let response = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/core/rewriters/inventory".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status_code, 200);
+        let value: Value = serde_json::from_slice(&response.body).expect("json");
+        assert_eq!(
+            value,
+            json!([
+                {
+                    "component": "inference",
+                    "active_plugin_name": "managed-inference",
+                    "available_plugins": ["managed-inference"]
+                },
+                {
+                    "component": "model",
+                    "active_plugin_name": null,
+                    "available_plugins": []
+                },
+                {
+                    "component": "hardware",
+                    "active_plugin_name": null,
+                    "available_plugins": []
+                },
+                {
+                    "component": "workflow",
+                    "active_plugin_name": "workflow-override",
+                    "available_plugins": ["workflow-override"]
+                },
+                {
+                    "component": "event_bus",
+                    "active_plugin_name": null,
+                    "available_plugins": []
+                },
+                {
+                    "component": "plugin_manager",
+                    "active_plugin_name": null,
+                    "available_plugins": []
+                },
+                {
+                    "component": "ui_host",
+                    "active_plugin_name": null,
+                    "available_plugins": []
+                }
+            ])
         );
     }
 

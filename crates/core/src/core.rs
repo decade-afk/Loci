@@ -9,7 +9,11 @@ pub trait ModelRepository: Send + Sync {
 }
 
 pub trait WorkflowEngine: Send + Sync {
-    fn workflow_count(&self) -> usize;
+    fn workflow_names(&self) -> Vec<String>;
+
+    fn workflow_count(&self) -> usize {
+        self.workflow_names().len()
+    }
 }
 
 pub trait EventBus: Send + Sync {
@@ -72,8 +76,8 @@ impl ModelRepository for DefaultModelRepository {
 pub struct DefaultWorkflowEngine;
 
 impl WorkflowEngine for DefaultWorkflowEngine {
-    fn workflow_count(&self) -> usize {
-        0
+    fn workflow_names(&self) -> Vec<String> {
+        Vec::new()
     }
 }
 
