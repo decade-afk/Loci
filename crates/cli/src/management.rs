@@ -281,9 +281,10 @@ mod tests {
     use super::*;
     use loci_core::{
         CoreRewriters, InferenceEngine, PlatformTrack, PluginBootstrap, PluginCompatibility,
-        PluginManifest, PluginRuntime, RegisteredPlugin,
+        PluginManifest, PluginRuntime, RegisteredPlugin, SamplingHook,
     };
     use std::net::Shutdown;
+    use std::sync::Arc;
     use std::thread;
 
     fn empty_service() -> ManagementService {
@@ -312,6 +313,36 @@ mod tests {
         engine
             .register_plugin(RegisteredPlugin::new(manifest))
             .expect("register plugin");
+        ManagementService::new(engine)
+    }
+
+    struct ForceTokenHook;
+
+    impl SamplingHook for ForceTokenHook {}
+
+    fn hooked_plugin_service() -> ManagementService {
+        let mut engine = InferenceEngine::builder().build().expect("build engine");
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "hooked-plugin".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiInfra],
+                contributes: Default::default(),
+                core_rewriters: CoreRewriters {
+                    inference: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
+            }))
+            .expect("register plugin");
+        engine
+            .register_sampling_hook("hooked-plugin", Arc::new(ForceTokenHook))
+            .expect("register hook");
         ManagementService::new(engine)
     }
 
@@ -387,6 +418,61 @@ mod tests {
         let value: Value = serde_json::from_slice(&response.body).expect("json");
         assert_eq!(value["status"]["name"], "managed-inference");
         assert_eq!(value["declared_core_rewriters"], json!(["inference"]));
+    }
+
+    #[test]
+    fn plugins_route_reports_declared_registered_and_effective_sampling_states() {
+        let service = hooked_plugin_service();
+        let before = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/plugins".to_string(),
+                body: Vec::new(),
+            },
+        );
+
+        assert_eq!(before.status_code, 200);
+        let before_value: Value = serde_json::from_slice(&before.body).expect("json");
+        assert_eq!(before_value[0]["name"], "hooked-plugin");
+        assert_eq!(before_value[0]["declares_sampling_hook"], false);
+        assert_eq!(
+            before_value[0]["sampling_hook_source"],
+            "dynamic_registration"
+        );
+        assert_eq!(before_value[0]["registered_sampling_hook"], true);
+        assert_eq!(before_value[0]["effective_sampling_hook"], false);
+        assert_eq!(before_value[0]["active_inference_rewriter"], false);
+
+        let activation = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/core/inference/activate".to_string(),
+                body: br#"{"plugin_name":"hooked-plugin"}"#.to_vec(),
+            },
+        );
+        assert_eq!(activation.status_code, 200);
+
+        let after = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/plugins/hooked-plugin".to_string(),
+                body: Vec::new(),
+            },
+        );
+
+        assert_eq!(after.status_code, 200);
+        let after_value: Value = serde_json::from_slice(&after.body).expect("json");
+        assert_eq!(after_value["status"]["declares_sampling_hook"], false);
+        assert_eq!(
+            after_value["status"]["sampling_hook_source"],
+            "dynamic_registration"
+        );
+        assert_eq!(after_value["status"]["registered_sampling_hook"], true);
+        assert_eq!(after_value["status"]["effective_sampling_hook"], true);
+        assert_eq!(after_value["status"]["active_inference_rewriter"], true);
     }
 
     #[test]

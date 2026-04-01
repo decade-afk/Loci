@@ -219,6 +219,14 @@ mod tests {
             .expect("plugin detail");
 
         assert_eq!(detail.status.name, "managed-inference");
+        assert_eq!(
+            detail.status.sampling_hook_source,
+            crate::SamplingHookSource::None
+        );
+        assert!(!detail.status.declares_sampling_hook);
+        assert!(!detail.status.registered_sampling_hook);
+        assert!(!detail.status.effective_sampling_hook);
+        assert!(!detail.status.active_inference_rewriter);
         assert_eq!(detail.inference_hooks, vec!["sampling-profile".to_string()]);
         assert_eq!(
             detail.declared_core_rewriters,
@@ -249,6 +257,15 @@ mod tests {
             .plugin_detail("legacy-sampler")
             .expect("detail query")
             .expect("plugin detail");
+        assert!(before.status.declares_sampling_hook);
+        assert_eq!(
+            before.status.sampling_hook_source,
+            crate::SamplingHookSource::LegacyCompat
+        );
+        assert!(!before.status.registered_sampling_hook);
+        assert!(!before.status.effective_sampling_hook);
+        assert!(!before.status.materialized_legacy_runtime);
+        assert!(!before.status.active_inference_rewriter);
         assert!(!before.status.has_sampling_hook);
         assert!(before.active_core_rewriters.is_empty());
 
@@ -264,6 +281,15 @@ mod tests {
             .plugin_detail("legacy-sampler")
             .expect("detail query")
             .expect("plugin detail");
+        assert!(after.status.declares_sampling_hook);
+        assert_eq!(
+            after.status.sampling_hook_source,
+            crate::SamplingHookSource::LegacyCompat
+        );
+        assert!(after.status.registered_sampling_hook);
+        assert!(after.status.effective_sampling_hook);
+        assert!(after.status.materialized_legacy_runtime);
+        assert!(after.status.active_inference_rewriter);
         assert!(after.status.has_sampling_hook);
         assert_eq!(after.active_core_rewriters, vec![CoreComponent::Inference]);
     }

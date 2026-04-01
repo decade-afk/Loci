@@ -1,6 +1,7 @@
 use crate::backend::{BackendParams, BackendRegistry, InferenceParams, Model, ModelMetadata};
 use crate::control_plane::{
     CoreRewriterStatus, PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot,
+    SamplingHookSource,
 };
 use crate::core::CoreRegistry;
 use crate::engine::types::{GenerationParams, ModelInfo};
@@ -567,6 +568,27 @@ impl InferenceEngine {
     }
 
     fn plugin_runtime_status(&self, plugin: &RegisteredPlugin) -> PluginRuntimeStatus {
+        let active_inference_rewriter = self.active_core_rewriter(CoreComponent::Inference)
+            == Some(plugin.manifest.name.as_str());
+        let registered_sampling_hook = self
+            .registry
+            .plugin_manager()
+            .sampling_runtime_for_inference(Some(&plugin.manifest.name))
+            .hook_count()
+            > 0;
+        let declares_sampling_hook = plugin.has_sampling_hook()
+            || (plugin.is_legacy_compat_bundle() && plugin.supports_legacy_sampling());
+        let sampling_hook_source =
+            if plugin.is_legacy_compat_bundle() && plugin.supports_legacy_sampling() {
+                SamplingHookSource::LegacyCompat
+            } else if plugin.has_sampling_hook() {
+                SamplingHookSource::NativeRuntime
+            } else if registered_sampling_hook {
+                SamplingHookSource::DynamicRegistration
+            } else {
+                SamplingHookSource::None
+            };
+
         PluginRuntimeStatus {
             name: plugin.manifest.name.clone(),
             version: plugin.manifest.version.clone(),
@@ -575,12 +597,15 @@ impl InferenceEngine {
             source_format: plugin.manifest.compatibility.source_format,
             runtime_bridge: plugin.manifest.compatibility.runtime_bridge,
             declares_inference_rewriter: plugin.declares_core_rewriter(CoreComponent::Inference),
-            has_sampling_hook: self
-                .registry
-                .plugin_manager()
-                .sampling_runtime_for_inference(Some(&plugin.manifest.name))
-                .hook_count()
-                > 0,
+            declares_sampling_hook,
+            sampling_hook_source,
+            registered_sampling_hook,
+            effective_sampling_hook: active_inference_rewriter && registered_sampling_hook,
+            materialized_legacy_runtime: self
+                .legacy_text_plugin_runtimes
+                .contains_key(&plugin.manifest.name),
+            active_inference_rewriter,
+            has_sampling_hook: registered_sampling_hook,
             is_legacy_compat: plugin.is_legacy_compat_bundle(),
             legacy_text_candidate: self
                 .legacy_text_plugin_candidates()
@@ -856,7 +881,17 @@ logit = 42.0
         assert_eq!(loaded, 1);
         assert_eq!(engine.plugin_names(), vec!["legacy_sampler".to_string()]);
         assert_eq!(engine.sampling_hook_count(), 0);
-        assert!(!engine.runtime_snapshot().plugins[0].has_sampling_hook);
+        let status = &engine.runtime_snapshot().plugins[0];
+        assert!(status.declares_sampling_hook);
+        assert_eq!(
+            status.sampling_hook_source,
+            SamplingHookSource::LegacyCompat
+        );
+        assert!(!status.registered_sampling_hook);
+        assert!(!status.effective_sampling_hook);
+        assert!(!status.materialized_legacy_runtime);
+        assert!(!status.active_inference_rewriter);
+        assert!(!status.has_sampling_hook);
 
         let err = engine
             .activate_inference_plugin("legacy_sampler")
@@ -1025,7 +1060,16 @@ logit = 42.0
         assert!(snapshot.plugins[0].is_legacy_compat);
         assert!(snapshot.plugins[0].legacy_text_candidate);
         assert!(snapshot.plugins[0].active_legacy_text);
+        assert!(snapshot.plugins[0].materialized_legacy_runtime);
         assert!(!snapshot.plugins[0].declares_inference_rewriter);
+        assert!(!snapshot.plugins[0].declares_sampling_hook);
+        assert_eq!(
+            snapshot.plugins[0].sampling_hook_source,
+            SamplingHookSource::None
+        );
+        assert!(!snapshot.plugins[0].registered_sampling_hook);
+        assert!(!snapshot.plugins[0].effective_sampling_hook);
+        assert!(!snapshot.plugins[0].active_inference_rewriter);
     }
 
     #[test]
@@ -1073,6 +1117,11 @@ logit = 42.0
             .expect("detail should exist");
 
         assert_eq!(detail.status.name, "governed-inference");
+        assert!(!detail.status.declares_sampling_hook);
+        assert_eq!(detail.status.sampling_hook_source, SamplingHookSource::None);
+        assert!(!detail.status.registered_sampling_hook);
+        assert!(!detail.status.effective_sampling_hook);
+        assert!(detail.status.active_inference_rewriter);
         assert_eq!(
             detail.declared_core_rewriters,
             vec![CoreComponent::Inference, CoreComponent::Workflow]
@@ -1143,6 +1192,15 @@ logit = 42.0
             .expect("generate");
         assert!(inactive_output.contains("hooks=0"));
         assert_eq!(engine.sampling_hook_count(), 0);
+        let before = &engine.runtime_snapshot().plugins[0];
+        assert_eq!(
+            before.sampling_hook_source,
+            SamplingHookSource::DynamicRegistration
+        );
+        assert!(before.registered_sampling_hook);
+        assert!(before.has_sampling_hook);
+        assert!(!before.effective_sampling_hook);
+        assert!(!before.active_inference_rewriter);
 
         engine
             .activate_inference_plugin("hooked-plugin")
@@ -1160,6 +1218,15 @@ logit = 42.0
                 plugin_name: "hooked-plugin".to_string(),
             }]
         );
+        let after = &engine.runtime_snapshot().plugins[0];
+        assert!(!after.declares_sampling_hook);
+        assert_eq!(
+            after.sampling_hook_source,
+            SamplingHookSource::DynamicRegistration
+        );
+        assert!(after.registered_sampling_hook);
+        assert!(after.effective_sampling_hook);
+        assert!(after.active_inference_rewriter);
     }
 
     #[test]
@@ -1186,6 +1253,15 @@ logit = 42.0
             .expect("load model");
 
         let before = engine.runtime_snapshot();
+        assert!(before.plugins[0].declares_sampling_hook);
+        assert_eq!(
+            before.plugins[0].sampling_hook_source,
+            SamplingHookSource::LegacyCompat
+        );
+        assert!(!before.plugins[0].registered_sampling_hook);
+        assert!(!before.plugins[0].effective_sampling_hook);
+        assert!(!before.plugins[0].materialized_legacy_runtime);
+        assert!(!before.plugins[0].active_inference_rewriter);
         assert!(!before.plugins[0].has_sampling_hook);
         assert_eq!(engine.sampling_hook_count(), 0);
 
@@ -1199,6 +1275,15 @@ logit = 42.0
             .expect("activate legacy sampler");
 
         let after = engine.runtime_snapshot();
+        assert!(after.plugins[0].declares_sampling_hook);
+        assert_eq!(
+            after.plugins[0].sampling_hook_source,
+            SamplingHookSource::LegacyCompat
+        );
+        assert!(after.plugins[0].registered_sampling_hook);
+        assert!(after.plugins[0].effective_sampling_hook);
+        assert!(after.plugins[0].materialized_legacy_runtime);
+        assert!(after.plugins[0].active_inference_rewriter);
         assert!(after.plugins[0].has_sampling_hook);
         assert_eq!(
             after.configured_core_rewriters,
@@ -1249,6 +1334,15 @@ logit = 42.0
                 plugin_name: "legacy-auto-sampler".to_string(),
             }]
         );
+        assert!(snapshot.plugins[0].declares_sampling_hook);
+        assert_eq!(
+            snapshot.plugins[0].sampling_hook_source,
+            SamplingHookSource::LegacyCompat
+        );
+        assert!(snapshot.plugins[0].registered_sampling_hook);
+        assert!(snapshot.plugins[0].effective_sampling_hook);
+        assert!(snapshot.plugins[0].materialized_legacy_runtime);
+        assert!(snapshot.plugins[0].active_inference_rewriter);
         assert!(snapshot.plugins[0].has_sampling_hook);
 
         engine

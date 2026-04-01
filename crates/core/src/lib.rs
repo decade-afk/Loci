@@ -16,6 +16,7 @@ pub use crate::backend::{
 pub use crate::control_plane::{
     CoreRewriterStatus, InferenceActivationStatus, LegacyTextPluginActivationStatus,
     ManagementHealthStatus, PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot,
+    SamplingHookSource,
 };
 pub use crate::core::{
     CoreRegistry, DefaultCoreRegistry, EventBus, HardwareAbstraction, ModelRepository,
