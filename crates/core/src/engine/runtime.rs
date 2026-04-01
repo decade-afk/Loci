@@ -4,6 +4,7 @@ use crate::backend::{
 use crate::control_plane::{
     CoreRewriterStatus, ModelRuntimeInfo, PluginRuntimeArtifacts, PluginRuntimeDetail,
     PluginRuntimeStatus, PluginUiContributionStatus, RuntimeSnapshot, SamplingHookSource,
+    WorkflowInventoryStatus,
 };
 use crate::core::CoreRegistry;
 use crate::engine::types::{GenerationParams, ModelInfo};
@@ -275,6 +276,22 @@ impl InferenceEngine {
             },
             legacy_capabilities: plugin.manifest.compatibility.legacy_capabilities.clone(),
         })
+    }
+
+    pub fn workflow_inventory(&self) -> WorkflowInventoryStatus {
+        let active_workflow_rewriter = self
+            .active_core_rewriter(CoreComponent::Workflow)
+            .map(str::to_string);
+        let workflows = active_workflow_rewriter
+            .as_deref()
+            .and_then(|plugin_name| self.registry.plugin_manager().get(plugin_name))
+            .map(|plugin| plugin.manifest.contributes.workflows.clone())
+            .unwrap_or_default();
+
+        WorkflowInventoryStatus {
+            active_workflow_rewriter,
+            workflows,
+        }
     }
 
     pub fn runtime_snapshot(&self) -> RuntimeSnapshot {

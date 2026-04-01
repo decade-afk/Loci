@@ -14,13 +14,13 @@ pub use crate::backend::{
     InferenceParams, Model, ModelMetadata,
 };
 pub use crate::control_plane::{
-    CoreRewriterActivationRequest, CoreRewriterActivationStatus, CoreRewriterStatus,
-    InferenceActivationStatus, LegacyTextPluginActivationStatus, ManagementHealthStatus,
-    ModelLoadConfig, ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus,
+    CoreRewriterActivationRequest, CoreRewriterActivationStatus, CoreRewriterInventoryStatus,
+    CoreRewriterStatus, InferenceActivationStatus, LegacyTextPluginActivationStatus,
+    ManagementHealthStatus, ModelLoadConfig, ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus,
     ModelLoadStrategyRequest, ModelRuntimeInfo, PluginLoadRequest, PluginLoadSourceKind,
     PluginLoadStatus, PluginRuntimeArtifacts, PluginRuntimeDetail, PluginRuntimeStatus,
     PluginUiContributionStatus, RuntimeSnapshot, SamplingHookSource, TextGenerationParams,
-    TextGenerationRequest, TextGenerationResponse,
+    TextGenerationRequest, TextGenerationResponse, WorkflowInventoryStatus,
 };
 pub use crate::core::{
     CoreRegistry, DefaultCoreRegistry, EventBus, HardwareAbstraction, ModelRepository,

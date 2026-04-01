@@ -99,6 +99,13 @@ pub fn handle_management_request(
             },
             Err(error) => json_response(500, json!({ "error": error.to_string() })),
         },
+        ("GET", "/v1/core/rewriters/inventory") => match service.core_rewriter_inventory() {
+            Ok(inventory) => match serde_json::to_value(inventory) {
+                Ok(inventory) => json_response(200, inventory),
+                Err(error) => json_response(500, json!({ "error": error.to_string() })),
+            },
+            Err(error) => json_response(500, json!({ "error": error.to_string() })),
+        },
         ("GET", "/v1/plugins") => match service.plugin_statuses() {
             Ok(plugins) => match serde_json::to_value(plugins) {
                 Ok(plugins) => json_response(200, plugins),
