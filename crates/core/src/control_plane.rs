@@ -1,3 +1,4 @@
+use crate::backend::BackendCapabilities;
 use loci_plugin_api::{CoreComponent, LegacyRuntimeBridge, PluginSourceFormat};
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +54,7 @@ pub struct CoreRewriterStatus {
 pub struct RuntimeSnapshot {
     pub plugin_count: usize,
     pub loaded_plugin_names: Vec<String>,
+    pub available_backends: Vec<BackendCapabilities>,
     pub active_backend: Option<String>,
     pub active_model_path: Option<String>,
     pub active_model_info: Option<ModelRuntimeInfo>,

@@ -1,3 +1,4 @@
+use crate::backend::BackendCapabilities;
 use crate::control_plane::{
     CoreRewriterStatus, InferenceActivationStatus, LegacyTextPluginActivationStatus,
     ManagementHealthStatus, ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus,
@@ -49,6 +50,10 @@ impl ManagementService {
     pub fn configured_core_rewriters(&self) -> Result<Vec<CoreRewriterStatus>> {
         self.runtime_snapshot()
             .map(|snapshot| snapshot.configured_core_rewriters)
+    }
+
+    pub fn backend_capabilities(&self) -> Result<Vec<BackendCapabilities>> {
+        self.with_engine(|engine| Ok(engine.backend_capabilities()))
     }
 
     pub fn activate_inference_plugin(
@@ -240,9 +245,20 @@ mod tests {
         let service = empty_service();
         let snapshot = service.runtime_snapshot().expect("snapshot");
         assert_eq!(snapshot.plugin_count, 0);
+        assert_eq!(snapshot.available_backends.len(), 1);
+        assert_eq!(snapshot.available_backends[0].name, "mock");
         assert_eq!(snapshot.active_model_path, None);
         assert_eq!(snapshot.active_model_info, None);
         assert!(snapshot.configured_core_rewriters.is_empty());
+    }
+
+    #[test]
+    fn service_lists_available_backends() {
+        let service = empty_service();
+        let backends = service.backend_capabilities().expect("backends");
+        assert_eq!(backends.len(), 1);
+        assert_eq!(backends[0].name, "mock");
+        assert!(backends[0].supports_text);
     }
 
     #[test]

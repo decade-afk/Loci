@@ -72,7 +72,7 @@ impl Default for InferenceParams {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BackendCapabilities {
     pub name: String,
     pub version: String,
@@ -157,10 +157,13 @@ impl BackendRegistry {
     }
 
     pub fn list(&self) -> Vec<BackendCapabilities> {
-        self.backends
+        let mut backends = self
+            .backends
             .values()
             .map(|backend| backend.capabilities())
-            .collect()
+            .collect::<Vec<_>>();
+        backends.sort_by(|left, right| left.name.cmp(&right.name));
+        backends
     }
 
     pub fn load_model(

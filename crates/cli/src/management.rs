@@ -75,6 +75,13 @@ pub fn handle_management_request(
             },
             Err(error) => json_response(500, json!({ "error": error.to_string() })),
         },
+        ("GET", "/v1/backends") => match service.backend_capabilities() {
+            Ok(backends) => match serde_json::to_value(backends) {
+                Ok(backends) => json_response(200, backends),
+                Err(error) => json_response(500, json!({ "error": error.to_string() })),
+            },
+            Err(error) => json_response(500, json!({ "error": error.to_string() })),
+        },
         ("GET", "/v1/core/rewriters") => match service.configured_core_rewriters() {
             Ok(rewriters) => match serde_json::to_value(rewriters) {
                 Ok(rewriters) => json_response(200, rewriters),
@@ -402,9 +409,27 @@ mod tests {
         assert_eq!(response.status_code, 200);
         let value: Value = serde_json::from_slice(&response.body).expect("json");
         assert_eq!(value["plugin_count"], 0);
+        assert_eq!(value["available_backends"][0]["name"], "mock");
         assert_eq!(value["active_model_path"], Value::Null);
         assert_eq!(value["active_model_info"], Value::Null);
         assert_eq!(value["legacy_text_candidates"], json!([]));
+    }
+
+    #[test]
+    fn backends_route_returns_available_backend_inventory() {
+        let response = handle_management_request(
+            &empty_service(),
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/backends".to_string(),
+                body: Vec::new(),
+            },
+        );
+
+        assert_eq!(response.status_code, 200);
+        let value: Value = serde_json::from_slice(&response.body).expect("json");
+        assert_eq!(value[0]["name"], "mock");
+        assert_eq!(value[0]["supports_text"], true);
     }
 
     #[test]

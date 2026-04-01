@@ -1,4 +1,6 @@
-use crate::backend::{BackendParams, BackendRegistry, InferenceParams, Model, ModelMetadata};
+use crate::backend::{
+    BackendCapabilities, BackendParams, BackendRegistry, InferenceParams, Model, ModelMetadata,
+};
 use crate::control_plane::{
     CoreRewriterStatus, ModelRuntimeInfo, PluginRuntimeDetail, PluginRuntimeStatus,
     RuntimeSnapshot, SamplingHookSource,
@@ -266,6 +268,7 @@ impl InferenceEngine {
         let active_inference = self
             .active_core_rewriter(CoreComponent::Inference)
             .map(str::to_string);
+        let available_backends = self.backend_capabilities();
         let active_backend = self.active_backend().map(str::to_string);
         let active_model_path = self
             .model_path()
@@ -294,6 +297,7 @@ impl InferenceEngine {
         RuntimeSnapshot {
             plugin_count: loaded_plugin_names.len(),
             loaded_plugin_names,
+            available_backends,
             active_backend,
             active_model_path,
             active_model_info,
@@ -559,6 +563,10 @@ impl InferenceEngine {
 
     pub fn active_backend(&self) -> Option<&str> {
         self.active_backend.as_deref()
+    }
+
+    pub fn backend_capabilities(&self) -> Vec<BackendCapabilities> {
+        self.backend_registry.list()
     }
 
     pub fn model_path(&self) -> Option<&Path> {
