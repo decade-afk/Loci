@@ -2,13 +2,15 @@ use crate::backend::BackendCapabilities;
 use crate::control_plane::{
     CoreRewriterStatus, InferenceActivationStatus, LegacyTextPluginActivationStatus,
     ManagementHealthStatus, ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus,
-    ModelLoadStrategyRequest, PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot,
+    ModelLoadStrategyRequest, PluginLoadRequest, PluginLoadSourceKind, PluginLoadStatus,
+    PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot,
 };
 use crate::engine::InferenceEngine;
 use crate::error::{LociError, Result};
 use crate::model::{ModelConfig, ModelLoadStrategy};
 use crate::GpuSplitMode;
 use loci_plugin_api::CoreComponent;
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -87,6 +89,35 @@ impl ManagementService {
                     .model_path()
                     .map(|model_path| model_path.display().to_string()),
                 active_model_info: engine.model_runtime_info(),
+            })
+        })
+    }
+
+    pub fn load_plugins(&self, request: PluginLoadRequest) -> Result<PluginLoadStatus> {
+        self.with_engine_mut(|engine| {
+            let before_names = engine.plugin_names();
+            let path = request.path;
+            let source_kind = request.source_kind;
+
+            let loaded_count = match source_kind {
+                PluginLoadSourceKind::BundleFile => {
+                    engine.load_plugin_bundle_file(&path)?;
+                    1
+                }
+                PluginLoadSourceKind::Directory => engine.load_plugins_from_dir(&path)?,
+            };
+
+            let loaded_plugin_names =
+                newly_loaded_plugin_names(&before_names, &engine.plugin_names());
+
+            Ok(PluginLoadStatus {
+                status: "loaded",
+                path,
+                source_kind,
+                loaded_count,
+                loaded_plugin_names,
+                plugin_count_after: engine.plugin_count(),
+                active_inference: engine.runtime_snapshot().active_inference,
             })
         })
     }
@@ -170,6 +201,15 @@ fn model_config_from_request(
     Ok(config)
 }
 
+fn newly_loaded_plugin_names(before: &[String], after: &[String]) -> Vec<String> {
+    let before_set = before.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    after
+        .iter()
+        .filter(|name| !before_set.contains(name.as_str()))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,6 +219,21 @@ mod tests {
         CoreRewriters, InferenceEngine, PlatformTrack, PluginBootstrap, PluginCompatibility,
         PluginManifest, PluginRuntime, RegisteredPlugin,
     };
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "loci-management-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        dir
+    }
 
     fn empty_service() -> ManagementService {
         ManagementService::new(InferenceEngine::builder().build().expect("build engine"))
@@ -302,6 +357,96 @@ mod tests {
                 .map(|info| info.architecture.as_str()),
             Some("mock")
         );
+    }
+
+    #[test]
+    fn service_loads_plugin_bundle_from_control_plane_request() {
+        let service = empty_service();
+        let dir = unique_temp_dir("plugin-bundle");
+        fs::create_dir_all(dir.join("plugin")).expect("mkdir");
+        fs::write(
+            dir.join("plugin").join("manifest.toml"),
+            r#"
+name = "managed-plugin"
+version = "1.0.0"
+api_version = "1.0"
+target_tracks = ["ai_infra"]
+"#,
+        )
+        .expect("write manifest");
+
+        let status = service
+            .load_plugins(PluginLoadRequest {
+                path: dir
+                    .join("plugin")
+                    .join("manifest.toml")
+                    .display()
+                    .to_string(),
+                source_kind: PluginLoadSourceKind::BundleFile,
+            })
+            .expect("load plugin");
+
+        assert_eq!(status.status, "loaded");
+        assert_eq!(status.loaded_count, 1);
+        assert_eq!(
+            status.loaded_plugin_names,
+            vec!["managed-plugin".to_string()]
+        );
+        assert_eq!(status.plugin_count_after, 1);
+        assert_eq!(status.active_inference, None);
+
+        let snapshot = service.runtime_snapshot().expect("snapshot");
+        assert_eq!(
+            snapshot.loaded_plugin_names,
+            vec!["managed-plugin".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn service_loads_plugin_directory_from_control_plane_request() {
+        let service = empty_service();
+        let dir = unique_temp_dir("plugin-dir");
+        fs::create_dir_all(dir.join("plugin-a")).expect("mkdir a");
+        fs::create_dir_all(dir.join("plugin-b")).expect("mkdir b");
+        fs::write(
+            dir.join("plugin-a").join("manifest.toml"),
+            r#"
+name = "plugin-a"
+version = "1.0.0"
+api_version = "1.0"
+target_tracks = ["ai_infra"]
+"#,
+        )
+        .expect("write manifest a");
+        fs::write(
+            dir.join("plugin-b").join("manifest.toml"),
+            r#"
+name = "plugin-b"
+version = "1.0.0"
+api_version = "1.0"
+target_tracks = ["ai_agent"]
+"#,
+        )
+        .expect("write manifest b");
+
+        let status = service
+            .load_plugins(PluginLoadRequest {
+                path: dir.display().to_string(),
+                source_kind: PluginLoadSourceKind::Directory,
+            })
+            .expect("load plugins");
+
+        assert_eq!(status.status, "loaded");
+        assert_eq!(status.loaded_count, 2);
+        assert_eq!(
+            status.loaded_plugin_names,
+            vec!["plugin-a".to_string(), "plugin-b".to_string()]
+        );
+        assert_eq!(status.plugin_count_after, 2);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

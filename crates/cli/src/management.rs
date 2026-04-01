@@ -1,4 +1,4 @@
-use loci_core::{ManagementService, ModelLoadRequest};
+use loci_core::{ManagementService, ModelLoadRequest, PluginLoadRequest};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -96,6 +96,20 @@ pub fn handle_management_request(
             },
             Err(error) => json_response(500, json!({ "error": error.to_string() })),
         },
+        ("POST", "/v1/plugins/load") => {
+            let load_request = match plugin_load_request_from_body(&request.body) {
+                Ok(load_request) => load_request,
+                Err(error) => return json_response(400, json!({ "error": error.to_string() })),
+            };
+
+            match service.load_plugins(load_request) {
+                Ok(status) => match serde_json::to_value(status) {
+                    Ok(status) => json_response(200, status),
+                    Err(error) => json_response(500, json!({ "error": error.to_string() })),
+                },
+                Err(error) => json_response(400, json!({ "error": error.to_string() })),
+            }
+        }
         ("POST", "/v1/model/load") => {
             let load_request = match model_load_request_from_body(&request.body) {
                 Ok(load_request) => load_request,
@@ -185,6 +199,10 @@ fn plugin_name_from_body(body: &[u8]) -> anyhow::Result<String> {
 }
 
 fn model_load_request_from_body(body: &[u8]) -> anyhow::Result<ModelLoadRequest> {
+    serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON body: {error}"))
+}
+
+fn plugin_load_request_from_body(body: &[u8]) -> anyhow::Result<PluginLoadRequest> {
     serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON body: {error}"))
 }
 
@@ -308,9 +326,24 @@ mod tests {
         CoreRewriters, InferenceEngine, PlatformTrack, PluginBootstrap, PluginCompatibility,
         PluginManifest, PluginRuntime, RegisteredPlugin, SamplingHook,
     };
+    use std::fs;
     use std::net::Shutdown;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::thread;
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "loci-cli-management-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        dir
+    }
 
     fn empty_service() -> ManagementService {
         ManagementService::new(InferenceEngine::builder().build().expect("build engine"))
@@ -518,6 +551,58 @@ mod tests {
         assert_eq!(after_value["status"]["registered_sampling_hook"], true);
         assert_eq!(after_value["status"]["effective_sampling_hook"], true);
         assert_eq!(after_value["status"]["active_inference_rewriter"], true);
+    }
+
+    #[test]
+    fn plugin_load_route_loads_manifest_bundle_and_updates_runtime() {
+        let service = empty_service();
+        let dir = unique_temp_dir("plugin-load");
+        fs::create_dir_all(dir.join("plugin")).expect("mkdir");
+        fs::write(
+            dir.join("plugin").join("manifest.toml"),
+            r#"
+name = "route-plugin"
+version = "1.0.0"
+api_version = "1.0"
+target_tracks = ["ai_infra"]
+"#,
+        )
+        .expect("write manifest");
+
+        let response = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/plugins/load".to_string(),
+                body: serde_json::to_vec(&json!({
+                    "path": dir.join("plugin").join("manifest.toml").display().to_string(),
+                    "source_kind": "bundle_file"
+                }))
+                .expect("serialize request"),
+            },
+        );
+
+        assert_eq!(response.status_code, 200);
+        let value: Value = serde_json::from_slice(&response.body).expect("json");
+        assert_eq!(value["status"], "loaded");
+        assert_eq!(value["loaded_count"], 1);
+        assert_eq!(value["loaded_plugin_names"], json!(["route-plugin"]));
+
+        let runtime = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/runtime".to_string(),
+                body: Vec::new(),
+            },
+        );
+        let runtime_value: Value = serde_json::from_slice(&runtime.body).expect("json");
+        assert_eq!(
+            runtime_value["loaded_plugin_names"],
+            json!(["route-plugin"])
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

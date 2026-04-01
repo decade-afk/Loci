@@ -106,6 +106,32 @@ pub struct ModelLoadStatus {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginLoadSourceKind {
+    #[default]
+    BundleFile,
+    Directory,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PluginLoadRequest {
+    pub path: String,
+    #[serde(default)]
+    pub source_kind: PluginLoadSourceKind,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PluginLoadStatus {
+    pub status: &'static str,
+    pub path: String,
+    pub source_kind: PluginLoadSourceKind,
+    pub loaded_count: usize,
+    pub loaded_plugin_names: Vec<String>,
+    pub plugin_count_after: usize,
+    pub active_inference: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ModelLoadStrategyRequest {
     #[default]
