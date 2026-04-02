@@ -29,6 +29,12 @@ pub(crate) struct MaterializedHostRuntime {
     file_size_bytes: u64,
 }
 
+#[derive(Debug, Clone)]
+struct GovernedModelLoad {
+    model_path: PathBuf,
+    backend_params: BackendParams,
+}
+
 pub struct InferenceEngine {
     pub(crate) registry: Box<dyn CoreRegistry>,
     pub(crate) backend_registry: BackendRegistry,
@@ -396,6 +402,7 @@ impl InferenceEngine {
                 ),
             },
             model_providers: plugin.manifest.contributes.model_providers.clone(),
+            accelerators: plugin.manifest.contributes.accelerators.clone(),
             inference_hooks: plugin.manifest.contributes.inference_hooks.clone(),
             events: plugin.manifest.contributes.events.clone(),
             workflows: plugin.manifest.contributes.workflows.clone(),
@@ -535,7 +542,17 @@ impl InferenceEngine {
         model_path: P,
         backend_params: BackendParams,
     ) -> Result<()> {
-        let model_path = model_path.as_ref().to_path_buf();
+        let governed = self.govern_model_load(backend_name, model_path.as_ref(), backend_params)?;
+        self.load_model_unchecked(backend_name, &governed.model_path, governed.backend_params)
+    }
+
+    fn load_model_unchecked(
+        &mut self,
+        backend_name: &str,
+        model_path: &Path,
+        backend_params: BackendParams,
+    ) -> Result<()> {
+        let model_path = model_path.to_path_buf();
         let model = self
             .backend_registry
             .load_model(backend_name, &model_path, backend_params)?;
@@ -548,20 +565,26 @@ impl InferenceEngine {
 
     pub fn load_model_config(&mut self, backend_name: &str, config: &ModelConfig) -> Result<()> {
         config.validate()?;
-        let backend_params = config.to_backend_params();
-
-        let result = self.load_model(backend_name, &config.model_path, backend_params.clone());
+        let governed =
+            self.govern_model_load(backend_name, &config.model_path, config.to_backend_params())?;
+        let result = self.load_model_unchecked(
+            backend_name,
+            &governed.model_path,
+            governed.backend_params.clone(),
+        );
         match (result, config.load_strategy) {
             (Ok(()), _) => Ok(()),
             (Err(_), ModelLoadStrategy::AutoReduceGpuLayers { step })
-                if config.use_gpu && config.n_gpu_layers > 0 =>
+                if governed.backend_params.use_gpu && governed.backend_params.n_gpu_layers > 0 =>
             {
-                let mut retry = config.n_gpu_layers.saturating_sub(step as i32);
+                let mut retry = governed
+                    .backend_params
+                    .n_gpu_layers
+                    .saturating_sub(step as i32);
                 while retry >= 0 {
-                    let mut reduced = backend_params.clone();
-                    reduced.n_gpu_layers = retry;
+                    let reduced = with_gpu_layer_retry(governed.backend_params.clone(), retry);
                     if self
-                        .load_model(backend_name, &config.model_path, reduced)
+                        .load_model_unchecked(backend_name, &governed.model_path, reduced)
                         .is_ok()
                     {
                         return Ok(());
@@ -576,6 +599,120 @@ impl InferenceEngine {
                 ))
             }
             (Err(err), _) => Err(err),
+        }
+    }
+
+    fn govern_model_load(
+        &self,
+        backend_name: &str,
+        model_path: &Path,
+        backend_params: BackendParams,
+    ) -> Result<GovernedModelLoad> {
+        let backend_capabilities = self
+            .backend_registry
+            .capabilities(backend_name)
+            .ok_or_else(|| {
+                LociError::BackendNotAvailable(format!("backend not found: {backend_name}"))
+            })?;
+        let model_path = model_path.to_path_buf();
+        let model_ref = model_path.display().to_string();
+        let model_provider = model_provider_for_reference(&model_ref);
+
+        self.ensure_model_load_is_admitted(&model_ref, model_provider.as_str())?;
+        let backend_params =
+            self.normalize_backend_params_for_hardware(backend_params, &backend_capabilities)?;
+
+        Ok(GovernedModelLoad {
+            model_path,
+            backend_params,
+        })
+    }
+
+    fn ensure_model_load_is_admitted(&self, model_ref: &str, provider: &str) -> Result<()> {
+        if let Some(plugin_name) = self.active_core_rewriter(CoreComponent::Model) {
+            let plugin = self
+                .registry
+                .plugin_manager()
+                .get(plugin_name)
+                .ok_or_else(|| {
+                    LociError::from(anyhow::anyhow!(
+                        "active model rewriter `{plugin_name}` is not registered"
+                    ))
+                })?;
+
+            if !plugin
+                .manifest
+                .contributes
+                .model_providers
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(provider))
+            {
+                return Err(LociError::ModelLoadError(format!(
+                    "model provider `{provider}` is not declared by active model rewriter `{plugin_name}`"
+                )));
+            }
+        } else if provider != "local" {
+            return Err(LociError::ModelLoadError(format!(
+                "model provider `{provider}` requires an active model rewriter"
+            )));
+        }
+
+        if provider == "local" && !self.registry.model_repository().has_model(model_ref) {
+            return Err(LociError::ModelLoadError(format!(
+                "model repository does not admit local model `{model_ref}`"
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn normalize_backend_params_for_hardware(
+        &self,
+        backend_params: BackendParams,
+        backend_capabilities: &BackendCapabilities,
+    ) -> Result<BackendParams> {
+        let mut available_accelerators = normalize_accelerators(
+            self.registry
+                .hardware_abstraction()
+                .available_accelerators(),
+        );
+
+        if let Some(plugin_name) = self.active_core_rewriter(CoreComponent::Hardware) {
+            let plugin = self
+                .registry
+                .plugin_manager()
+                .get(plugin_name)
+                .ok_or_else(|| {
+                    LociError::from(anyhow::anyhow!(
+                        "active hardware rewriter `{plugin_name}` is not registered"
+                    ))
+                })?;
+            let declared = normalize_accelerators(plugin.manifest.contributes.accelerators.clone());
+            if declared.is_empty() {
+                return Err(LociError::ModelLoadError(format!(
+                    "active hardware rewriter `{plugin_name}` does not declare any accelerators"
+                )));
+            }
+
+            available_accelerators.retain(|accelerator| {
+                accelerator == "cpu" || declared.iter().any(|candidate| candidate == accelerator)
+            });
+            if !available_accelerators
+                .iter()
+                .any(|candidate| candidate == "cpu")
+            {
+                available_accelerators.push("cpu".to_string());
+            }
+        }
+
+        let gpu_available = backend_capabilities.has_gpu_support
+            && available_accelerators
+                .iter()
+                .any(|accelerator| is_gpu_accelerator(accelerator));
+        if gpu_available && backend_params.use_gpu {
+            Ok(backend_params)
+        } else {
+            Ok(cpu_only_backend_params(backend_params))
         }
     }
 
@@ -936,12 +1073,68 @@ fn host_runtime_kind_to_control_plane(kind: RegisteredHostRuntimeKind) -> Plugin
     }
 }
 
+fn model_provider_for_reference(model_ref: &str) -> String {
+    if let Some((provider, _)) = model_ref.split_once("://") {
+        return provider.to_ascii_lowercase();
+    }
+    if let Some((provider, _)) = model_ref.split_once("::") {
+        return provider.to_ascii_lowercase();
+    }
+    "local".to_string()
+}
+
+fn normalize_accelerators(accelerators: Vec<String>) -> Vec<String> {
+    let mut normalized = accelerators
+        .into_iter()
+        .map(|accelerator| accelerator.trim().to_ascii_lowercase())
+        .filter(|accelerator| !accelerator.is_empty())
+        .collect::<Vec<_>>();
+    if !normalized.iter().any(|accelerator| accelerator == "cpu") {
+        normalized.push("cpu".to_string());
+    }
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+fn is_gpu_accelerator(accelerator: &str) -> bool {
+    accelerator != "cpu"
+}
+
+fn cpu_only_backend_params(mut backend_params: BackendParams) -> BackendParams {
+    backend_params.use_gpu = false;
+    backend_params.n_gpu_layers = 0;
+    backend_params.kv_offload = false;
+    backend_params.op_offload = false;
+    backend_params.split_mode = crate::backend::GpuSplitMode::None;
+    backend_params.main_gpu = 0;
+    backend_params.tensor_split = None;
+    backend_params
+}
+
+fn with_gpu_layer_retry(mut backend_params: BackendParams, n_gpu_layers: i32) -> BackendParams {
+    if n_gpu_layers <= 0 {
+        cpu_only_backend_params(backend_params)
+    } else {
+        backend_params.use_gpu = true;
+        backend_params.n_gpu_layers = n_gpu_layers;
+        backend_params
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::DefaultCoreRegistry;
+    use crate::backend::{GpuSplitMode, InferenceBackend};
+    use crate::core::{
+        CoreRegistry, DefaultCoreRegistry, DefaultModelRepository, DefaultWorkflowEngine,
+        HeadlessUiHost, PluginManager as _, RecordingEventBus,
+    };
+    use crate::error::{LociError, Result as LociResult};
     use crate::plugin::registered_legacy_text_plugin_for_tests;
+    use crate::plugin::InMemoryPluginManager;
     use crate::sampler::LogitsView;
+    use anyhow::{bail, Result as AnyhowResult};
     use loci_plugin_api::{
         ContributionPoints, CoreRewriters, PluginBootstrap, PluginCompatibility, PluginManifest,
         PluginRuntime,
@@ -949,7 +1142,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::Path;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     fn unique_temp_dir(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
@@ -959,6 +1152,204 @@ mod tests {
             .as_nanos();
         path.push(format!("loci-engine-test-{name}-{nanos}"));
         path
+    }
+
+    fn temp_model_path(name: &str) -> PathBuf {
+        let dir = unique_temp_dir(name);
+        fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("demo.gguf");
+        fs::write(&path, b"mock-model").expect("write model");
+        path
+    }
+
+    #[derive(Debug, Clone)]
+    struct RecordedModelLoad {
+        model_path: PathBuf,
+        backend_params: BackendParams,
+    }
+
+    struct RecordingBackend {
+        calls: Arc<Mutex<Vec<RecordedModelLoad>>>,
+        has_gpu_support: bool,
+    }
+
+    impl RecordingBackend {
+        fn new(calls: Arc<Mutex<Vec<RecordedModelLoad>>>, has_gpu_support: bool) -> Self {
+            Self {
+                calls,
+                has_gpu_support,
+            }
+        }
+    }
+
+    impl InferenceBackend for RecordingBackend {
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                name: "recording".to_string(),
+                version: "1.0.0".to_string(),
+                supports_text: true,
+                supports_multimodal: false,
+                supports_embeddings: false,
+                supports_streaming: false,
+                has_gpu_support: self.has_gpu_support,
+                supported_formats: vec!["gguf".to_string()],
+            }
+        }
+
+        fn load_model(
+            &self,
+            model_path: &Path,
+            backend_params: BackendParams,
+        ) -> LociResult<Box<dyn Model>> {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push(RecordedModelLoad {
+                    model_path: model_path.to_path_buf(),
+                    backend_params,
+                });
+            Ok(Box::new(RecordedModel))
+        }
+    }
+
+    struct RecordedModel;
+
+    impl Model for RecordedModel {
+        fn metadata(&self) -> ModelMetadata {
+            ModelMetadata {
+                architecture: "recording".to_string(),
+                n_vocab: 0,
+                n_ctx_train: 4096,
+                n_embd: 0,
+                n_layer: 0,
+                param_count: None,
+            }
+        }
+
+        fn infer_text(&mut self, prompt: &str, _params: &InferenceParams) -> LociResult<String> {
+            if prompt.trim().is_empty() {
+                return Err(LociError::InvalidArgument(
+                    "prompt must not be empty".to_string(),
+                ));
+            }
+            Ok(format!("recording:{prompt}"))
+        }
+    }
+
+    struct FixedHardwareAbstraction {
+        accelerators: Vec<String>,
+    }
+
+    impl crate::core::HardwareAbstraction for FixedHardwareAbstraction {
+        fn available_accelerators(&self) -> Vec<String> {
+            self.accelerators.clone()
+        }
+    }
+
+    struct TestRegistry {
+        model_repository: DefaultModelRepository,
+        workflow_engine: DefaultWorkflowEngine,
+        event_bus: RecordingEventBus,
+        hardware_abstraction: FixedHardwareAbstraction,
+        ui_host: HeadlessUiHost,
+        plugin_manager: InMemoryPluginManager,
+        active_core_rewriters: BTreeMap<CoreComponent, String>,
+    }
+
+    impl TestRegistry {
+        fn with_accelerators(accelerators: &[&str]) -> Self {
+            Self {
+                model_repository: DefaultModelRepository,
+                workflow_engine: DefaultWorkflowEngine,
+                event_bus: RecordingEventBus::default(),
+                hardware_abstraction: FixedHardwareAbstraction {
+                    accelerators: accelerators
+                        .iter()
+                        .map(|value| (*value).to_string())
+                        .collect(),
+                },
+                ui_host: HeadlessUiHost,
+                plugin_manager: InMemoryPluginManager::default(),
+                active_core_rewriters: BTreeMap::new(),
+            }
+        }
+    }
+
+    impl CoreRegistry for TestRegistry {
+        fn model_repository(&self) -> &dyn crate::core::ModelRepository {
+            &self.model_repository
+        }
+
+        fn workflow_engine(&self) -> &dyn crate::core::WorkflowEngine {
+            &self.workflow_engine
+        }
+
+        fn event_bus(&self) -> &dyn crate::core::EventBus {
+            &self.event_bus
+        }
+
+        fn hardware_abstraction(&self) -> &dyn crate::core::HardwareAbstraction {
+            &self.hardware_abstraction
+        }
+
+        fn ui_host(&self) -> &dyn crate::core::UiHost {
+            &self.ui_host
+        }
+
+        fn plugin_manager(&self) -> &dyn crate::core::PluginManager {
+            &self.plugin_manager
+        }
+
+        fn plugin_manager_mut(&mut self) -> &mut dyn crate::core::PluginManager {
+            &mut self.plugin_manager
+        }
+
+        fn activate_core_rewriter(
+            &mut self,
+            component: CoreComponent,
+            plugin_name: &str,
+        ) -> AnyhowResult<()> {
+            let plugin = self
+                .plugin_manager
+                .get(plugin_name)
+                .ok_or_else(|| anyhow::anyhow!("plugin not registered: {plugin_name}"))?;
+
+            if !plugin.declares_core_rewriter(component) {
+                bail!(
+                    "plugin `{}` does not declare core rewriter capability for `{component:?}`",
+                    plugin.manifest.name
+                );
+            }
+
+            self.active_core_rewriters
+                .insert(component, plugin.manifest.name.clone());
+            Ok(())
+        }
+
+        fn active_core_rewriter(&self, component: CoreComponent) -> Option<&str> {
+            self.active_core_rewriters
+                .get(&component)
+                .map(String::as_str)
+        }
+
+        fn configured_core_rewriters(&self) -> Vec<(CoreComponent, String)> {
+            self.active_core_rewriters
+                .iter()
+                .map(|(component, plugin_name)| (*component, plugin_name.clone()))
+                .collect()
+        }
+    }
+
+    fn recording_backend_registry(
+        calls: Arc<Mutex<Vec<RecordedModelLoad>>>,
+        has_gpu_support: bool,
+    ) -> BackendRegistry {
+        let mut registry = BackendRegistry::new();
+        registry.register(
+            "recording".to_string(),
+            Box::new(RecordingBackend::new(calls, has_gpu_support)),
+        );
+        registry
     }
 
     #[test]
@@ -1033,6 +1424,154 @@ mod tests {
                 workflows: vec!["agent.plan".to_string(), "agent.review".to_string()],
             }
         );
+    }
+
+    #[test]
+    fn engine_rejects_remote_model_provider_without_active_model_rewriter() {
+        let calls = Arc::new(Mutex::new(Vec::<RecordedModelLoad>::new()));
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: recording_backend_registry(Arc::clone(&calls), true),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        let err = engine
+            .load_model(
+                "recording",
+                Path::new("hf://meta/llama-3"),
+                BackendParams::default(),
+            )
+            .expect_err("remote provider should require model rewriter");
+        assert!(err
+            .to_string()
+            .contains("requires an active model rewriter"));
+        assert!(calls.lock().expect("calls lock").is_empty());
+    }
+
+    #[test]
+    fn engine_active_model_rewriter_must_admit_local_provider_before_backend_load() {
+        let calls = Arc::new(Mutex::new(Vec::<RecordedModelLoad>::new()));
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: recording_backend_registry(Arc::clone(&calls), true),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "model-router".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiInfra],
+                contributes: ContributionPoints {
+                    model_providers: vec!["private-registry".to_string()],
+                    ..Default::default()
+                },
+                core_rewriters: CoreRewriters {
+                    model: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
+            }))
+            .expect("register");
+        engine
+            .activate_core_rewriter(CoreComponent::Model, "model-router")
+            .expect("activate");
+
+        let model_path = temp_model_path("model-router-local");
+        let err = engine
+            .load_model("recording", &model_path, BackendParams::default())
+            .expect_err("local provider should be governed by active model rewriter");
+        assert!(err
+            .to_string()
+            .contains("is not declared by active model rewriter"));
+        assert!(calls.lock().expect("calls lock").is_empty());
+    }
+
+    #[test]
+    fn engine_hardware_rewriter_clips_gpu_request_to_cpu_before_backend_load() {
+        let calls = Arc::new(Mutex::new(Vec::<RecordedModelLoad>::new()));
+        let mut engine = InferenceEngine {
+            registry: Box::new(TestRegistry::with_accelerators(&["cpu", "cuda"])),
+            backend_registry: recording_backend_registry(Arc::clone(&calls), true),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "hardware-policy".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiInfra],
+                contributes: ContributionPoints {
+                    accelerators: vec!["cpu".to_string()],
+                    ..Default::default()
+                },
+                core_rewriters: CoreRewriters {
+                    hardware: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
+            }))
+            .expect("register");
+        engine
+            .activate_core_rewriter(CoreComponent::Hardware, "hardware-policy")
+            .expect("activate");
+
+        let model_path = temp_model_path("hardware-clip");
+        engine
+            .load_model(
+                "recording",
+                &model_path,
+                BackendParams {
+                    use_gpu: true,
+                    n_gpu_layers: 42,
+                    kv_offload: true,
+                    op_offload: true,
+                    split_mode: GpuSplitMode::Layer,
+                    main_gpu: 2,
+                    tensor_split: Some(vec![0.5, 0.5]),
+                    ..Default::default()
+                },
+            )
+            .expect("load model");
+
+        let loads = calls.lock().expect("calls lock");
+        assert_eq!(loads.len(), 1);
+        assert_eq!(loads[0].model_path, model_path);
+        assert!(!loads[0].backend_params.use_gpu);
+        assert_eq!(loads[0].backend_params.n_gpu_layers, 0);
+        assert!(!loads[0].backend_params.kv_offload);
+        assert!(!loads[0].backend_params.op_offload);
+        assert_eq!(loads[0].backend_params.split_mode, GpuSplitMode::None);
+        assert_eq!(loads[0].backend_params.main_gpu, 0);
+        assert_eq!(loads[0].backend_params.tensor_split, None);
     }
 
     #[test]
@@ -1468,8 +2007,9 @@ logit = 42.0
         );
         assert_eq!(engine.sampling_hook_count(), 1);
 
+        let model_path = temp_model_path("bundle-auto-inference");
         engine
-            .load_model("mock", "demo.gguf", BackendParams::default())
+            .load_model("mock", &model_path, BackendParams::default())
             .expect("load model");
         let output = engine
             .generate("hello", &InferenceParams::default())
@@ -1592,8 +2132,9 @@ logit = 42.0
                 &["pre_generate", "post_generate"],
             ))
             .expect("register legacy text plugin");
+        let model_path = temp_model_path("legacy-text");
         engine
-            .load_model("mock", "demo.gguf", BackendParams::default())
+            .load_model("mock", &model_path, BackendParams::default())
             .expect("load model");
 
         let inactive_output = engine
@@ -2102,8 +2643,9 @@ wasm_path = "runtime/plugin.wasm"
                 compatibility: PluginCompatibility::default(),
             }))
             .expect("register");
+        let model_path = temp_model_path("dynamic-hook");
         engine
-            .load_model("mock", "demo.gguf", BackendParams::default())
+            .load_model("mock", &model_path, BackendParams::default())
             .expect("load model");
         engine
             .register_sampling_hook("hooked-plugin", Arc::new(ForceTokenHook))
@@ -2171,8 +2713,9 @@ wasm_path = "runtime/plugin.wasm"
                 &["transform_logits", "post_sample"],
             ))
             .expect("register legacy sampler");
+        let model_path = temp_model_path("legacy-sampler");
         engine
-            .load_model("mock", "demo.gguf", BackendParams::default())
+            .load_model("mock", &model_path, BackendParams::default())
             .expect("load model");
 
         let before = engine.runtime_snapshot();
@@ -2269,8 +2812,9 @@ wasm_path = "runtime/plugin.wasm"
         assert!(snapshot.plugins[0].active_inference_rewriter);
         assert!(snapshot.plugins[0].has_sampling_hook);
 
+        let model_path = temp_model_path("legacy-auto-activation");
         engine
-            .load_model("mock", "demo.gguf", BackendParams::default())
+            .load_model("mock", &model_path, BackendParams::default())
             .expect("load model");
         let output = engine
             .generate("hello", &InferenceParams::default())

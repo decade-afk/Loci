@@ -166,6 +166,12 @@ impl BackendRegistry {
         backends
     }
 
+    pub fn capabilities(&self, backend_name: &str) -> Option<BackendCapabilities> {
+        self.backends
+            .get(backend_name)
+            .map(|backend| backend.capabilities())
+    }
+
     pub fn load_model(
         &mut self,
         backend_name: &str,

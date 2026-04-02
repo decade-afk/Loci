@@ -385,7 +385,11 @@ fn inference_params_from_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::BackendParams;
+    use crate::backend::{
+        BackendCapabilities, BackendParams, BackendRegistry, InferenceBackend, InferenceParams,
+        Model, ModelMetadata,
+    };
+    use crate::error::{LociError, Result as LociResult};
     use crate::plugin::registered_legacy_text_plugin_for_tests;
     use crate::{
         CoreRewriters, InferenceEngine, PlatformTrack, PluginBootstrap, PluginCompatibility,
@@ -393,6 +397,7 @@ mod tests {
     };
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
 
     fn unique_temp_dir(name: &str) -> PathBuf {
         let mut dir = std::env::temp_dir();
@@ -405,6 +410,73 @@ mod tests {
                 .as_nanos()
         ));
         dir
+    }
+
+    fn temp_model_path(name: &str) -> PathBuf {
+        let dir = unique_temp_dir(name);
+        fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("demo.gguf");
+        fs::write(&path, b"mock-model").expect("write model");
+        path
+    }
+
+    #[derive(Debug, Clone)]
+    struct RecordedLoad {
+        params: BackendParams,
+    }
+
+    struct RecordingBackend {
+        calls: Arc<Mutex<Vec<RecordedLoad>>>,
+    }
+
+    impl InferenceBackend for RecordingBackend {
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                name: "recording".to_string(),
+                version: "1.0.0".to_string(),
+                supports_text: true,
+                supports_multimodal: false,
+                supports_embeddings: false,
+                supports_streaming: false,
+                has_gpu_support: true,
+                supported_formats: vec!["gguf".to_string()],
+            }
+        }
+
+        fn load_model(
+            &self,
+            _model_path: &std::path::Path,
+            backend_params: BackendParams,
+        ) -> LociResult<Box<dyn Model>> {
+            self.calls.lock().expect("calls lock").push(RecordedLoad {
+                params: backend_params,
+            });
+            Ok(Box::new(RecordedModel))
+        }
+    }
+
+    struct RecordedModel;
+
+    impl Model for RecordedModel {
+        fn metadata(&self) -> ModelMetadata {
+            ModelMetadata {
+                architecture: "recording".to_string(),
+                n_vocab: 0,
+                n_ctx_train: 4096,
+                n_embd: 0,
+                n_layer: 0,
+                param_count: None,
+            }
+        }
+
+        fn infer_text(&mut self, prompt: &str, _params: &InferenceParams) -> LociResult<String> {
+            if prompt.trim().is_empty() {
+                return Err(LociError::InvalidArgument(
+                    "prompt must not be empty".to_string(),
+                ));
+            }
+            Ok(format!("recording:{prompt}"))
+        }
     }
 
     fn empty_service() -> ManagementService {
@@ -547,8 +619,9 @@ mod tests {
                 &["transform_logits", "post_sample"],
             ))
             .expect("register legacy sampling plugin");
+        let model_path = temp_model_path("legacy-sampling");
         engine
-            .load_model("mock", "demo.gguf", BackendParams::default())
+            .load_model("mock", &model_path, BackendParams::default())
             .expect("load model");
         ManagementService::new(engine)
     }
@@ -897,11 +970,13 @@ mod tests {
     #[test]
     fn service_loads_model_from_control_plane_request() {
         let service = empty_service();
+        let model_path = temp_model_path("service-load");
+        let model_path_string = model_path.display().to_string();
         let status = service
             .load_model(ModelLoadRequest {
                 backend_name: "mock".to_string(),
                 config: crate::ModelLoadConfig {
-                    model_path: "demo.gguf".to_string(),
+                    model_path: model_path_string.clone(),
                     use_gpu: false,
                     n_gpu_layers: 0,
                     kv_offload: false,
@@ -914,9 +989,12 @@ mod tests {
 
         assert_eq!(status.status, "loaded");
         assert_eq!(status.backend_name, "mock");
-        assert_eq!(status.model_path, "demo.gguf");
+        assert_eq!(status.model_path, model_path_string.clone());
         assert_eq!(status.active_backend.as_deref(), Some("mock"));
-        assert_eq!(status.active_model_path.as_deref(), Some("demo.gguf"));
+        assert_eq!(
+            status.active_model_path.as_deref(),
+            Some(model_path_string.as_str())
+        );
         assert_eq!(
             status
                 .active_model_info
@@ -927,7 +1005,10 @@ mod tests {
 
         let snapshot = service.runtime_snapshot().expect("snapshot");
         assert_eq!(snapshot.active_backend.as_deref(), Some("mock"));
-        assert_eq!(snapshot.active_model_path.as_deref(), Some("demo.gguf"));
+        assert_eq!(
+            snapshot.active_model_path.as_deref(),
+            Some(model_path_string.as_str())
+        );
         assert_eq!(
             snapshot
                 .active_model_info
@@ -938,13 +1019,55 @@ mod tests {
     }
 
     #[test]
+    fn service_load_model_respects_hardware_governance_before_backend_load() {
+        let calls = Arc::new(Mutex::new(Vec::<RecordedLoad>::new()));
+        let mut backend_registry = BackendRegistry::new();
+        backend_registry.register(
+            "recording".to_string(),
+            Box::new(RecordingBackend {
+                calls: Arc::clone(&calls),
+            }),
+        );
+        let engine = InferenceEngine::builder()
+            .with_backend_registry(backend_registry)
+            .build()
+            .expect("build");
+        let service = ManagementService::new(engine);
+        let model_path = temp_model_path("service-governed-load");
+
+        service
+            .load_model(ModelLoadRequest {
+                backend_name: "recording".to_string(),
+                config: crate::ModelLoadConfig {
+                    model_path: model_path.display().to_string(),
+                    use_gpu: true,
+                    n_gpu_layers: 24,
+                    kv_offload: true,
+                    op_offload: true,
+                    split_mode: crate::ModelLoadSplitMode::Layer,
+                    ..Default::default()
+                },
+            })
+            .expect("load model");
+
+        let loads = calls.lock().expect("calls lock");
+        assert_eq!(loads.len(), 1);
+        assert!(!loads[0].params.use_gpu);
+        assert_eq!(loads[0].params.n_gpu_layers, 0);
+        assert!(!loads[0].params.kv_offload);
+        assert!(!loads[0].params.op_offload);
+    }
+
+    #[test]
     fn service_generates_text_from_control_plane_request() {
         let service = empty_service();
+        let model_path = temp_model_path("service-generate");
+        let model_path_string = model_path.display().to_string();
         service
             .load_model(ModelLoadRequest {
                 backend_name: "mock".to_string(),
                 config: crate::ModelLoadConfig {
-                    model_path: "demo.gguf".to_string(),
+                    model_path: model_path_string.clone(),
                     use_gpu: false,
                     n_gpu_layers: 0,
                     kv_offload: false,
@@ -969,7 +1092,10 @@ mod tests {
         assert!(response.output.contains("mock:hello"));
         assert!(response.output.contains("max_tokens=16"));
         assert_eq!(response.active_backend.as_deref(), Some("mock"));
-        assert_eq!(response.active_model_path.as_deref(), Some("demo.gguf"));
+        assert_eq!(
+            response.active_model_path.as_deref(),
+            Some(model_path_string.as_str())
+        );
         assert_eq!(
             response
                 .active_model_info

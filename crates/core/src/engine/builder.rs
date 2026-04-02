@@ -233,14 +233,107 @@ impl InferenceEngineBuilder {
 #[cfg(test)]
 mod tests {
     use super::InferenceEngineBuilder;
+    use crate::backend::{
+        BackendCapabilities, BackendParams, BackendRegistry, InferenceBackend, InferenceParams,
+        Model, ModelMetadata,
+    };
     use crate::engine::GenerationParams;
+    use crate::error::{LociError, Result as LociResult};
     use crate::model::ModelConfig;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    fn temp_model_path(name: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "loci-builder-test-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("demo.gguf");
+        fs::write(&path, b"mock-model").expect("write model");
+        path
+    }
+
+    #[derive(Debug, Clone)]
+    struct RecordedLoad {
+        params: BackendParams,
+    }
+
+    struct RecordingBackend {
+        calls: Arc<Mutex<Vec<RecordedLoad>>>,
+    }
+
+    impl InferenceBackend for RecordingBackend {
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                name: "recording".to_string(),
+                version: "1.0.0".to_string(),
+                supports_text: true,
+                supports_multimodal: false,
+                supports_embeddings: false,
+                supports_streaming: false,
+                has_gpu_support: true,
+                supported_formats: vec!["gguf".to_string()],
+            }
+        }
+
+        fn load_model(
+            &self,
+            _model_path: &std::path::Path,
+            backend_params: BackendParams,
+        ) -> LociResult<Box<dyn Model>> {
+            self.calls.lock().expect("calls lock").push(RecordedLoad {
+                params: backend_params,
+            });
+            Ok(Box::new(RecordedModel))
+        }
+    }
+
+    struct RecordedModel;
+
+    impl Model for RecordedModel {
+        fn metadata(&self) -> ModelMetadata {
+            ModelMetadata {
+                architecture: "recording".to_string(),
+                n_vocab: 0,
+                n_ctx_train: 4096,
+                n_embd: 0,
+                n_layer: 0,
+                param_count: None,
+            }
+        }
+
+        fn infer_text(&mut self, prompt: &str, _params: &InferenceParams) -> LociResult<String> {
+            if prompt.trim().is_empty() {
+                return Err(LociError::InvalidArgument(
+                    "prompt must not be empty".to_string(),
+                ));
+            }
+            Ok(format!("recording:{prompt}"))
+        }
+    }
+
+    fn recording_backend_registry(calls: Arc<Mutex<Vec<RecordedLoad>>>) -> BackendRegistry {
+        let mut registry = BackendRegistry::new();
+        registry.register(
+            "recording".to_string(),
+            Box::new(RecordingBackend { calls }),
+        );
+        registry
+    }
 
     #[test]
     fn builder_can_preload_model_and_generate() {
+        let model_path = temp_model_path("preload");
         let mut engine = InferenceEngineBuilder::new()
             .with_backend_name("mock")
-            .with_model_path("demo.gguf")
+            .with_model_path(&model_path)
             .build()
             .expect("build");
 
@@ -253,9 +346,10 @@ mod tests {
 
     #[test]
     fn builder_legacy_generate_uses_default_inference_shape() {
+        let model_path = temp_model_path("legacy");
         let mut engine = InferenceEngineBuilder::new()
             .backend("mock")
-            .model_path("demo.gguf")
+            .model_path(&model_path)
             .context_size(8192)
             .batch_size(1024)
             .build()
@@ -269,7 +363,8 @@ mod tests {
 
     #[test]
     fn builder_can_load_model_config() {
-        let config = ModelConfig::new("demo.gguf")
+        let model_path = temp_model_path("config");
+        let config = ModelConfig::new(&model_path)
             .with_context_size(2048)
             .with_batch_size(128)
             .cpu_only();
@@ -280,6 +375,24 @@ mod tests {
             .expect("build");
 
         assert_eq!(engine.active_backend(), Some("mock"));
+    }
+
+    #[test]
+    fn builder_model_path_preload_uses_governed_model_load_path() {
+        let model_path = temp_model_path("governed");
+        let calls = Arc::new(Mutex::new(Vec::<RecordedLoad>::new()));
+        let engine = InferenceEngineBuilder::new()
+            .backend("recording")
+            .with_backend_registry(recording_backend_registry(Arc::clone(&calls)))
+            .model_path(&model_path)
+            .build()
+            .expect("build");
+
+        assert_eq!(engine.active_backend(), Some("recording"));
+        let loads = calls.lock().expect("calls lock");
+        assert_eq!(loads.len(), 1);
+        assert!(!loads[0].params.use_gpu);
+        assert_eq!(loads[0].params.n_gpu_layers, 0);
     }
 
     #[test]

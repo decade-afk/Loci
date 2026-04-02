@@ -44,6 +44,7 @@ pub struct PluginRuntimeDetail {
     pub active_core_rewriters: Vec<CoreComponent>,
     pub runtime_artifacts: PluginRuntimeArtifacts,
     pub model_providers: Vec<String>,
+    pub accelerators: Vec<String>,
     pub inference_hooks: Vec<String>,
     pub events: Vec<String>,
     pub workflows: Vec<String>,

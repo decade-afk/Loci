@@ -458,6 +458,14 @@ mod tests {
         dir
     }
 
+    fn temp_model_path(name: &str) -> PathBuf {
+        let dir = unique_temp_dir(name);
+        fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("demo.gguf");
+        fs::write(&path, b"mock-model").expect("write model");
+        path
+    }
+
     fn empty_service() -> ManagementService {
         ManagementService::new(InferenceEngine::builder().build().expect("build engine"))
     }
@@ -1221,23 +1229,25 @@ target_tracks = ["ai_infra"]
     #[test]
     fn model_load_route_loads_model_and_returns_runtime_details() {
         let service = empty_service();
+        let model_path = temp_model_path("route-load");
+        let model_path_string = model_path.display().to_string();
         let response = handle_management_request(
             &service,
             HttpRequest {
                 method: "POST".to_string(),
                 path: "/v1/model/load".to_string(),
-                body: br#"{
-                    "backend_name":"mock",
-                    "config":{
-                        "model_path":"demo.gguf",
-                        "use_gpu":false,
-                        "n_gpu_layers":0,
-                        "kv_offload":false,
-                        "op_offload":false,
-                        "split_mode":"none"
+                body: serde_json::to_vec(&json!({
+                    "backend_name": "mock",
+                    "config": {
+                        "model_path": model_path_string,
+                        "use_gpu": false,
+                        "n_gpu_layers": 0,
+                        "kv_offload": false,
+                        "op_offload": false,
+                        "split_mode": "none"
                     }
-                }"#
-                .to_vec(),
+                }))
+                .expect("serialize request"),
             },
         );
 
@@ -1245,9 +1255,12 @@ target_tracks = ["ai_infra"]
         let value: Value = serde_json::from_slice(&response.body).expect("json");
         assert_eq!(value["status"], "loaded");
         assert_eq!(value["backend_name"], "mock");
-        assert_eq!(value["model_path"], "demo.gguf");
+        assert_eq!(value["model_path"], json!(model_path.display().to_string()));
         assert_eq!(value["active_backend"], "mock");
-        assert_eq!(value["active_model_path"], "demo.gguf");
+        assert_eq!(
+            value["active_model_path"],
+            json!(model_path.display().to_string())
+        );
         assert_eq!(value["active_model_info"]["architecture"], "mock");
 
         let runtime = handle_management_request(
@@ -1260,30 +1273,35 @@ target_tracks = ["ai_infra"]
         );
         let runtime_value: Value = serde_json::from_slice(&runtime.body).expect("json");
         assert_eq!(runtime_value["active_backend"], "mock");
-        assert_eq!(runtime_value["active_model_path"], "demo.gguf");
+        assert_eq!(
+            runtime_value["active_model_path"],
+            json!(model_path.display().to_string())
+        );
         assert_eq!(runtime_value["active_model_info"]["architecture"], "mock");
     }
 
     #[test]
     fn inference_generate_route_runs_generation_after_model_load() {
         let service = empty_service();
+        let model_path = temp_model_path("route-generate");
+        let model_path_string = model_path.display().to_string();
         let load = handle_management_request(
             &service,
             HttpRequest {
                 method: "POST".to_string(),
                 path: "/v1/model/load".to_string(),
-                body: br#"{
-                    "backend_name":"mock",
-                    "config":{
-                        "model_path":"demo.gguf",
-                        "use_gpu":false,
-                        "n_gpu_layers":0,
-                        "kv_offload":false,
-                        "op_offload":false,
-                        "split_mode":"none"
+                body: serde_json::to_vec(&json!({
+                    "backend_name": "mock",
+                    "config": {
+                        "model_path": model_path_string,
+                        "use_gpu": false,
+                        "n_gpu_layers": 0,
+                        "kv_offload": false,
+                        "op_offload": false,
+                        "split_mode": "none"
                     }
-                }"#
-                .to_vec(),
+                }))
+                .expect("serialize request"),
             },
         );
         assert_eq!(load.status_code, 200);
@@ -1307,7 +1325,10 @@ target_tracks = ["ai_infra"]
         assert_eq!(response.status_code, 200);
         let value: Value = serde_json::from_slice(&response.body).expect("json");
         assert_eq!(value["active_backend"], "mock");
-        assert_eq!(value["active_model_path"], "demo.gguf");
+        assert_eq!(
+            value["active_model_path"],
+            json!(model_path.display().to_string())
+        );
         assert_eq!(value["active_model_info"]["architecture"], "mock");
         assert_eq!(value["active_inference"], Value::Null);
         assert!(value["output"]

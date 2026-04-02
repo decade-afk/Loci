@@ -2,6 +2,7 @@ use crate::plugin::RegisteredPlugin;
 use anyhow::{bail, Result as AnyhowResult};
 use loci_plugin_api::{CoreComponent, PlatformTrack};
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 pub trait ModelRepository: Send + Sync {
@@ -68,8 +69,8 @@ pub trait CoreRegistry: Send + Sync {
 pub struct DefaultModelRepository;
 
 impl ModelRepository for DefaultModelRepository {
-    fn has_model(&self, _model_id: &str) -> bool {
-        false
+    fn has_model(&self, model_id: &str) -> bool {
+        !model_id.trim().is_empty() && Path::new(model_id).exists()
     }
 }
 

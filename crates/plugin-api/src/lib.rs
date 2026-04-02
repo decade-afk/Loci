@@ -34,6 +34,8 @@ pub struct ContributionPoints {
     #[serde(default)]
     pub model_providers: Vec<String>,
     #[serde(default)]
+    pub accelerators: Vec<String>,
+    #[serde(default)]
     pub inference_hooks: Vec<String>,
     #[serde(default)]
     pub events: Vec<String>,
@@ -139,6 +141,7 @@ pub struct PluginManifest {
 impl ContributionPoints {
     pub fn is_empty(&self) -> bool {
         self.model_providers.is_empty()
+            && self.accelerators.is_empty()
             && self.inference_hooks.is_empty()
             && self.events.is_empty()
             && self.workflows.is_empty()
