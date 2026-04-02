@@ -1,10 +1,10 @@
-pub mod mock;
 #[cfg(feature = "llama")]
 pub mod llamacpp;
+pub mod mock;
 
-pub use mock::{MockBackend, MockModel};
 #[cfg(feature = "llama")]
 pub use llamacpp::LlamaCppBackend;
+pub use mock::{MockBackend, MockModel};
 
 use crate::backend::BackendRegistry;
 

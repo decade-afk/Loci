@@ -1,7 +1,6 @@
 use super::driver::{
     discover_driver, LlamaCppCreateContextPhase, LlamaCppDriver, LlamaCppDriverPhases,
-    LlamaCppDriverProtocol, LlamaCppInitPhase, LlamaCppLifecycleContract,
-    LlamaCppLoadModelPhase,
+    LlamaCppDriverProtocol, LlamaCppInitPhase, LlamaCppLifecycleContract, LlamaCppLoadModelPhase,
 };
 use crate::error::{LociError, Result};
 use std::path::PathBuf;
@@ -156,8 +155,16 @@ impl LlamaCppBuildIntegration {
     pub fn discover() -> Result<Self> {
         let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let build_script = crate_root.join("build.rs");
-        let ffi_module = crate_root.join("src").join("backends").join("llamacpp").join("ffi.rs");
-        let ffi_shim_c = crate_root.join("src").join("backends").join("llamacpp").join("ffi_shim.c");
+        let ffi_module = crate_root
+            .join("src")
+            .join("backends")
+            .join("llamacpp")
+            .join("ffi.rs");
+        let ffi_shim_c = crate_root
+            .join("src")
+            .join("backends")
+            .join("llamacpp")
+            .join("ffi_shim.c");
 
         for required in [&build_script, &ffi_module, &ffi_shim_c] {
             if !required.exists() {

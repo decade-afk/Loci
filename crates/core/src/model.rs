@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 pub enum ModelLoadStrategy {
     #[default]
     Strict,
-    AutoReduceGpuLayers { step: u32 },
+    AutoReduceGpuLayers {
+        step: u32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -241,7 +243,10 @@ mod tests {
 
         assert_eq!(params.n_gpu_layers, 0);
         assert!(!params.use_gpu);
-        assert!(params.options.iter().any(|(k, v)| k == "n_ctx" && v == "8192"));
+        assert!(params
+            .options
+            .iter()
+            .any(|(k, v)| k == "n_ctx" && v == "8192"));
         assert!(params
             .options
             .iter()
