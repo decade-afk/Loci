@@ -5,7 +5,7 @@ use crate::control_plane::{
     CommandInventoryStatus, CoreRewriterStatus, EventInventoryStatus, ModelRuntimeInfo,
     PluginHostRuntimeKind, PluginHostRuntimeMaterialization, PluginHostRuntimeRegistration,
     PluginRuntimeArtifacts, PluginRuntimeDetail, PluginRuntimeStatus, PluginUiContributionStatus,
-    RuntimeSnapshot, SamplingHookSource, UiInventoryStatus, WorkflowInventoryStatus,
+    RuntimeSnapshot, SamplingHookSource, UiInventoryStatus, UiSurfaceKind, WorkflowInventoryStatus,
 };
 use crate::core::CoreRegistry;
 use crate::engine::types::{GenerationParams, ModelInfo};
@@ -493,6 +493,51 @@ impl InferenceEngine {
             });
 
         UiInventoryStatus { active_ui_host, ui }
+    }
+
+    pub fn present_ui_surface(&self, surface_kind: UiSurfaceKind, surface: &str) -> Result<String> {
+        let surface = surface.trim();
+        if surface.is_empty() {
+            return Err(LociError::InvalidArgument(
+                "surface must not be empty".to_string(),
+            ));
+        }
+
+        let plugin_name = self
+            .active_core_rewriter(CoreComponent::UiHost)
+            .ok_or_else(|| {
+                LociError::from(anyhow::anyhow!("no active ui host rewriter is configured"))
+            })?;
+        let plugin = self
+            .registry
+            .plugin_manager()
+            .get(plugin_name)
+            .ok_or_else(|| {
+                LociError::from(anyhow::anyhow!(
+                    "active ui host rewriter `{plugin_name}` is not registered"
+                ))
+            })?;
+
+        let declared = match surface_kind {
+            UiSurfaceKind::Panel => &plugin.manifest.contributes.ui_contributes.panels,
+            UiSurfaceKind::Window => &plugin.manifest.contributes.ui_contributes.windows,
+            UiSurfaceKind::Widget => &plugin.manifest.contributes.ui_contributes.widgets,
+        };
+        if !declared.iter().any(|candidate| candidate == surface) {
+            return Err(LociError::from(anyhow::anyhow!(
+                "ui {:?} `{surface}` is not declared by active ui host `{plugin_name}`",
+                surface_kind
+            )));
+        }
+
+        self.registry.event_bus().publish(&format!(
+            "ui_host/{plugin_name}/{}/{surface}",
+            ui_surface_kind_segment(surface_kind)
+        ))?;
+        Ok(format!(
+            "ui {:?} accepted by {plugin_name}: {surface}",
+            surface_kind
+        ))
     }
 
     pub fn event_inventory(&self) -> EventInventoryStatus {
@@ -1163,6 +1208,14 @@ fn with_gpu_layer_retry(mut backend_params: BackendParams, n_gpu_layers: i32) ->
     }
 }
 
+fn ui_surface_kind_segment(surface_kind: UiSurfaceKind) -> &'static str {
+    match surface_kind {
+        UiSurfaceKind::Panel => "panel",
+        UiSurfaceKind::Window => "window",
+        UiSurfaceKind::Widget => "widget",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1715,6 +1768,42 @@ mod tests {
                 },
             }
         );
+
+        let accepted = engine
+            .present_ui_surface(UiSurfaceKind::Panel, "inspector")
+            .expect("present declared panel");
+        assert_eq!(accepted, "ui Panel accepted by ui-shell: inspector");
+        assert_eq!(
+            engine.event_inventory().recent_events,
+            vec!["ui_host/ui-shell/panel/inspector".to_string()]
+        );
+
+        let undeclared = engine
+            .present_ui_surface(UiSurfaceKind::Widget, "missing")
+            .expect_err("undeclared widget should fail");
+        assert!(undeclared
+            .to_string()
+            .contains("is not declared by active ui host"));
+    }
+
+    #[test]
+    fn engine_ui_surface_requires_active_ui_host() {
+        let engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        let err = engine
+            .present_ui_surface(UiSurfaceKind::Panel, "inspector")
+            .expect_err("ui action should require activation");
+        assert!(err.to_string().contains("no active ui host rewriter"));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use loci_core::{
     CommandExecutionRequest, CoreRewriterActivationRequest, EventPublishRequest, ManagementService,
-    ModelLoadRequest, PluginLoadRequest, TextGenerationRequest, WorkflowExecutionRequest,
+    ModelLoadRequest, PluginLoadRequest, TextGenerationRequest, UiActionRequest,
+    WorkflowExecutionRequest,
 };
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -190,6 +191,20 @@ pub fn handle_management_request(
                 Err(error) => json_response(400, json!({ "error": error.to_string() })),
             }
         }
+        ("POST", "/v1/ui/present") => {
+            let ui_request = match ui_action_request_from_body(&request.body) {
+                Ok(ui_request) => ui_request,
+                Err(error) => return json_response(400, json!({ "error": error.to_string() })),
+            };
+
+            match service.present_ui_surface(ui_request) {
+                Ok(status) => match serde_json::to_value(status) {
+                    Ok(status) => json_response(200, status),
+                    Err(error) => json_response(500, json!({ "error": error.to_string() })),
+                },
+                Err(error) => json_response(400, json!({ "error": error.to_string() })),
+            }
+        }
         ("POST", "/v1/commands/run") => {
             let command_request = match command_execution_request_from_body(&request.body) {
                 Ok(command_request) => command_request,
@@ -326,6 +341,10 @@ fn text_generation_request_from_body(body: &[u8]) -> anyhow::Result<TextGenerati
 }
 
 fn workflow_execution_request_from_body(body: &[u8]) -> anyhow::Result<WorkflowExecutionRequest> {
+    serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON body: {error}"))
+}
+
+fn ui_action_request_from_body(body: &[u8]) -> anyhow::Result<UiActionRequest> {
     serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON body: {error}"))
 }
 
@@ -910,6 +929,65 @@ mod tests {
         assert_eq!(after_value["ui"]["panels"], json!(["inspector"]));
         assert_eq!(after_value["ui"]["windows"], json!(["governance"]));
         assert_eq!(after_value["ui"]["widgets"], json!(["status-pill"]));
+
+        let present = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/ui/present".to_string(),
+                body: br#"{"surface_kind":"panel","surface":"inspector"}"#.to_vec(),
+            },
+        );
+        assert_eq!(present.status_code, 200);
+        let present_value: Value = serde_json::from_slice(&present.body).expect("json");
+        assert_eq!(present_value["status"], "accepted");
+        assert_eq!(present_value["surface_kind"], "panel");
+        assert_eq!(present_value["surface"], "inspector");
+        assert_eq!(present_value["routed_plugin_name"], "ui-shell");
+    }
+
+    #[test]
+    fn ui_present_route_requires_activation_and_declared_surface() {
+        let service = ui_service();
+        let before = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/ui/present".to_string(),
+                body: br#"{"surface_kind":"panel","surface":"inspector"}"#.to_vec(),
+            },
+        );
+        assert_eq!(before.status_code, 400);
+        let before_value: Value = serde_json::from_slice(&before.body).expect("json");
+        assert!(before_value["error"]
+            .as_str()
+            .expect("error string")
+            .contains("no active ui host rewriter"));
+
+        let activation = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/core/rewriters/activate".to_string(),
+                body: br#"{"component":"ui_host","plugin_name":"ui-shell"}"#.to_vec(),
+            },
+        );
+        assert_eq!(activation.status_code, 200);
+
+        let undeclared = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/ui/present".to_string(),
+                body: br#"{"surface_kind":"widget","surface":"missing"}"#.to_vec(),
+            },
+        );
+        assert_eq!(undeclared.status_code, 400);
+        let undeclared_value: Value = serde_json::from_slice(&undeclared.body).expect("json");
+        assert!(undeclared_value["error"]
+            .as_str()
+            .expect("error string")
+            .contains("is not declared by active ui host"));
     }
 
     #[test]

@@ -7,7 +7,8 @@ use crate::control_plane::{
     ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus, ModelLoadStrategyRequest,
     PluginLoadRequest, PluginLoadSourceKind, PluginLoadStatus, PluginRuntimeDetail,
     PluginRuntimeStatus, RuntimeSnapshot, TextGenerationRequest, TextGenerationResponse,
-    UiInventoryStatus, WorkflowExecutionRequest, WorkflowExecutionStatus, WorkflowInventoryStatus,
+    UiActionRequest, UiActionStatus, UiInventoryStatus, WorkflowExecutionRequest,
+    WorkflowExecutionStatus, WorkflowInventoryStatus,
 };
 use crate::engine::InferenceEngine;
 use crate::error::{LociError, Result};
@@ -116,6 +117,33 @@ impl ManagementService {
 
     pub fn ui_inventory(&self) -> Result<UiInventoryStatus> {
         self.with_engine(|engine| Ok(engine.ui_inventory()))
+    }
+
+    pub fn present_ui_surface(&self, request: UiActionRequest) -> Result<UiActionStatus> {
+        self.with_engine(|engine| {
+            let surface = request.surface.trim().to_string();
+            if surface.is_empty() {
+                return Err(LociError::InvalidArgument(
+                    "surface must not be empty".to_string(),
+                ));
+            }
+
+            let routed_plugin_name = engine
+                .active_core_rewriter(CoreComponent::UiHost)
+                .ok_or_else(|| {
+                    LociError::from(anyhow::anyhow!("no active ui host rewriter is configured"))
+                })?
+                .to_string();
+
+            engine.present_ui_surface(request.surface_kind, &surface)?;
+
+            Ok(UiActionStatus {
+                status: "accepted",
+                surface_kind: request.surface_kind,
+                surface,
+                routed_plugin_name,
+            })
+        })
     }
 
     pub fn event_inventory(&self) -> Result<EventInventoryStatus> {
@@ -863,6 +891,16 @@ mod tests {
             }
         );
 
+        let missing_activation = service
+            .present_ui_surface(UiActionRequest {
+                surface_kind: crate::UiSurfaceKind::Panel,
+                surface: "inspector".to_string(),
+            })
+            .expect_err("ui action should require activation");
+        assert!(missing_activation
+            .to_string()
+            .contains("no active ui host rewriter"));
+
         service
             .activate_core_rewriter(CoreRewriterActivationRequest {
                 component: CoreComponent::UiHost,
@@ -881,6 +919,27 @@ mod tests {
                 },
             }
         );
+
+        let status = service
+            .present_ui_surface(UiActionRequest {
+                surface_kind: crate::UiSurfaceKind::Panel,
+                surface: "inspector".to_string(),
+            })
+            .expect("present panel");
+        assert_eq!(status.status, "accepted");
+        assert_eq!(status.surface_kind, crate::UiSurfaceKind::Panel);
+        assert_eq!(status.surface, "inspector");
+        assert_eq!(status.routed_plugin_name, "ui-shell");
+
+        let undeclared = service
+            .present_ui_surface(UiActionRequest {
+                surface_kind: crate::UiSurfaceKind::Widget,
+                surface: "missing".to_string(),
+            })
+            .expect_err("undeclared widget should fail");
+        assert!(undeclared
+            .to_string()
+            .contains("is not declared by active ui host"));
     }
 
     #[test]

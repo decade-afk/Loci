@@ -129,6 +129,28 @@ pub struct UiInventoryStatus {
     pub ui: PluginUiContributionStatus,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UiSurfaceKind {
+    Panel,
+    Window,
+    Widget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UiActionRequest {
+    pub surface_kind: UiSurfaceKind,
+    pub surface: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UiActionStatus {
+    pub status: &'static str,
+    pub surface_kind: UiSurfaceKind,
+    pub surface: String,
+    pub routed_plugin_name: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct EventInventoryStatus {
     pub active_event_bus_rewriter: Option<String>,
