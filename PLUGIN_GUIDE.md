@@ -1,138 +1,132 @@
 # Loci Plugin Guide
 
-Last updated: 2026-03-14
+This guide documents the plugin model used by the refactored workspace.
 
-This guide is the short practical entry point for plugin development in the current repository.
+## Design Rules
 
-## Plugin Families
+- Plugin manifests are the source of truth.
+- Runtime governance is activated at seam boundaries, not through hardcoded branches.
+- Legacy plugins may be bridged, but only inside the compatibility island.
+- Host products should treat plugin activation as an operational configuration change.
 
-Loci currently supports several extension families:
+## Main Crates
 
-- text runtime plugins
-- tool plugins
-- execution policy plugins
-- management auth policy plugins
-- serve dispatch policy plugins
-- model pull policy plugins
-- model pull verifier plugins
-- backend kernel plugins
-- image kernel plugins
-- WASM text plugins
+- `crates/plugin-api`: manifest schema and shared enums
+- `crates/core`: plugin discovery, registration, activation, runtime snapshot
+- `crates/legacy-plugin-api`: old plugin contract types
+- `crates/legacy-plugin-compat`: bounded bridge for old text plugins
 
-## Core Principles
+## Tracks
 
-- Plugins extend the runtime, not just prompt formatting.
-- Dynamic plugins should ship a sidecar manifest when possible.
-- Plugin names should be stable because registries, activation, and host configs depend on them.
-- Host software should treat plugin activation as an operational change, not just a code-load event.
+Plugins can target one or both platform tracks:
 
-## Manifest Contract
+- `ai_infra`
+- `ai_agent`
 
-Dynamic plugins may ship a sidecar manifest such as:
+If `target_tracks` is omitted, the manifest is treated as available to both tracks.
 
-- `my_plugin.loci-plugin.json`
-- `my_plugin.loci-plugin.toml`
+## Core Rewriter Seams
 
-The manifest is validated against:
+Plugins can declare ownership of the following core components:
 
-- plugin kind
-- ABI version
-- optional host version bounds
+- `inference`
+- `model`
+- `hardware`
+- `workflow`
+- `event_bus`
+- `plugin_manager`
+- `ui_host`
 
-Relevant implementation:
+Declaring a rewriter does not activate it by itself unless the plugin bootstrap explicitly requests activation or the host activates it through the management API.
 
-- `src/plugin_contract.rs`
+## Manifest Shape
 
-## Main Runtime Text Plugins
+Example:
 
-Text plugins participate in the generation hook chain.
+```toml
+name = "example-inference"
+version = "0.1.0"
+api_version = "1.0"
+target_tracks = ["ai_infra"]
 
-Relevant modules:
+[contributes]
+inference_hooks = ["sampling-profile"]
+commands = ["inference:activate"]
 
-- `src/plugin.rs`
-- `src/plugin_registry.rs`
-- `src/wasm_plugin.rs`
+[core_rewriters]
+inference = true
 
-Constructor pattern:
+[runtime]
+sampling_profile = "sampling-hook.toml"
+```
 
-- preferred: `create_plugin_v1()`
-- legacy fallback: `create_plugin()`
+Relevant sections:
 
-Reference examples:
+- root fields: identity and compatibility
+- `[contributes]`: declared capabilities surfaced in runtime inventory
+- `[core_rewriters]`: which core seams the plugin can govern
+- `[runtime]`: artifacts such as dynamic library paths, wasm paths, or sampling profiles
+- `[bootstrap]`: optional auto-activation list
+- `[compatibility]`: legacy bridge information
 
-- `examples/dynamic_plugin_example/`
-- `examples/openclaw_adapter_plugin/`
+## Example Bundles
 
-## Tool Plugins
+The repository ships manifest-first examples in:
 
-Tool plugins register callable functions into the function-calling subsystem.
+- `plugins/example-inference`
+- `plugins/example-infra`
+- `plugins/example-agent`
 
-Relevant module:
+These examples are intentionally simple and aligned with the current workspace architecture.
 
-- `src/tool_plugin.rs`
+## Loading Plugins
 
-Constructor pattern:
+At CLI startup:
 
-- preferred: `create_tool_plugin_v1()`
-- legacy fallback: `create_tool_plugin()`
+```bash
+cargo run -p loci-cli -- --plugin-dir plugins
+```
 
-Reference example:
+Over management HTTP:
 
-- `examples/browser_tool_plugin/`
+```bash
+curl http://127.0.0.1:8080/v1/plugins/load \
+  -H "Content-Type: application/json" \
+  -d "{\"path\":\"plugins\",\"source_kind\":\"directory\"}"
+```
 
-## Policy Plugins
+Load request shapes:
 
-Policy plugins let the host upgrade runtime governance without rewriting core engine code.
+- `source_kind = "bundle_file"` for a specific manifest file
+- `source_kind = "directory"` for recursive directory discovery
 
-Families:
+## Activating Governance
 
-- execution policy
-- management auth policy
-- serve dispatch policy
-- model pull policy
-- model pull verifier
+Activate a declared rewriter:
 
-Relevant modules:
+```bash
+curl http://127.0.0.1:8080/v1/core/rewriters/activate \
+  -H "Content-Type: application/json" \
+  -d "{\"component\":\"workflow\",\"plugin_name\":\"example-agent\"}"
+```
 
-- `src/execution_policy_plugin.rs`
-- `src/management_auth.rs`
-- `src/serve_dispatch.rs`
-- `src/model_pull_policy.rs`
-- `src/model_pull_verifier.rs`
+Inspect runtime status:
 
-Reference examples:
+```bash
+curl http://127.0.0.1:8080/v1/core/rewriters
+curl http://127.0.0.1:8080/v1/core/rewriters/inventory
+curl http://127.0.0.1:8080/v1/plugins
+curl http://127.0.0.1:8080/v1/plugins/example-agent
+```
 
-- `examples/execution_policy_plugin/`
-- `examples/management_auth_plugin/`
-- `examples/serve_dispatch_plugin/`
+## Legacy Compatibility
 
-## Backend and Image Kernel Plugins
+Legacy text plugins are still supported through compatibility metadata and explicit activation:
 
-These plugins extend execution kernels rather than prompt hooks.
+- `crates/legacy-plugin-api`
+- `crates/legacy-plugin-compat`
+- management routes:
+  - `POST /v1/legacy-text/activate`
+  - `POST /v1/legacy-text/deactivate`
 
-Relevant modules:
-
-- `src/backends/dynamic.rs`
-- `src/image_kernel.rs`
-
-Reference examples:
-
-- `examples/backend_kernel_plugin/`
-- `examples/image_kernel_plugin/`
-
-## Operational Advice
-
-- Prefer sidecar manifests for all dynamic plugins.
-- Keep plugin constructor names stable.
-- Use registry-backed activation in production rather than hard-coding plugin load order.
-- Treat policy plugin changes as governance changes and audit them.
-
-## Known Limitation
-
-Current dynamic plugin families still rely on opaque Rust trait-object payloads. This is safer than exposing raw trait pointers directly, but it is not yet a fully C-stable plugin ABI.
-
-For that reason:
-
-- keep host and plugin toolchains aligned
-- pin target triples consistently
-- treat dynamic plugin compatibility as part of release engineering
+This is intentionally a compatibility island. New plugins should target the manifest-first workspace contracts.

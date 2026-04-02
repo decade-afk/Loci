@@ -747,8 +747,10 @@ mod tests {
 
     #[test]
     fn runtime_route_returns_snapshot_json() {
+        let service = empty_service();
+        let expected_backends = service.backend_capabilities().expect("backends");
         let response = handle_management_request(
-            &empty_service(),
+            &service,
             HttpRequest {
                 method: "GET".to_string(),
                 path: "/v1/runtime".to_string(),
@@ -759,7 +761,10 @@ mod tests {
         assert_eq!(response.status_code, 200);
         let value: Value = serde_json::from_slice(&response.body).expect("json");
         assert_eq!(value["plugin_count"], 0);
-        assert_eq!(value["available_backends"][0]["name"], "mock");
+        assert_eq!(
+            value["available_backends"][0]["name"],
+            expected_backends[0].name.as_str()
+        );
         assert_eq!(value["active_model_path"], Value::Null);
         assert_eq!(value["active_model_info"], Value::Null);
         assert_eq!(value["legacy_text_candidates"], json!([]));
@@ -767,8 +772,10 @@ mod tests {
 
     #[test]
     fn backends_route_returns_available_backend_inventory() {
+        let service = empty_service();
+        let expected_backends = service.backend_capabilities().expect("backends");
         let response = handle_management_request(
-            &empty_service(),
+            &service,
             HttpRequest {
                 method: "GET".to_string(),
                 path: "/v1/backends".to_string(),
@@ -778,8 +785,11 @@ mod tests {
 
         assert_eq!(response.status_code, 200);
         let value: Value = serde_json::from_slice(&response.body).expect("json");
-        assert_eq!(value[0]["name"], "mock");
-        assert_eq!(value[0]["supports_text"], true);
+        assert_eq!(value[0]["name"], expected_backends[0].name.as_str());
+        assert_eq!(
+            value[0]["supports_text"],
+            Value::Bool(expected_backends[0].supports_text)
+        );
     }
 
     #[test]

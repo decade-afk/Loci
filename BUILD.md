@@ -1,280 +1,134 @@
 # Building Loci
 
-This document describes how to build Loci for different platforms and configurations.
+This repository is now a Rust workspace. Build the crate that matches the surface you actually want to ship.
+
+## Workspace Targets
+
+- `loci-core`: embeddable runtime and management service
+- `loci-cli`: `loci` binary
+- `loci-plugin-api`: shared plugin manifest/types crate
+- `loci-ffi`: native integration crate reserved for later ABI hardening
 
 ## Prerequisites
 
-### All Platforms
-- Rust 1.70 or later
-- CMake 3.15 or later
-- A C++ compiler
+All platforms:
 
-### Platform-Specific Requirements
+- Rust stable
+- CMake
+- a C/C++ toolchain
 
-#### Windows
-- **MSVC**: Visual Studio 2019 or later with C++ build tools
-- **MinGW**: MSYS2 with mingw-w64 toolchain
+For the optional `llama` feature:
 
-#### Linux
-- GCC 7+ or Clang 10+
-- Development libraries: `build-essential`, `cmake`, `ninja-build`
+- `deps/llama.cpp` submodule initialized
+- `libclang` available for bindgen
 
-#### macOS
-- Xcode Command Line Tools
-- CMake (via Homebrew: `brew install cmake`)
+Windows-specific `libclang` resolution is handled in `crates/core/build.rs` through:
 
-#### iOS
-- Xcode 14 or later
-- CMake and Ninja (via Homebrew)
+- `LIBCLANG_PATH`
+- `LLVM_HOME`
+- `CONDA_PREFIX`
+- common LLVM / Visual Studio paths
+- `PATH`
 
-#### Android
-- Android NDK r25c or later
-- CMake and Ninja
-
-## Building from Source
-
-### Quick Start
+## Clone
 
 ```bash
-# Clone the repository with submodules
-git clone --recursive https://github.com/decade-afk/loci.git
+git clone https://github.com/decade-afk/loci.git
 cd loci
-
-# Build the CLI tool
-cargo build --release
-
-# Build as library
-cargo build --release --lib
+git submodule update --init --recursive
 ```
 
-### Build Outputs
+## Build Commands
 
-After building, you'll find:
-
-#### Executable
-- Windows: `target/release/loci.exe`
-- Unix: `target/release/loci`
-
-#### Static Library
-- Windows MSVC: `target/release/loci.lib`
-- Windows GNU/Unix: `target/release/libloci.a`
-
-#### Dynamic Library
-- Windows: `target/release/loci.dll`
-- Linux: `target/release/libloci.so`
-- macOS: `target/release/libloci.dylib`
-
-## Cross-Compilation
-
-### Linux to Windows
+Build the CLI without optional backend bindings:
 
 ```bash
-# Install MinGW cross-compiler
-sudo apt-get install mingw-w64
-
-# Add Windows target
-rustup target add x86_64-pc-windows-gnu
-
-# Build
-cargo build --release --target x86_64-pc-windows-gnu
+cargo build -p loci-cli --release
 ```
 
-### macOS Universal Binary
+Build the CLI with `llama.cpp` enabled:
 
 ```bash
-# Build for both architectures
-cargo build --release --target x86_64-apple-darwin
-cargo build --release --target aarch64-apple-darwin
-
-# Create universal binary
-lipo -create \
-  target/x86_64-apple-darwin/release/loci \
-  target/aarch64-apple-darwin/release/loci \
-  -output loci-universal
+cargo build -p loci-cli --release --features llama
 ```
 
-### Building for iOS
+Build the core crate directly:
 
 ```bash
-# Add iOS targets
-rustup target add aarch64-apple-ios
-rustup target add x86_64-apple-ios
-rustup target add aarch64-apple-ios-sim
-
-# Mobile builds disable the optional WASM plugin runtime.
-
-# Build for device
-cargo build --release --lib --target aarch64-apple-ios --no-default-features --features auto-detect
-
-# Build for simulator
-cargo build --release --lib --target aarch64-apple-ios-sim --no-default-features --features auto-detect
+cargo build -p loci-core --release
 ```
 
-### Building for Android
+Build the core crate with `llama.cpp` enabled:
 
 ```bash
-# Install Android NDK
-# Set ANDROID_NDK_HOME environment variable
-
-# Add Android targets
-rustup target add aarch64-linux-android
-rustup target add armv7-linux-androideabi
-rustup target add x86_64-linux-android
-rustup target add i686-linux-android
-
-# Set up environment variables
-export CC_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
-export AR_aarch64_linux_android=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
-export CMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake
-export ANDROID_ABI=arm64-v8a
-export ANDROID_PLATFORM=android-24
-export ANDROID_STL=c++_shared
-
-# Build
-cargo build --release --lib --target aarch64-linux-android --no-default-features --features auto-detect
+cargo build -p loci-core --release --features llama
 ```
 
-## Using the C API
-
-Loci provides a C API for integration with other languages. After building the library, you can use it in your C/C++ projects:
-
-```c
-#include "loci.h"
-
-int main() {
-    // Create inference engine
-    LociEngine* engine = loci_engine_new("model.gguf", 4096, -1);
-    if (!engine) {
-        return 1;
-    }
-
-    // Generate text
-    char* result = loci_generate(engine, "Hello", 50, 0.8);
-    if (result) {
-        printf("%s\n", result);
-        loci_free_string(result);
-    }
-
-    // Cleanup
-    loci_engine_free(engine);
-    return 0;
-}
-```
-
-### Linking
-
-#### Static Linking (Recommended)
+Build the FFI crate:
 
 ```bash
-# Linux
-gcc your_app.c -I./include -L./target/release -lloci -ldl -lm -lpthread -o your_app
-
-# macOS
-clang your_app.c -I./include -L./target/release -lloci -framework CoreFoundation -o your_app
-
-# Windows (MSVC)
-cl your_app.c /I./include /link loci.lib
-
-# Windows (MinGW)
-gcc your_app.c -I./include -L./target/release -lloci -lws2_32 -o your_app.exe
+cargo build -p loci-ffi --release
 ```
 
-#### Dynamic Linking
+Build the FFI crate with `llama.cpp` enabled:
 
 ```bash
-# Linux
-gcc your_app.c -I./include -L./target/release -lloci -Wl,-rpath,'$ORIGIN' -o your_app
-
-# macOS
-clang your_app.c -I./include -L./target/release -lloci -Wl,-rpath,@loader_path -o your_app
-
-# Windows
-# Copy loci.dll to the same directory as your_app.exe
-gcc your_app.c -I./include -L./target/release -lloci -o your_app.exe
+cargo build -p loci-ffi --release --features llama
 ```
 
-## Platform-Specific Notes
+## Runtime Entry
 
-### Windows with MinGW
-
-When building with MinGW, you need to have the MinGW bin directory in your PATH:
+The primary runtime entry today is the CLI management server:
 
 ```bash
-export PATH="/c/msys64/mingw64/bin:$PATH"
-cargo build --release --target x86_64-pc-windows-gnu
+cargo run -p loci-cli --features llama -- \
+  --plugin-dir plugins \
+  --management-bind 127.0.0.1:8080
 ```
 
-### macOS ARM (M1/M2)
+CLI flags:
 
-Native compilation on Apple Silicon:
+- `--plugin-dir <path>`
+- `--activate-legacy-text-plugin <name>` (repeatable)
+- `--management-bind <host:port>`
+
+## Test Commands
+
+Workspace tests:
 
 ```bash
-cargo build --release --target aarch64-apple-darwin
+cargo test -q
 ```
 
-### Linux ARM (Raspberry Pi, etc.)
-
-For cross-compilation to ARM:
+`llama.cpp` integration tests:
 
 ```bash
-# Install cross-compilation toolchain
-sudo apt-get install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-
-# Add target
-rustup target add aarch64-unknown-linux-gnu
-
-# Build
-cargo build --release --target aarch64-unknown-linux-gnu
+cargo test -q -p loci-core --features llama
+cargo test -q -p loci-cli --features llama
 ```
 
-## Build Configuration
+Windows helper:
 
-You can customize the build using environment variables:
-
-- `LOCI_DISABLE_GPU`: Disable GPU support
-- `CMAKE_BUILD_TYPE`: Set to `Debug` or `Release` (default: Release)
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/full_test.ps1
+```
 
 ## Troubleshooting
 
-### CMake not found
-```bash
-# Ubuntu/Debian
-sudo apt-get install cmake
+If `bindgen` cannot find `libclang` on Windows, set one of:
 
-# macOS
-brew install cmake
-
-# Windows
-choco install cmake
+```powershell
+$env:LIBCLANG_PATH = "C:\\Program Files\\LLVM\\bin"
 ```
 
-### Bindgen errors
-Make sure you have libclang installed:
+or
 
-```bash
-# Ubuntu/Debian
-sudo apt-get install libclang-dev
-
-# macOS (usually included with Xcode)
-xcode-select --install
+```powershell
+$env:LLVM_HOME = "C:\\Program Files\\LLVM"
 ```
 
-### Link errors on Windows
-Ensure you have the correct MinGW DLLs (`libgomp-1.dll`, `libstdc++-6.dll`, `libwinpthread-1.dll`) in your PATH or copy them to the output directory.
+If you do not need real model backend binding for a given build, omit `--features llama`.
 
-## GitHub Actions
+## Non-Goals Of This Build Guide
 
-This repository includes GitHub Actions workflows that automatically build Loci for all supported platforms on every commit:
-
-- **Windows**: MSVC and MinGW (x86_64)
-- **Linux**: x86_64 and ARM64
-- **macOS**: Intel and Apple Silicon
-- **iOS**: Device (ARM64) and Simulator (x86_64, ARM64)
-- **Android**: ARM64, ARMv7, x86_64, x86
-
-Releases are automatically created when you push a tag starting with `v`:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
+This guide intentionally does not describe the removed root monolith, the removed `serve/generate` CLI, or the removed legacy example programs. The workspace crates above are the maintained entry points.

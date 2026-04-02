@@ -1,8 +1,0 @@
-<resources xmlns:tools="http://schemas.android.com/tools">
-    <style name="Theme.LociSample" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <item name="colorPrimary">@color/sample_primary</item>
-        <item name="colorPrimaryVariant">@color/sample_primary_dark</item>
-        <item name="colorSurface">@color/sample_surface</item>
-        <item name="android:statusBarColor" tools:targetApi="l">@color/sample_primary_dark</item>
-    </style>
-</resources>

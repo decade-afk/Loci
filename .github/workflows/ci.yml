@@ -2,9 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main, master, develop]
+    branches:
+      - main
+      - master
+      - develop
+      - refactor/new-architecture
   pull_request:
-    branches: [main, master, develop]
   workflow_dispatch:
 
 concurrency:
@@ -17,8 +20,8 @@ env:
   CARGO_NET_RETRY: "10"
 
 jobs:
-  tests:
-    name: Tests (${{ matrix.os }})
+  verify:
+    name: Verify (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -32,6 +35,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
 
       - name: Install dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
@@ -42,9 +47,6 @@ jobs:
       - name: Configure bindgen (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
 
       - name: Configure bindgen (Windows)
         if: matrix.os == 'windows-latest'
@@ -67,87 +69,23 @@ jobs:
           }
           Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=$($libclang.DirectoryName)"
 
-      - name: Cargo check
-        run: cargo check --locked
-
-      - name: Run c_api focused tests
-        run: |
-          cargo test --locked --lib c_api::tests:: -- --nocapture
-
-      - name: Run plugin registry tests
-        run: |
-          cargo test --locked --lib plugin_registry::tests:: -- --nocapture
-
-      - name: Run CLI parsing/tests
-        run: cargo test --locked --bin loci -- --nocapture
-
-      - name: Run OpenClaw adapter plugin tests
-        run: cargo test --offline --manifest-path examples/openclaw_adapter_plugin/Cargo.toml -- --nocapture
-
-  windows-artifacts:
-    name: Build Windows Artifacts
-    needs: tests
-    runs-on: windows-latest
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
 
-      - name: Configure bindgen (Windows)
-        shell: pwsh
-        run: |
-          $libclang = Get-ChildItem -Path @(
-            'C:\Program Files\LLVM\bin\libclang.dll',
-            'D:\Program Files\LLVM\bin\libclang.dll',
-            'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\bin\libclang.dll',
-            'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\*\bin\libclang.dll',
-            'C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Tools\Llvm\bin\libclang.dll',
-            'C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Tools\Llvm\*\bin\libclang.dll',
-            'D:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\bin\libclang.dll',
-            'D:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\Llvm\*\bin\libclang.dll',
-            'D:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Tools\Llvm\bin\libclang.dll',
-            'D:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Tools\Llvm\*\bin\libclang.dll'
-          ) -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $libclang) {
-            throw 'libclang.dll not found on the GitHub runner'
-          }
-          Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=$($libclang.DirectoryName)"
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
-      - name: Build core binaries/libraries
-        run: cargo build --locked --release --lib --bin loci
+      - name: Run workspace tests
+        run: cargo test -q
 
-      - name: Build plugin examples
-        run: |
-          cargo build --offline --release --manifest-path examples/openclaw_adapter_plugin/Cargo.toml
-          cargo build --offline --release --manifest-path examples/backend_kernel_plugin/Cargo.toml
-          cargo build --offline --release --manifest-path examples/image_kernel_plugin/Cargo.toml
+      - name: Run loci-core llama tests
+        run: cargo test -q -p loci-core --features llama
 
-      - name: Package artifacts
-        shell: pwsh
-        run: |
-          $dist = "dist/loci-windows-x64"
-          New-Item -ItemType Directory -Path "$dist/plugins" -Force | Out-Null
-          Copy-Item "target/release/loci.exe" "$dist/loci.exe" -Force
-          Copy-Item "target/release/loci.dll" "$dist/loci.dll" -Force
-          Copy-Item "include/loci.h" "$dist/loci.h" -Force
-          Copy-Item "scripts/plugin_hot_swap_smoke.ps1" "$dist/plugin_hot_swap_smoke.ps1" -Force
-          Copy-Item "examples/openclaw_adapter_plugin/target/release/openclaw_adapter_plugin.dll" "$dist/plugins/openclaw_adapter_plugin.dll" -Force
-          Copy-Item "examples/backend_kernel_plugin/target/release/backend_kernel_plugin.dll" "$dist/plugins/backend_kernel_plugin.dll" -Force
-          Copy-Item "examples/image_kernel_plugin/target/release/image_kernel_plugin.dll" "$dist/plugins/image_kernel_plugin.dll" -Force
-          "commit=${{ github.sha }}" | Out-File "$dist/BUILD_INFO.txt" -Encoding ascii
-          Compress-Archive -Path "$dist/*" -DestinationPath "dist/loci-windows-x64.zip" -Force
+      - name: Run loci-cli llama tests
+        run: cargo test -q -p loci-cli --features llama
 
-      - name: Upload windows artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: loci-windows-x64
-          path: dist/loci-windows-x64.zip
-          retention-days: 14
+      - name: Build loci-cli with llama
+        run: cargo build -q -p loci-cli --release --features llama
+
+      - name: Build loci-ffi with llama
+        run: cargo build -q -p loci-ffi --release --features llama

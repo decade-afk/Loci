@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+llama = ["loci-core/llama"]
+
 [dependencies]
 loci-core = { path = "../core" }
 anyhow.workspace = true
