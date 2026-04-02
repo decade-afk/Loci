@@ -433,6 +433,47 @@ impl InferenceEngine {
         }
     }
 
+    pub fn run_workflow(&self, workflow: &str) -> Result<String> {
+        let workflow = workflow.trim();
+        if workflow.is_empty() {
+            return Err(LociError::InvalidArgument(
+                "workflow must not be empty".to_string(),
+            ));
+        }
+
+        let plugin_name = self
+            .active_core_rewriter(CoreComponent::Workflow)
+            .ok_or_else(|| {
+                LociError::from(anyhow::anyhow!("no active workflow rewriter is configured"))
+            })?;
+        let plugin = self
+            .registry
+            .plugin_manager()
+            .get(plugin_name)
+            .ok_or_else(|| {
+                LociError::from(anyhow::anyhow!(
+                    "active workflow rewriter `{plugin_name}` is not registered"
+                ))
+            })?;
+
+        if !plugin
+            .manifest
+            .contributes
+            .workflows
+            .iter()
+            .any(|candidate| candidate == workflow)
+        {
+            return Err(LociError::from(anyhow::anyhow!(
+                "workflow `{workflow}` is not declared by active workflow rewriter `{plugin_name}`"
+            )));
+        }
+
+        self.registry
+            .event_bus()
+            .publish(&format!("workflow/{plugin_name}/{workflow}"))?;
+        Ok(format!("workflow accepted by {plugin_name}: {workflow}"))
+    }
+
     pub fn ui_inventory(&self) -> UiInventoryStatus {
         let active_ui_host = self
             .active_core_rewriter(CoreComponent::UiHost)
@@ -1424,6 +1465,39 @@ mod tests {
                 workflows: vec!["agent.plan".to_string(), "agent.review".to_string()],
             }
         );
+
+        let missing_activation = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        }
+        .run_workflow("agent.plan")
+        .expect_err("workflow should require activation");
+        assert!(missing_activation
+            .to_string()
+            .contains("no active workflow rewriter"));
+
+        let status = engine
+            .run_workflow("agent.plan")
+            .expect("run declared workflow");
+        assert_eq!(status, "workflow accepted by agent-workflow: agent.plan");
+        assert_eq!(
+            engine.event_inventory().recent_events,
+            vec!["workflow/agent-workflow/agent.plan".to_string()]
+        );
+
+        let undeclared = engine
+            .run_workflow("agent.missing")
+            .expect_err("undeclared workflow should fail");
+        assert!(undeclared
+            .to_string()
+            .contains("is not declared by active workflow rewriter"));
     }
 
     #[test]

@@ -111,6 +111,18 @@ pub struct WorkflowInventoryStatus {
     pub workflows: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowExecutionRequest {
+    pub workflow: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorkflowExecutionStatus {
+    pub status: &'static str,
+    pub workflow: String,
+    pub routed_plugin_name: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct UiInventoryStatus {
     pub active_ui_host: Option<String>,

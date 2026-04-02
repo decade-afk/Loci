@@ -7,7 +7,7 @@ use crate::control_plane::{
     ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus, ModelLoadStrategyRequest,
     PluginLoadRequest, PluginLoadSourceKind, PluginLoadStatus, PluginRuntimeDetail,
     PluginRuntimeStatus, RuntimeSnapshot, TextGenerationRequest, TextGenerationResponse,
-    UiInventoryStatus, WorkflowInventoryStatus,
+    UiInventoryStatus, WorkflowExecutionRequest, WorkflowExecutionStatus, WorkflowInventoryStatus,
 };
 use crate::engine::InferenceEngine;
 use crate::error::{LociError, Result};
@@ -83,6 +83,35 @@ impl ManagementService {
 
     pub fn workflow_inventory(&self) -> Result<WorkflowInventoryStatus> {
         self.with_engine(|engine| Ok(engine.workflow_inventory()))
+    }
+
+    pub fn run_workflow(
+        &self,
+        request: WorkflowExecutionRequest,
+    ) -> Result<WorkflowExecutionStatus> {
+        self.with_engine(|engine| {
+            let workflow = request.workflow.trim().to_string();
+            if workflow.is_empty() {
+                return Err(LociError::InvalidArgument(
+                    "workflow must not be empty".to_string(),
+                ));
+            }
+
+            let routed_plugin_name = engine
+                .active_core_rewriter(CoreComponent::Workflow)
+                .ok_or_else(|| {
+                    LociError::from(anyhow::anyhow!("no active workflow rewriter is configured"))
+                })?
+                .to_string();
+
+            engine.run_workflow(&workflow)?;
+
+            Ok(WorkflowExecutionStatus {
+                status: "accepted",
+                workflow,
+                routed_plugin_name,
+            })
+        })
     }
 
     pub fn ui_inventory(&self) -> Result<UiInventoryStatus> {
@@ -776,6 +805,15 @@ mod tests {
             }
         );
 
+        let missing_activation = service
+            .run_workflow(WorkflowExecutionRequest {
+                workflow: "agent.plan".to_string(),
+            })
+            .expect_err("workflow should require activation");
+        assert!(missing_activation
+            .to_string()
+            .contains("no active workflow rewriter"));
+
         service
             .activate_core_rewriter(CoreRewriterActivationRequest {
                 component: CoreComponent::Workflow,
@@ -790,6 +828,24 @@ mod tests {
                 workflows: vec!["agent.plan".to_string(), "agent.review".to_string()],
             }
         );
+
+        let status = service
+            .run_workflow(WorkflowExecutionRequest {
+                workflow: "agent.plan".to_string(),
+            })
+            .expect("run workflow");
+        assert_eq!(status.status, "accepted");
+        assert_eq!(status.workflow, "agent.plan");
+        assert_eq!(status.routed_plugin_name, "workflow-override");
+
+        let undeclared = service
+            .run_workflow(WorkflowExecutionRequest {
+                workflow: "agent.missing".to_string(),
+            })
+            .expect_err("undeclared workflow should fail");
+        assert!(undeclared
+            .to_string()
+            .contains("is not declared by active workflow rewriter"));
     }
 
     #[test]

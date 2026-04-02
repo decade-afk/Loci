@@ -1,6 +1,6 @@
 use loci_core::{
     CommandExecutionRequest, CoreRewriterActivationRequest, EventPublishRequest, ManagementService,
-    ModelLoadRequest, PluginLoadRequest, TextGenerationRequest,
+    ModelLoadRequest, PluginLoadRequest, TextGenerationRequest, WorkflowExecutionRequest,
 };
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -176,6 +176,20 @@ pub fn handle_management_request(
                 Err(error) => json_response(400, json!({ "error": error.to_string() })),
             }
         }
+        ("POST", "/v1/workflows/run") => {
+            let workflow_request = match workflow_execution_request_from_body(&request.body) {
+                Ok(workflow_request) => workflow_request,
+                Err(error) => return json_response(400, json!({ "error": error.to_string() })),
+            };
+
+            match service.run_workflow(workflow_request) {
+                Ok(status) => match serde_json::to_value(status) {
+                    Ok(status) => json_response(200, status),
+                    Err(error) => json_response(500, json!({ "error": error.to_string() })),
+                },
+                Err(error) => json_response(400, json!({ "error": error.to_string() })),
+            }
+        }
         ("POST", "/v1/commands/run") => {
             let command_request = match command_execution_request_from_body(&request.body) {
                 Ok(command_request) => command_request,
@@ -308,6 +322,10 @@ fn core_rewriter_activation_request_from_body(
 }
 
 fn text_generation_request_from_body(body: &[u8]) -> anyhow::Result<TextGenerationRequest> {
+    serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON body: {error}"))
+}
+
+fn workflow_execution_request_from_body(body: &[u8]) -> anyhow::Result<WorkflowExecutionRequest> {
     serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON body: {error}"))
 }
 
@@ -788,6 +806,64 @@ mod tests {
             after_value["workflows"],
             json!(["agent.plan", "agent.review"])
         );
+
+        let run = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/workflows/run".to_string(),
+                body: br#"{"workflow":"agent.plan"}"#.to_vec(),
+            },
+        );
+        assert_eq!(run.status_code, 200);
+        let run_value: Value = serde_json::from_slice(&run.body).expect("json");
+        assert_eq!(run_value["status"], "accepted");
+        assert_eq!(run_value["workflow"], "agent.plan");
+        assert_eq!(run_value["routed_plugin_name"], "workflow-override");
+    }
+
+    #[test]
+    fn workflow_run_route_requires_activation_and_declared_workflow() {
+        let service = workflow_service();
+        let before = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/workflows/run".to_string(),
+                body: br#"{"workflow":"agent.plan"}"#.to_vec(),
+            },
+        );
+        assert_eq!(before.status_code, 400);
+        let before_value: Value = serde_json::from_slice(&before.body).expect("json");
+        assert!(before_value["error"]
+            .as_str()
+            .expect("error string")
+            .contains("no active workflow rewriter"));
+
+        let activation = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/core/rewriters/activate".to_string(),
+                body: br#"{"component":"workflow","plugin_name":"workflow-override"}"#.to_vec(),
+            },
+        );
+        assert_eq!(activation.status_code, 200);
+
+        let undeclared = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/workflows/run".to_string(),
+                body: br#"{"workflow":"agent.missing"}"#.to_vec(),
+            },
+        );
+        assert_eq!(undeclared.status_code, 400);
+        let undeclared_value: Value = serde_json::from_slice(&undeclared.body).expect("json");
+        assert!(undeclared_value["error"]
+            .as_str()
+            .expect("error string")
+            .contains("is not declared by active workflow rewriter"));
     }
 
     #[test]
