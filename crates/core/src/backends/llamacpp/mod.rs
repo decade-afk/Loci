@@ -136,7 +136,7 @@ impl InferenceBackend for LlamaCppBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::BackendParams;
+    use crate::backend::{BackendParams, GpuSplitMode};
     use crate::backends::llamacpp::adapter::{LlamaCppBuildIntegration, LlamaCppSourceLayout};
     use std::path::{Path, PathBuf};
 
@@ -168,6 +168,7 @@ mod tests {
         assert_eq!(plan.n_gpu_layers(), 0);
         assert!(!plan.kv_offload());
         assert!(!plan.op_offload());
+        assert_eq!(plan.split_mode(), GpuSplitMode::None);
         assert_eq!(plan.main_gpu(), 0);
         assert!(plan.tensor_split().is_none());
     }

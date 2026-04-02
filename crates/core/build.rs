@@ -13,7 +13,11 @@ fn main() {
         .expect("workspace root")
         .to_path_buf();
     let llama_cpp_path = workspace_root.join("deps").join("llama.cpp");
-    let ffi_shim = manifest_dir.join("src").join("backends").join("llamacpp").join("ffi_shim.c");
+    let ffi_shim = manifest_dir
+        .join("src")
+        .join("backends")
+        .join("llamacpp")
+        .join("ffi_shim.c");
 
     println!("cargo:rerun-if-changed={}", llama_cpp_path.display());
     println!("cargo:rerun-if-changed={}", ffi_shim.display());
@@ -60,9 +64,18 @@ fn main() {
     link_system_libraries(&target);
 
     let bindings = bindgen::Builder::default()
-        .header(llama_cpp_path.join("include").join("llama.h").display().to_string())
+        .header(
+            llama_cpp_path
+                .join("include")
+                .join("llama.h")
+                .display()
+                .to_string(),
+        )
         .clang_arg(format!("-I{}", llama_cpp_path.join("include").display()))
-        .clang_arg(format!("-I{}", llama_cpp_path.join("ggml").join("include").display()))
+        .clang_arg(format!(
+            "-I{}",
+            llama_cpp_path.join("ggml").join("include").display()
+        ))
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("Unable to generate llama.cpp bindings");
@@ -78,7 +91,10 @@ fn configure_bindgen_environment(target: &str) {
     }
 
     if let Some(path) = resolve_libclang_dir(target) {
-        println!("cargo:warning=Using detected libclang from {}", path.display());
+        println!(
+            "cargo:warning=Using detected libclang from {}",
+            path.display()
+        );
         env::set_var("LIBCLANG_PATH", path);
     }
 }
@@ -88,17 +104,94 @@ fn resolve_libclang_dir(target: &str) -> Option<PathBuf> {
         return None;
     }
 
-    let candidates = [
-        PathBuf::from(r"D:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\Llvm\x64\bin"),
-        PathBuf::from(r"D:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\Llvm\bin"),
-        PathBuf::from(r"D:\Code\LocalTrans\tools\llvm-portable\clang+llvm-22.1.1-x86_64-pc-windows-msvc\bin"),
-        PathBuf::from(r"C:\Users\o-dream\.conda\envs\localtrans\Lib\site-packages\clang\native"),
-        PathBuf::from(r"C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\8a15007674ba9201\tools\llvm-portable\clang+llvm-22.1.1-x86_64-pc-windows-msvc\bin"),
-    ];
-
-    candidates
+    libclang_candidates()
         .into_iter()
         .find(|dir| dir.join("libclang.dll").exists() || dir.join("clang.dll").exists())
+}
+
+fn libclang_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(llvm_home) = env::var_os("LLVM_HOME") {
+        candidates.push(PathBuf::from(&llvm_home).join("bin"));
+        candidates.push(PathBuf::from(llvm_home));
+    }
+
+    if let Some(conda_prefix) = env::var_os("CONDA_PREFIX") {
+        candidates.push(PathBuf::from(conda_prefix).join("Library").join("bin"));
+    }
+
+    if let Some(program_files) = env::var_os("ProgramFiles") {
+        candidates.push(PathBuf::from(&program_files).join("LLVM").join("bin"));
+        candidates.push(
+            PathBuf::from(program_files)
+                .join("Microsoft Visual Studio")
+                .join("2022")
+                .join("BuildTools")
+                .join("VC")
+                .join("Tools")
+                .join("Llvm")
+                .join("x64")
+                .join("bin"),
+        );
+    }
+
+    if let Some(program_files_x86) = env::var_os("ProgramFiles(x86)") {
+        candidates.push(PathBuf::from(&program_files_x86).join("LLVM").join("bin"));
+        candidates.push(
+            PathBuf::from(&program_files_x86)
+                .join("Microsoft Visual Studio")
+                .join("2022")
+                .join("BuildTools")
+                .join("VC")
+                .join("Tools")
+                .join("Llvm")
+                .join("x64")
+                .join("bin"),
+        );
+        candidates.push(
+            PathBuf::from(program_files_x86)
+                .join("Microsoft Visual Studio")
+                .join("2022")
+                .join("BuildTools")
+                .join("VC")
+                .join("Tools")
+                .join("Llvm")
+                .join("bin"),
+        );
+    }
+
+    if let Some(path) = env::var_os("PATH") {
+        candidates.extend(env::split_paths(&path));
+    }
+
+    if let Some(user_profile) = env::var_os("USERPROFILE") {
+        let conda_envs = PathBuf::from(user_profile).join(".conda").join("envs");
+        if let Ok(entries) = std::fs::read_dir(conda_envs) {
+            for entry in entries.flatten() {
+                candidates.push(
+                    entry
+                        .path()
+                        .join("Lib")
+                        .join("site-packages")
+                        .join("clang")
+                        .join("native"),
+                );
+            }
+        }
+    }
+
+    let mut deduped = Vec::new();
+    for candidate in candidates {
+        if !deduped
+            .iter()
+            .any(|existing: &PathBuf| existing == &candidate)
+        {
+            deduped.push(candidate);
+        }
+    }
+
+    deduped
 }
 
 fn link_libraries(target: &str) {

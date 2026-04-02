@@ -37,9 +37,17 @@ impl LlamaCppLoadPlan {
         let n_gpu_layers = if gpu_active { params.n_gpu_layers } else { 0 };
         let kv_offload = gpu_active && params.kv_offload;
         let op_offload = gpu_active && params.op_offload;
-        let split_mode = if gpu_active { params.split_mode } else { GpuSplitMode::Layer };
+        let split_mode = if gpu_active {
+            params.split_mode
+        } else {
+            GpuSplitMode::None
+        };
         let main_gpu = if gpu_active { params.main_gpu } else { 0 };
-        let tensor_split = if gpu_active { params.tensor_split } else { None };
+        let tensor_split = if gpu_active {
+            params.tensor_split
+        } else {
+            None
+        };
 
         Ok(Self {
             model_path: model_path.to_path_buf(),
@@ -77,22 +85,50 @@ impl LlamaCppLoadPlan {
         )
     }
 
-    pub fn model_path(&self) -> &Path { &self.model_path }
-    pub fn runtime(&self) -> &LlamaCppRuntimeOptions { &self.runtime }
-    pub fn gpu_active(&self) -> bool { self.gpu_active }
-    pub fn n_gpu_layers(&self) -> i32 { self.n_gpu_layers }
-    pub fn use_mmap(&self) -> bool { self.use_mmap }
-    pub fn use_mlock(&self) -> bool { self.use_mlock }
-    pub fn kv_offload(&self) -> bool { self.kv_offload }
-    pub fn op_offload(&self) -> bool { self.op_offload }
-    pub fn split_mode(&self) -> GpuSplitMode { self.split_mode }
-    pub fn main_gpu(&self) -> u32 { self.main_gpu }
-    pub fn tensor_split(&self) -> Option<&Vec<f32>> { self.tensor_split.as_ref() }
+    pub fn model_path(&self) -> &Path {
+        &self.model_path
+    }
+    pub fn runtime(&self) -> &LlamaCppRuntimeOptions {
+        &self.runtime
+    }
+    pub fn gpu_active(&self) -> bool {
+        self.gpu_active
+    }
+    pub fn n_gpu_layers(&self) -> i32 {
+        self.n_gpu_layers
+    }
+    pub fn use_mmap(&self) -> bool {
+        self.use_mmap
+    }
+    pub fn use_mlock(&self) -> bool {
+        self.use_mlock
+    }
+    pub fn kv_offload(&self) -> bool {
+        self.kv_offload
+    }
+    pub fn op_offload(&self) -> bool {
+        self.op_offload
+    }
+    pub fn split_mode(&self) -> GpuSplitMode {
+        self.split_mode
+    }
+    pub fn main_gpu(&self) -> u32 {
+        self.main_gpu
+    }
+    pub fn tensor_split(&self) -> Option<&Vec<f32>> {
+        self.tensor_split.as_ref()
+    }
 
     pub fn tensor_split_summary(&self) -> String {
         self.tensor_split
             .as_ref()
-            .map(|values| values.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","))
+            .map(|values| {
+                values
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
             .unwrap_or_else(|| "none".to_string())
     }
 }
@@ -100,7 +136,11 @@ impl LlamaCppLoadPlan {
 impl LlamaCppRuntimeOptions {
     #[cfg(test)]
     pub fn new(n_ctx: u32, n_batch: u32, n_threads: Option<u32>) -> Self {
-        Self { n_ctx, n_batch, n_threads }
+        Self {
+            n_ctx,
+            n_batch,
+            n_threads,
+        }
     }
 
     pub fn from_backend_options(options: &[(String, String)]) -> Result<Self> {
@@ -109,22 +149,38 @@ impl LlamaCppRuntimeOptions {
         let n_threads = find_option_u32(options, "n_threads")?;
 
         if n_ctx == 0 {
-            return Err(LociError::ConfigError("llama.cpp requires n_ctx > 0".to_string()));
+            return Err(LociError::ConfigError(
+                "llama.cpp requires n_ctx > 0".to_string(),
+            ));
         }
         if n_batch == 0 {
-            return Err(LociError::ConfigError("llama.cpp requires n_batch > 0".to_string()));
+            return Err(LociError::ConfigError(
+                "llama.cpp requires n_batch > 0".to_string(),
+            ));
         }
 
-        Ok(Self { n_ctx, n_batch, n_threads })
+        Ok(Self {
+            n_ctx,
+            n_batch,
+            n_threads,
+        })
     }
 
     pub fn supports(&self, params: &InferenceParams) -> bool {
-        self.n_ctx == params.n_ctx && self.n_batch == params.n_batch && self.n_threads == params.n_threads
+        self.n_ctx == params.n_ctx
+            && self.n_batch == params.n_batch
+            && self.n_threads == params.n_threads
     }
 
-    pub fn n_ctx(&self) -> u32 { self.n_ctx }
-    pub fn n_batch(&self) -> u32 { self.n_batch }
-    pub fn n_threads(&self) -> Option<u32> { self.n_threads }
+    pub fn n_ctx(&self) -> u32 {
+        self.n_ctx
+    }
+    pub fn n_batch(&self) -> u32 {
+        self.n_batch
+    }
+    pub fn n_threads(&self) -> Option<u32> {
+        self.n_threads
+    }
 }
 
 fn validate_model_path(model_path: &Path) -> Result<()> {
@@ -150,7 +206,9 @@ fn find_option_u32(options: &[(String, String)], key: &str) -> Result<Option<u32
         .find(|(candidate, _)| candidate == key)
         .map(|(_, value)| {
             value.parse::<u32>().map_err(|_| {
-                LociError::ConfigError(format!("invalid llama.cpp backend option `{key}`: `{value}`"))
+                LociError::ConfigError(format!(
+                    "invalid llama.cpp backend option `{key}`: `{value}`"
+                ))
             })
         })
         .transpose()

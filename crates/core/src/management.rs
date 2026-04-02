@@ -761,8 +761,10 @@ mod tests {
         let service = empty_service();
         let snapshot = service.runtime_snapshot().expect("snapshot");
         assert_eq!(snapshot.plugin_count, 0);
-        assert_eq!(snapshot.available_backends.len(), 1);
-        assert_eq!(snapshot.available_backends[0].name, "mock");
+        assert!(snapshot
+            .available_backends
+            .iter()
+            .any(|backend| backend.name == "mock"));
         assert_eq!(snapshot.active_model_path, None);
         assert_eq!(snapshot.active_model_info, None);
         assert!(snapshot.configured_core_rewriters.is_empty());
@@ -772,9 +774,11 @@ mod tests {
     fn service_lists_available_backends() {
         let service = empty_service();
         let backends = service.backend_capabilities().expect("backends");
-        assert_eq!(backends.len(), 1);
-        assert_eq!(backends[0].name, "mock");
-        assert!(backends[0].supports_text);
+        let mock = backends
+            .iter()
+            .find(|backend| backend.name == "mock")
+            .expect("mock backend");
+        assert!(mock.supports_text);
     }
 
     #[test]
