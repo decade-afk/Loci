@@ -1,0 +1,12 @@
+name = "example-infra"
+version = "0.1.0"
+api_version = "1.0"
+target_tracks = ["ai_infra"]
+
+[contributes]
+model_providers = ["private-registry"]
+inference_hooks = ["pre_tokenize"]
+commands = ["infra:warmup"]
+
+[core_rewriters]
+model = true

@@ -1,147 +1,24 @@
-[package]
-name = "loci"
+[workspace]
+members = [
+    "crates/cli",
+    "crates/core",
+    "crates/legacy-plugin-compat",
+    "crates/legacy-plugin-api",
+    "crates/ffi",
+    "crates/plugin-api",
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["Creative Studio Team"]
-description = "Local AI inference core for Creative Studio - Phase 1 Implementation"
 license = "MIT"
-repository = "https://github.com/your-org/loci"
-readme = "README.md"
+authors = ["o-dream"]
 
-# Key configuration: support multiple library types for different platforms
-[lib]
-crate-type = ["cdylib", "staticlib", "rlib"]
-
-# ==================== Phase 1: Direct integration dependencies ====================
-[dependencies]
-# Zero-copy file loading
-memmap2 = "0.9"
-
-# Async runtime
-tokio = { version = "1", features = ["full"] }
-
-# High-performance locks
-parking_lot = "0.12"
-
-# System info detection
-sysinfo = "0.32"
-
-# Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "0.8"                # TOML parsing (plugin manifests)
-
-# Error handling
-thiserror = "1.0"
+[workspace.dependencies]
 anyhow = "1.0"
-
-# UUID generation
-uuid = { version = "1.19.0", features = ["v4"] }
-
-# Byte order handling (GGUF parsing)
-byteorder = "1.5"
-
-# Logging
-log = "0.4"
-env_logger = "0.11"
-
-# CPU info detection
-num_cpus = "1.16"
-
-# [Phase 1] Random number generation (Sampling)
-rand = "0.8"
-
-# [Phase 2 Week 2] Regular expressions (Constraint Sampling)
-regex = "1"
-
-# [Phase 2 Week 5] Plugin system security sandbox (dual-track: Native + WASM)
-wasmtime = "26.0"           # WASM runtime (2025 most mature)
-ed25519-dalek = "2.1"       # Ed25519 signature verification
-sha2 = "0.10"               # SHA-256 hashing
-libloading = "0.8"          # Dynamic library loading (Native plugins)
-once_cell = "1.21"          # Global singleton
-
-# Plugin extraction support
-flate2 = "1.0"              # gzip decompression
-tar = "0.4"                 # tar archive
-zip = "2.1"                 # zip archive
-
-# [Phase 4 Week 1-2] Enterprise security and deployment
-aes-gcm = "0.10"            # AES-256-GCM encryption
-zeroize = "1.8"             # Key auto-zeroing
-hex = "0.4"                 # Hex encoding/decoding
-
-# ==================== Phase 3: Mobile platform support ====================
-# Android platform dependencies
-[target.'cfg(target_os = "android")'.dependencies]
-jni = "0.21"                # Java Native Interface (Android interop)
-ndk = "0.9"                 # Android NDK bindings
-ndk-context = "0.1"         # NDK context management
-
-# iOS platform dependencies
-[target.'cfg(target_os = "ios")'.dependencies]
-objc = "0.2"                # Objective-C runtime
-block = "0.1"               # Objective-C block support
-
-# ==================== Phase 1: Build dependencies ====================
-[build-dependencies]
-cmake = "0.1"
-cc = "1.0"
-cbindgen = "0.27"  # Generate C header file (loci.h)
-
-[dev-dependencies]
-tokio-test = "0.4"
-criterion = { version = "0.5", features = ["html_reports"] }  # Performance benchmarking
-
-# ==================== Benchmark configuration ====================
-# [[bench]]
-# name = "performance_benchmarks"
-# harness = false  # Use Criterion as test framework
-
-# [[bench]]
-# name = "benchmark_suite"
-# harness = false  # Loci official benchmark suite
-
-# ==================== Compilation optimization configuration ====================
-[profile.release]
-opt-level = 3          # Highest optimization
-lto = "fat"            # Link-time optimization (more aggressive)
-codegen-units = 1      # Single compilation unit
-strip = true           # Remove debug symbols
-panic = "abort"        # Panic aborts directly
-
-[profile.dev]
-opt-level = 0
-debug = true
-
-# ==================== Phase 1: Feature Flags ====================
-[features]
-default = ["cpu"]
-
-# Basic backends
-cpu = []
-avx2 = []
-avx512 = []
-
-# GPU acceleration
-cuda = []
-metal = []
-rocm = []
-vulkan = []
-
-# OpenMP support
-openmp = []
-
-# Development features
-debug-logging = []
-
-# Phase 3: Mobile FFI (for testing and desktop platform export)
-mobile-ffi = []
-
-# ==================== Workspace配置 ====================
-# [[example]]
-# name = "loci-cli"
-# path = "examples/loci-cli/src/main.rs"
-
-# [workspace]
-# members = ["examples/loci-cli"]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+toml = "0.8"
+libloading = "0.8"

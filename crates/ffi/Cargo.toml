@@ -1,0 +1,19 @@
+[package]
+name = "loci-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+llama = ["loci-core/llama"]
+
+[dependencies]
+loci-core = { path = "../core" }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+[lib]
+name = "loci"
+crate-type = ["cdylib", "staticlib", "lib"]

@@ -1,127 +1,176 @@
-# 🚀 Loci - The Programmable Local AI Engine
+# Loci
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/Rust-1.85+-orange.svg)](https://www.rust-lang.org/)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Android%20%7C%20iOS-blue.svg)](https://github.com/decade-afk/Loci)
+Loci is a plugin-governed local AI runtime and management plane built as a Rust workspace.
 
-**Loci** is the most advanced privacy-first, programmable local AI inference engine in 2026. Built in Rust with ggml/llama.cpp at its core, Loci delivers industrial-grade performance, deep control, and full platform support.
+The refactored repository treats the new workspace architecture as authoritative:
 
-**Loci's philosophy**: Make local AI truly controllable, programmable, and commercializable.
+- `crates/core`: runtime kernel, model loading, governance seams, plugin inventory, management service
+- `crates/cli`: `loci` binary for plugin discovery and management HTTP serving
+- `crates/plugin-api`: stable manifest and capability types shared by plugins and host code
+- `crates/ffi`: stable public C ABI and native integration surface
+- `crates/legacy-plugin-api` and `crates/legacy-plugin-compat`: bounded compatibility island for legacy text plugins
 
-[中文文档](./README.md) | [Documentation](./docs/) | [API Reference](./docs/API_REFERENCE.md) | [Plugin Market](https://plugins.loci.dev)
+Loci is not positioned as a chat shell. It is the runtime substrate that host products can embed behind desktop apps, IDE assistants, local agent systems, and enterprise automation products.
 
----
+## Architecture Direction
 
-## ✨ Key Features
+The new architecture is organized around governable seams instead of hardcoded feature paths. Core behavior can be rewritten by plugins at the component boundary level.
 
-### 🎯 Programmable Neural Backbone
-- **Logit-level intervention**: Zero-copy direct modification of token probabilities
-- **Full callback chain**: pre_process → transform_logits → post_process → on_token_generated
-- **Inference control flow**: Suspend/Resume for native Agent tool calls
-- **Constrained sampling**: Enforced JSON / Regex / Grammar structured output
+Current core rewriter seams:
 
-### ⚡ Extreme Performance
-- **Paged Attention + Swap**: Stable 128k+ context
-- **Radix Tree prefix caching**: 5–10× speedup for shared system prompts
-- **Kernel fusion**: 30% latency reduction
-- **Cutting-edge quantization**: IQ2_XXS (16×), BitNet b1.58 (20×)
+- `inference`
+- `model`
+- `hardware`
+- `workflow`
+- `event_bus`
+- `plugin_manager`
+- `ui_host`
 
-### 🔌 Dual-Track Plugin System
-- **Native plugins**: Maximum performance dynamic libraries
-- **WASM plugins**: Secure sandbox for third-party extensions
-- **Unified registry** with digital signature verification
+Plugin bundles are manifest-first. Native manifests are the mainline path. Legacy plugin support remains available only through explicit compatibility bridges.
 
-### 🏢 Enterprise Ready
-- **Model encryption**: AES-256-GCM with zeroized keys
-- **Multi-tenancy**: Full resource isolation and quotas
-- **Cloud-native**: Official Docker + Helm Chart
+## Workspace Layout
 
-### 📱 Full Platform Support
-- Desktop: Windows / macOS / Linux
-- Mobile: Android (NDK) / iOS (Metal)
-- Embedded ready: ARM / RISC-V path
-
-### 🎨 Multimodal (Phase 4)
-- Vision encoder (CLIP ViT-L/14)
-- Image → embedding zero-copy injection
-- Audio support reserved
-
----
-
-## 📊 Performance Benchmarks
-
-### Model Loading (Cold Start)
-
-| Model              | Size | Quant     | Load Time |
-|--------------------|------|-----------|-----------|
-| Phi-3-mini         | 3.8B | Q4_K_M    | **92ms**  |
-| Llama-3-8B         | 8B   | Q4_K_M    | **185ms** |
-| Gemma-2-9B         | 9B   | Q5_K_M    | **328ms** |
-
-### Generation Throughput (Llama-3-8B Q4_K_M)
-
-| Hardware                 | Tokens/s  |
-|--------------------------|-----------|
-| Apple M3 Pro             | **58.3**  |
-| NVIDIA RTX 4090          | **112.7** |
-| AMD RX 7900 XTX          | **89.4**  |
-
-Full report: [PERFORMANCE_WHITEPAPER.md](./docs/PERFORMANCE_WHITEPAPER.md)
-
----
-
-## 🚀 Quick Start
-
-```bash
-cargo install loci
-
-loci serve --model models/llama-3-8b-q4_k_m.gguf --port 8080
+```text
+loci/
+|-- crates/
+|   |-- cli/
+|   |-- core/
+|   |-- ffi/
+|   |-- plugin-api/
+|   |-- legacy-plugin-api/
+|   `-- legacy-plugin-compat/
+|-- plugins/                 # example plugin bundle manifests for the new architecture
+|-- include/                 # public C header for the stable ABI
+|-- deps/llama.cpp/          # pinned submodule used by the optional `llama` feature
+|-- docs/
+|   |-- ARCHITECTURE.md
+|   |-- MANAGEMENT_API.md
+|   |-- PRODUCT_STRATEGY_2026.md
+|   `-- architecture/
+|-- scripts/
+|   `-- full_test.ps1
+`-- wasm-plugin-sdk/
 ```
 
-OpenAI-compatible API ready at http://localhost:8080/v1
+## Quick Start
 
----
-
-## 📚 Documentation
-
-- [Quick Start](./docs/QUICK_START.md)
-- [Configuration](./docs/CONFIGURATION.md)
-- [Plugin Development](./docs/PLUGIN_DEVELOPMENT.md)
-- [Enterprise Deployment](./docs/ENTERPRISE_DEPLOYMENT.md)
-- [Performance Tuning](./docs/PERFORMANCE_TUNING.md)
-
----
-
-## 🔌 Plugin Market
-
-Visit: https://plugins.loci.dev  
-Supports Native + WASM plugins with one-click installation and signature verification.
-
----
-
-## 🐳 Docker & Kubernetes
+Clone with the `llama.cpp` submodule:
 
 ```bash
-docker run -p 8080:8080 ghcr.io/decade-afk/loci:latest
+git clone https://github.com/decade-afk/loci.git
+cd loci
+git submodule update --init --recursive
 ```
 
-Helm chart available for Kubernetes deployment.
+Build the CLI with real `llama.cpp` backend support:
 
----
+```bash
+cargo build -p loci-cli --release --features llama
+```
 
-## 🤝 Contributing
+Start the management server with bundled example manifests:
 
-We welcome contributions! See:
-- [Contributing Guide](./CONTRIBUTING.md)
-- [Code of Conduct](./CODE_OF_CONDUCT.md)
+```bash
+cargo run -p loci-cli --features llama -- \
+  --plugin-dir plugins \
+  --management-bind 127.0.0.1:8080
+```
 
----
+Basic checks:
 
-## 📄 License
+```bash
+curl http://127.0.0.1:8080/health
+curl http://127.0.0.1:8080/v1/runtime
+curl http://127.0.0.1:8080/v1/core/rewriters/inventory
+```
 
-MIT License - see [LICENSE](./LICENSE)
+Load a model through the control plane:
 
----
+```bash
+curl http://127.0.0.1:8080/v1/model/load \
+  -H "Content-Type: application/json" \
+  -d "{\"backend_name\":\"llama.cpp\",\"config\":{\"model_path\":\"D:/models/qwen.gguf\"}}"
+```
 
-**Built with ❤️ by decade-afk and the Loci community | 2026**
+Run generation:
 
+```bash
+curl http://127.0.0.1:8080/v1/inference/generate \
+  -H "Content-Type: application/json" \
+  -d "{\"prompt\":\"hello from loci\"}"
+```
+
+## Plugin Model
+
+Loci now prefers manifest bundles over ad hoc runtime loading contracts.
+
+- Load a whole plugin directory with `--plugin-dir <path>`
+- Load a bundle or directory over HTTP with `POST /v1/plugins/load`
+- Activate rewriter ownership with `POST /v1/core/rewriters/activate`
+- Activate legacy text compatibility only when required with `POST /v1/legacy-text/activate`
+
+Example manifests live in:
+
+- `plugins/example-inference`
+- `plugins/example-infra`
+- `plugins/example-agent`
+
+More detail is in [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md).
+
+## Real Build And Test Commands
+
+Workspace validation:
+
+```bash
+cargo test -q
+```
+
+`llama.cpp` integration validation:
+
+```bash
+cargo test -q -p loci-core --features llama
+cargo test -q -p loci-cli --features llama
+```
+
+Windows helper script:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/full_test.ps1
+```
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Management API](docs/MANAGEMENT_API.md)
+- [FFI](docs/FFI.md)
+- [Plugin Guide](PLUGIN_GUIDE.md)
+- [Architecture ADRs](docs/architecture/README.md)
+- [Product Strategy 2026](docs/PRODUCT_STRATEGY_2026.md)
+- [Build Guide](BUILD.md)
+
+## Current Status
+
+The workspace migration is authoritative. Old root-level monolith sources, old example programs, and old serve/generate-era docs are no longer the source of truth.
+
+What is production-oriented today:
+
+- plugin-governed runtime core
+- management HTTP control plane
+- runtime snapshot and plugin inventory
+- rewriter activation for inference, model, hardware, workflow, event bus, plugin manager, and UI host
+- real model load governance and `llama.cpp` optional backend integration
+- stable public C ABI in `crates/ffi` with header `include/loci.h`
+- bounded legacy text plugin compatibility
+
+What is intentionally bounded:
+
+- legacy plugin bridging stays isolated in compat crates
+
+## License
+
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.

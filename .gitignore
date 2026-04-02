@@ -1,38 +1,52 @@
 # Rust
-target/
+/target
+# Keep the root lockfile for CI reproducibility; example crates stay ignored.
+/examples/**/Cargo.lock
 **/*.rs.bk
-Cargo.lock
 
 # IDE
-.vscode/
-.kiro/
-.claude/
-.iflow/
 .idea/
+.vscode/
 *.swp
 *.swo
+*~
+.claude/
 
-# 构建产物
+# OS
+.DS_Store
+Thumbs.db
+
+# Models (don't commit large model files)
+*.gguf
+*.bin
+models/
+
+# Build artifacts
+*.o
+*.a
+*.so
 *.dll
 *.dylib
-*.so
-*.a
 *.lib
+*.exe
+dist/
 
-# 自动生成的 C 头文件（由 cbindgen 生成）
-loci.h
+# Benchmarks
+/benches/results/
 
-# 绑定生成（自动生成）
-bindings/dart/bridge_generated.dart
-
-# 日志
-*.log
-
-# macOS
-.DS_Store
-
-# 临时文件
+# Temporary files
 *.tmp
-*.temp
-
-docs/
+*.log
+.tmp_pip/
+.pip_cache/
+.hf_cache/
+outputs/
+runtime/
+sessions/
+tmp/
+examples/**/output/
+examples/**/target/
+target-ninja/
+android-sdk/.gradle/
+android-sdk/local.properties
+android-sdk/**/build/
