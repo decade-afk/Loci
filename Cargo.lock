@@ -189,6 +189,8 @@ name = "loci-ffi"
 version = "0.1.0"
 dependencies = [
  "loci-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

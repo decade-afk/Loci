@@ -78,11 +78,17 @@ jobs:
       - name: Run workspace tests
         run: cargo test -q
 
+      - name: Run loci-ffi tests
+        run: cargo test -q -p loci-ffi
+
       - name: Run loci-core llama tests
         run: cargo test -q -p loci-core --features llama
 
       - name: Run loci-cli llama tests
         run: cargo test -q -p loci-cli --features llama
+
+      - name: Run loci-ffi llama tests
+        run: cargo test -q -p loci-ffi --features llama
 
       - name: Build loci-cli with llama
         run: cargo build -q -p loci-cli --release --features llama

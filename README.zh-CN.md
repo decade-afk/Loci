@@ -7,7 +7,7 @@ Loci 是一个基于 Rust 工作区构建的、本地优先、插件治理的 AI
 - `crates/core`：运行时内核、模型加载、治理接口、插件库存、管理服务
 - `crates/cli`：`loci` 命令行程序，负责插件发现与管理 HTTP 服务
 - `crates/plugin-api`：插件与宿主共享的 manifest / 能力类型
-- `crates/ffi`：预留给后续原生集成稳定化的 FFI crate
+- `crates/ffi`：稳定公开的 C ABI 与原生集成入口
 - `crates/legacy-plugin-api`、`crates/legacy-plugin-compat`：旧文本插件兼容隔离层
 
 Loci 的定位不是聊天壳，而是给桌面软件、IDE 助手、本地 agent 系统、企业自动化产品提供可嵌入的运行时底座。
@@ -40,6 +40,7 @@ loci/
 |   |-- legacy-plugin-api/
 |   `-- legacy-plugin-compat/
 |-- plugins/                 # 新架构示例插件 manifest
+|-- include/                 # 稳定 ABI 的公共 C 头文件
 |-- deps/llama.cpp/          # 可选 `llama` feature 使用的子模块
 |-- docs/
 |   |-- ARCHITECTURE.md
@@ -141,6 +142,7 @@ powershell -ExecutionPolicy Bypass -File scripts/full_test.ps1
 
 - [架构说明](docs/ARCHITECTURE.md)
 - [管理 API](docs/MANAGEMENT_API.md)
+- [FFI 说明](docs/FFI.md)
 - [插件指南](PLUGIN_GUIDE.md)
 - [架构 ADR](docs/architecture/README.md)
 - [2026 产品策略](docs/PRODUCT_STRATEGY_2026.md)
@@ -157,12 +159,12 @@ powershell -ExecutionPolicy Bypass -File scripts/full_test.ps1
 - 运行时快照与插件库存
 - inference、model、hardware、workflow、event bus、plugin manager、ui host 七类重写激活
 - 真实模型加载治理与可选 `llama.cpp` 集成
+- `crates/ffi` + `include/loci.h` 组成的稳定公开 C ABI
 - 有边界的旧文本插件兼容
 
 刻意收敛的部分：
 
 - 旧插件桥接只保留在 compat crate 中
-- 原生 FFI 还不是稳定公开的 C ABI
 
 ## 许可证
 

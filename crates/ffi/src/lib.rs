@@ -1,5 +1,3 @@
-use loci_core::InferenceEngine;
+mod c_api;
 
-pub fn build_engine() -> loci_core::Result<InferenceEngine> {
-    InferenceEngine::builder().build()
-}
+pub use c_api::*;

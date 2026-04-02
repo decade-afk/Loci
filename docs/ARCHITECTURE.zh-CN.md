@@ -21,7 +21,7 @@ Loci 是一个面向宿主产品的、本地优先、插件治理的 AI 运行�
 | `crates/core` | 运行时内核、模型加载、插件库存、治理缝隙、管理服务 |
 | `crates/cli` | `loci` 二进制与管理 HTTP 服务 |
 | `crates/plugin-api` | 插件 manifest 与共享能力类型 |
-| `crates/ffi` | 预留给原生集成稳定化的 crate |
+| `crates/ffi` | 面向当前运行时与管理面的稳定公开 C ABI |
 | `crates/legacy-plugin-api` | 旧插件契约类型 |
 | `crates/legacy-plugin-compat` | 旧文本插件兼容桥 |
 

@@ -7,7 +7,7 @@ This repository is now a Rust workspace. Build the crate that matches the surfac
 - `loci-core`: embeddable runtime and management service
 - `loci-cli`: `loci` binary
 - `loci-plugin-api`: shared plugin manifest/types crate
-- `loci-ffi`: native integration crate reserved for later ABI hardening
+- `loci-ffi`: stable public C ABI crate
 
 ## Prerequisites
 
@@ -70,6 +70,13 @@ Build the FFI crate:
 cargo build -p loci-ffi --release
 ```
 
+Outputs:
+
+- Windows: `target/release/loci.dll` and `target/release/loci.lib`
+- Linux: `target/release/libloci.so` and `target/release/libloci.a`
+- macOS: `target/release/libloci.dylib` and `target/release/libloci.a`
+- Header: `include/loci.h`
+
 Build the FFI crate with `llama.cpp` enabled:
 
 ```bash
@@ -105,6 +112,7 @@ cargo test -q
 ```bash
 cargo test -q -p loci-core --features llama
 cargo test -q -p loci-cli --features llama
+cargo test -q -p loci-ffi --features llama
 ```
 
 Windows helper:
@@ -131,4 +139,4 @@ If you do not need real model backend binding for a given build, omit `--feature
 
 ## Non-Goals Of This Build Guide
 
-This guide intentionally does not describe the removed root monolith, the removed `serve/generate` CLI, or the removed legacy example programs. The workspace crates above are the maintained entry points.
+This guide intentionally does not describe the removed root monolith, the removed `serve/generate` CLI, or the removed legacy example programs. The workspace crates above, including the stable FFI surface in `crates/ffi` and `include/loci.h`, are the maintained entry points.

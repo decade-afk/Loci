@@ -21,7 +21,7 @@ The repository is a Rust workspace instead of a root monolith.
 | `crates/core` | runtime kernel, model loading, plugin inventory, governance seams, management service |
 | `crates/cli` | `loci` binary and management HTTP serving |
 | `crates/plugin-api` | plugin manifest schema and shared capability types |
-| `crates/ffi` | native integration crate reserved for ABI hardening |
+| `crates/ffi` | stable public C ABI over the current runtime and management surface |
 | `crates/legacy-plugin-api` | legacy plugin contract types |
 | `crates/legacy-plugin-compat` | bounded bridge for legacy text plugins |
 

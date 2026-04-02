@@ -7,7 +7,7 @@ The refactored repository treats the new workspace architecture as authoritative
 - `crates/core`: runtime kernel, model loading, governance seams, plugin inventory, management service
 - `crates/cli`: `loci` binary for plugin discovery and management HTTP serving
 - `crates/plugin-api`: stable manifest and capability types shared by plugins and host code
-- `crates/ffi`: native integration crate reserved for future ABI hardening
+- `crates/ffi`: stable public C ABI and native integration surface
 - `crates/legacy-plugin-api` and `crates/legacy-plugin-compat`: bounded compatibility island for legacy text plugins
 
 Loci is not positioned as a chat shell. It is the runtime substrate that host products can embed behind desktop apps, IDE assistants, local agent systems, and enterprise automation products.
@@ -40,6 +40,7 @@ loci/
 |   |-- legacy-plugin-api/
 |   `-- legacy-plugin-compat/
 |-- plugins/                 # example plugin bundle manifests for the new architecture
+|-- include/                 # public C header for the stable ABI
 |-- deps/llama.cpp/          # pinned submodule used by the optional `llama` feature
 |-- docs/
 |   |-- ARCHITECTURE.md
@@ -141,6 +142,7 @@ powershell -ExecutionPolicy Bypass -File scripts/full_test.ps1
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Management API](docs/MANAGEMENT_API.md)
+- [FFI](docs/FFI.md)
 - [Plugin Guide](PLUGIN_GUIDE.md)
 - [Architecture ADRs](docs/architecture/README.md)
 - [Product Strategy 2026](docs/PRODUCT_STRATEGY_2026.md)
@@ -157,12 +159,12 @@ What is production-oriented today:
 - runtime snapshot and plugin inventory
 - rewriter activation for inference, model, hardware, workflow, event bus, plugin manager, and UI host
 - real model load governance and `llama.cpp` optional backend integration
+- stable public C ABI in `crates/ffi` with header `include/loci.h`
 - bounded legacy text plugin compatibility
 
 What is intentionally bounded:
 
 - legacy plugin bridging stays isolated in compat crates
-- native FFI surface is not yet a stabilized public C ABI
 
 ## License
 
