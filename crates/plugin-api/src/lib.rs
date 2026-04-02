@@ -36,6 +36,8 @@ pub struct ContributionPoints {
     #[serde(default)]
     pub inference_hooks: Vec<String>,
     #[serde(default)]
+    pub events: Vec<String>,
+    #[serde(default)]
     pub workflows: Vec<String>,
     #[serde(default)]
     pub custom_nodes: Vec<String>,
@@ -138,6 +140,7 @@ impl ContributionPoints {
     pub fn is_empty(&self) -> bool {
         self.model_providers.is_empty()
             && self.inference_hooks.is_empty()
+            && self.events.is_empty()
             && self.workflows.is_empty()
             && self.custom_nodes.is_empty()
             && self.commands.is_empty()

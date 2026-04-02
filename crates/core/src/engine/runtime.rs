@@ -2,10 +2,10 @@ use crate::backend::{
     BackendCapabilities, BackendParams, BackendRegistry, InferenceParams, Model, ModelMetadata,
 };
 use crate::control_plane::{
-    CommandInventoryStatus, CoreRewriterStatus, ModelRuntimeInfo, PluginHostRuntimeKind,
-    PluginHostRuntimeMaterialization, PluginHostRuntimeRegistration, PluginRuntimeArtifacts,
-    PluginRuntimeDetail, PluginRuntimeStatus, PluginUiContributionStatus, RuntimeSnapshot,
-    SamplingHookSource, UiInventoryStatus, WorkflowInventoryStatus,
+    CommandInventoryStatus, CoreRewriterStatus, EventInventoryStatus, ModelRuntimeInfo,
+    PluginHostRuntimeKind, PluginHostRuntimeMaterialization, PluginHostRuntimeRegistration,
+    PluginRuntimeArtifacts, PluginRuntimeDetail, PluginRuntimeStatus, PluginUiContributionStatus,
+    RuntimeSnapshot, SamplingHookSource, UiInventoryStatus, WorkflowInventoryStatus,
 };
 use crate::core::CoreRegistry;
 use crate::engine::types::{GenerationParams, ModelInfo};
@@ -133,6 +133,49 @@ impl InferenceEngine {
             .event_bus()
             .publish(&format!("plugin_manager/{plugin_name}/{command}"))?;
         Ok(format!("command accepted by {plugin_name}: {command}"))
+    }
+
+    pub fn publish_event(&self, event: &str) -> Result<String> {
+        let event = event.trim();
+        if event.is_empty() {
+            return Err(LociError::InvalidArgument(
+                "event must not be empty".to_string(),
+            ));
+        }
+
+        let plugin_name = self
+            .active_core_rewriter(CoreComponent::EventBus)
+            .ok_or_else(|| {
+                LociError::from(anyhow::anyhow!(
+                    "no active event bus rewriter is configured"
+                ))
+            })?;
+        let plugin = self
+            .registry
+            .plugin_manager()
+            .get(plugin_name)
+            .ok_or_else(|| {
+                LociError::from(anyhow::anyhow!(
+                    "active event bus rewriter `{plugin_name}` is not registered"
+                ))
+            })?;
+
+        if !plugin
+            .manifest
+            .contributes
+            .events
+            .iter()
+            .any(|candidate| candidate == event)
+        {
+            return Err(LociError::from(anyhow::anyhow!(
+                "event `{event}` is not declared by active event bus rewriter `{plugin_name}`"
+            )));
+        }
+
+        self.registry
+            .event_bus()
+            .publish(&format!("event_bus/{plugin_name}/{event}"))?;
+        Ok(format!("event published by {plugin_name}: {event}"))
     }
 
     pub fn command_inventory(&self) -> CommandInventoryStatus {
@@ -354,6 +397,7 @@ impl InferenceEngine {
             },
             model_providers: plugin.manifest.contributes.model_providers.clone(),
             inference_hooks: plugin.manifest.contributes.inference_hooks.clone(),
+            events: plugin.manifest.contributes.events.clone(),
             workflows: plugin.manifest.contributes.workflows.clone(),
             custom_nodes: plugin.manifest.contributes.custom_nodes.clone(),
             commands: plugin.manifest.contributes.commands.clone(),
@@ -401,6 +445,23 @@ impl InferenceEngine {
             });
 
         UiInventoryStatus { active_ui_host, ui }
+    }
+
+    pub fn event_inventory(&self) -> EventInventoryStatus {
+        let active_event_bus_rewriter = self
+            .active_core_rewriter(CoreComponent::EventBus)
+            .map(str::to_string);
+        let events = active_event_bus_rewriter
+            .as_deref()
+            .and_then(|plugin_name| self.registry.plugin_manager().get(plugin_name))
+            .map(|plugin| plugin.manifest.contributes.events.clone())
+            .unwrap_or_default();
+
+        EventInventoryStatus {
+            active_event_bus_rewriter,
+            events,
+            recent_events: self.registry.event_bus().recent_events(),
+        }
     }
 
     pub fn runtime_snapshot(&self) -> RuntimeSnapshot {
@@ -1041,6 +1102,129 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn engine_reports_event_inventory_from_active_event_bus() {
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "event-router".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiInfra],
+                contributes: ContributionPoints {
+                    events: vec!["models.loaded".to_string(), "plugins.synced".to_string()],
+                    ..Default::default()
+                },
+                core_rewriters: CoreRewriters {
+                    event_bus: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
+            }))
+            .expect("register");
+
+        assert_eq!(
+            engine.event_inventory(),
+            EventInventoryStatus {
+                active_event_bus_rewriter: None,
+                events: Vec::new(),
+                recent_events: Vec::new(),
+            }
+        );
+
+        engine
+            .activate_core_rewriter(CoreComponent::EventBus, "event-router")
+            .expect("activate event bus");
+
+        assert_eq!(
+            engine.event_inventory(),
+            EventInventoryStatus {
+                active_event_bus_rewriter: Some("event-router".to_string()),
+                events: vec!["models.loaded".to_string(), "plugins.synced".to_string()],
+                recent_events: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn engine_publishes_only_declared_events_through_active_event_bus() {
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            active_legacy_text_plugins: BTreeSet::new(),
+            host_plugin_runtimes: BTreeMap::new(),
+            legacy_text_plugin_runtimes: BTreeMap::new(),
+        };
+
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "event-router".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiInfra],
+                contributes: ContributionPoints {
+                    events: vec!["models.loaded".to_string()],
+                    ..Default::default()
+                },
+                core_rewriters: CoreRewriters {
+                    event_bus: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
+            }))
+            .expect("register");
+
+        let missing_activation = engine
+            .publish_event("models.loaded")
+            .expect_err("event bus activation should be required");
+        assert!(missing_activation
+            .to_string()
+            .contains("no active event bus rewriter"));
+
+        engine
+            .activate_core_rewriter(CoreComponent::EventBus, "event-router")
+            .expect("activate event bus");
+
+        let published = engine
+            .publish_event("models.loaded")
+            .expect("publish declared event");
+        assert_eq!(published, "event published by event-router: models.loaded");
+        assert_eq!(
+            engine.event_inventory().recent_events,
+            vec!["event_bus/event-router/models.loaded".to_string()]
+        );
+
+        let undeclared = engine
+            .publish_event("models.missing")
+            .expect_err("undeclared event should fail");
+        assert!(undeclared
+            .to_string()
+            .contains("is not declared by active event bus rewriter"));
     }
 
     #[test]

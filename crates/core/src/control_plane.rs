@@ -45,6 +45,7 @@ pub struct PluginRuntimeDetail {
     pub runtime_artifacts: PluginRuntimeArtifacts,
     pub model_providers: Vec<String>,
     pub inference_hooks: Vec<String>,
+    pub events: Vec<String>,
     pub workflows: Vec<String>,
     pub custom_nodes: Vec<String>,
     pub commands: Vec<String>,
@@ -113,6 +114,13 @@ pub struct WorkflowInventoryStatus {
 pub struct UiInventoryStatus {
     pub active_ui_host: Option<String>,
     pub ui: PluginUiContributionStatus,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct EventInventoryStatus {
+    pub active_event_bus_rewriter: Option<String>,
+    pub events: Vec<String>,
+    pub recent_events: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -280,6 +288,18 @@ pub struct CommandExecutionRequest {
 pub struct CommandExecutionStatus {
     pub status: &'static str,
     pub command: String,
+    pub routed_plugin_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EventPublishRequest {
+    pub event: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct EventPublishStatus {
+    pub status: &'static str,
+    pub event: String,
     pub routed_plugin_name: String,
 }
 

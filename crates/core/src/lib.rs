@@ -16,8 +16,9 @@ pub use crate::backend::{
 pub use crate::control_plane::{
     CommandExecutionRequest, CommandExecutionStatus, CommandInventoryStatus,
     CoreRewriterActivationRequest, CoreRewriterActivationStatus, CoreRewriterInventoryStatus,
-    CoreRewriterStatus, InferenceActivationStatus, LegacyTextPluginActivationStatus,
-    ManagementHealthStatus, ModelLoadConfig, ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus,
+    CoreRewriterStatus, EventInventoryStatus, EventPublishRequest, EventPublishStatus,
+    InferenceActivationStatus, LegacyTextPluginActivationStatus, ManagementHealthStatus,
+    ModelLoadConfig, ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus,
     ModelLoadStrategyRequest, ModelRuntimeInfo, PluginHostRuntimeKind,
     PluginHostRuntimeMaterialization, PluginHostRuntimeRegistration, PluginLoadRequest,
     PluginLoadSourceKind, PluginLoadStatus, PluginRuntimeArtifacts, PluginRuntimeDetail,

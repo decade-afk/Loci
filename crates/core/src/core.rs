@@ -2,7 +2,7 @@ use crate::plugin::RegisteredPlugin;
 use anyhow::{bail, Result as AnyhowResult};
 use loci_plugin_api::{CoreComponent, PlatformTrack};
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub trait ModelRepository: Send + Sync {
     fn has_model(&self, model_id: &str) -> bool;
@@ -18,6 +18,7 @@ pub trait WorkflowEngine: Send + Sync {
 
 pub trait EventBus: Send + Sync {
     fn publish(&self, event: &str) -> AnyhowResult<()>;
+    fn recent_events(&self) -> Vec<String>;
 }
 
 pub trait HardwareAbstraction: Send + Sync {
@@ -82,11 +83,29 @@ impl WorkflowEngine for DefaultWorkflowEngine {
 }
 
 #[derive(Default)]
-pub struct NoopEventBus;
+pub struct RecordingEventBus {
+    events: Mutex<Vec<String>>,
+}
 
-impl EventBus for NoopEventBus {
-    fn publish(&self, _event: &str) -> AnyhowResult<()> {
+impl EventBus for RecordingEventBus {
+    fn publish(&self, event: &str) -> AnyhowResult<()> {
+        let mut events = self
+            .events
+            .lock()
+            .map_err(|_| anyhow::anyhow!("event bus mutex poisoned"))?;
+        events.push(event.to_string());
+        if events.len() > 128 {
+            let drain = events.len() - 128;
+            events.drain(0..drain);
+        }
         Ok(())
+    }
+
+    fn recent_events(&self) -> Vec<String> {
+        self.events
+            .lock()
+            .map(|events| events.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -111,7 +130,7 @@ impl UiHost for HeadlessUiHost {
 pub struct DefaultCoreRegistry {
     model_repository: DefaultModelRepository,
     workflow_engine: DefaultWorkflowEngine,
-    event_bus: NoopEventBus,
+    event_bus: RecordingEventBus,
     hardware_abstraction: DefaultHardwareAbstraction,
     ui_host: HeadlessUiHost,
     plugin_manager: crate::plugin::InMemoryPluginManager,
@@ -123,7 +142,7 @@ impl Default for DefaultCoreRegistry {
         Self {
             model_repository: DefaultModelRepository,
             workflow_engine: DefaultWorkflowEngine,
-            event_bus: NoopEventBus,
+            event_bus: RecordingEventBus::default(),
             hardware_abstraction: DefaultHardwareAbstraction,
             ui_host: HeadlessUiHost,
             plugin_manager: crate::plugin::InMemoryPluginManager::default(),

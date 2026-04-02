@@ -1,6 +1,6 @@
 use loci_core::{
-    CommandExecutionRequest, CoreRewriterActivationRequest, ManagementService, ModelLoadRequest,
-    PluginLoadRequest, TextGenerationRequest,
+    CommandExecutionRequest, CoreRewriterActivationRequest, EventPublishRequest, ManagementService,
+    ModelLoadRequest, PluginLoadRequest, TextGenerationRequest,
 };
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -99,6 +99,13 @@ pub fn handle_management_request(
             },
             Err(error) => json_response(500, json!({ "error": error.to_string() })),
         },
+        ("GET", "/v1/events") => match service.event_inventory() {
+            Ok(events) => match serde_json::to_value(events) {
+                Ok(events) => json_response(200, events),
+                Err(error) => json_response(500, json!({ "error": error.to_string() })),
+            },
+            Err(error) => json_response(500, json!({ "error": error.to_string() })),
+        },
         ("GET", "/v1/commands") => match service.command_inventory() {
             Ok(commands) => match serde_json::to_value(commands) {
                 Ok(commands) => json_response(200, commands),
@@ -176,6 +183,20 @@ pub fn handle_management_request(
             };
 
             match service.run_command(command_request) {
+                Ok(status) => match serde_json::to_value(status) {
+                    Ok(status) => json_response(200, status),
+                    Err(error) => json_response(500, json!({ "error": error.to_string() })),
+                },
+                Err(error) => json_response(400, json!({ "error": error.to_string() })),
+            }
+        }
+        ("POST", "/v1/events/publish") => {
+            let event_request = match event_publish_request_from_body(&request.body) {
+                Ok(event_request) => event_request,
+                Err(error) => return json_response(400, json!({ "error": error.to_string() })),
+            };
+
+            match service.publish_event(event_request) {
                 Ok(status) => match serde_json::to_value(status) {
                     Ok(status) => json_response(200, status),
                     Err(error) => json_response(500, json!({ "error": error.to_string() })),
@@ -291,6 +312,10 @@ fn text_generation_request_from_body(body: &[u8]) -> anyhow::Result<TextGenerati
 }
 
 fn command_execution_request_from_body(body: &[u8]) -> anyhow::Result<CommandExecutionRequest> {
+    serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON body: {error}"))
+}
+
+fn event_publish_request_from_body(body: &[u8]) -> anyhow::Result<EventPublishRequest> {
     serde_json::from_slice(body).map_err(|error| anyhow::anyhow!("invalid JSON body: {error}"))
 }
 
@@ -525,6 +550,32 @@ mod tests {
         engine
             .register_plugin(RegisteredPlugin::new(manifest))
             .expect("register ui plugin");
+        ManagementService::new(engine)
+    }
+
+    fn event_service() -> ManagementService {
+        let mut engine = InferenceEngine::builder().build().expect("build engine");
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "event-router".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiInfra],
+                contributes: loci_core::ContributionPoints {
+                    events: vec!["models.loaded".to_string(), "plugins.synced".to_string()],
+                    ..Default::default()
+                },
+                core_rewriters: CoreRewriters {
+                    event_bus: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
+            }))
+            .expect("register event plugin");
         ManagementService::new(engine)
     }
 
@@ -775,6 +826,125 @@ mod tests {
         assert_eq!(after_value["ui"]["panels"], json!(["inspector"]));
         assert_eq!(after_value["ui"]["windows"], json!(["governance"]));
         assert_eq!(after_value["ui"]["widgets"], json!(["status-pill"]));
+    }
+
+    #[test]
+    fn events_route_returns_effective_event_inventory() {
+        let service = event_service();
+        let before = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/events".to_string(),
+                body: Vec::new(),
+            },
+        );
+
+        assert_eq!(before.status_code, 200);
+        let before_value: Value = serde_json::from_slice(&before.body).expect("json");
+        assert_eq!(before_value["active_event_bus_rewriter"], Value::Null);
+        assert_eq!(before_value["events"], json!([]));
+        assert_eq!(before_value["recent_events"], json!([]));
+
+        let activation = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/core/rewriters/activate".to_string(),
+                body: br#"{"component":"event_bus","plugin_name":"event-router"}"#.to_vec(),
+            },
+        );
+        assert_eq!(activation.status_code, 200);
+
+        let after = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/events".to_string(),
+                body: Vec::new(),
+            },
+        );
+
+        assert_eq!(after.status_code, 200);
+        let after_value: Value = serde_json::from_slice(&after.body).expect("json");
+        assert_eq!(after_value["active_event_bus_rewriter"], "event-router");
+        assert_eq!(
+            after_value["events"],
+            json!(["models.loaded", "plugins.synced"])
+        );
+        assert_eq!(after_value["recent_events"], json!([]));
+    }
+
+    #[test]
+    fn event_publish_route_requires_active_event_bus_and_declared_event() {
+        let service = event_service();
+        let missing_activation = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/events/publish".to_string(),
+                body: br#"{"event":"models.loaded"}"#.to_vec(),
+            },
+        );
+        assert_eq!(missing_activation.status_code, 400);
+        let missing_value: Value = serde_json::from_slice(&missing_activation.body).expect("json");
+        assert!(missing_value["error"]
+            .as_str()
+            .expect("error")
+            .contains("no active event bus rewriter"));
+
+        let activation = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/core/rewriters/activate".to_string(),
+                body: br#"{"component":"event_bus","plugin_name":"event-router"}"#.to_vec(),
+            },
+        );
+        assert_eq!(activation.status_code, 200);
+
+        let success = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/events/publish".to_string(),
+                body: br#"{"event":"models.loaded"}"#.to_vec(),
+            },
+        );
+        assert_eq!(success.status_code, 200);
+        let success_value: Value = serde_json::from_slice(&success.body).expect("json");
+        assert_eq!(success_value["status"], "published");
+        assert_eq!(success_value["event"], "models.loaded");
+        assert_eq!(success_value["routed_plugin_name"], "event-router");
+
+        let inventory = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "GET".to_string(),
+                path: "/v1/events".to_string(),
+                body: Vec::new(),
+            },
+        );
+        let inventory_value: Value = serde_json::from_slice(&inventory.body).expect("json");
+        assert_eq!(
+            inventory_value["recent_events"],
+            json!(["event_bus/event-router/models.loaded"])
+        );
+
+        let undeclared = handle_management_request(
+            &service,
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/events/publish".to_string(),
+                body: br#"{"event":"models.missing"}"#.to_vec(),
+            },
+        );
+        assert_eq!(undeclared.status_code, 400);
+        let undeclared_value: Value = serde_json::from_slice(&undeclared.body).expect("json");
+        assert!(undeclared_value["error"]
+            .as_str()
+            .expect("error")
+            .contains("is not declared by active event bus rewriter"));
     }
 
     #[test]

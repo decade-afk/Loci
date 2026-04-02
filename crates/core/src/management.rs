@@ -2,11 +2,12 @@ use crate::backend::BackendCapabilities;
 use crate::control_plane::{
     CommandExecutionRequest, CommandExecutionStatus, CommandInventoryStatus,
     CoreRewriterActivationRequest, CoreRewriterActivationStatus, CoreRewriterInventoryStatus,
-    CoreRewriterStatus, InferenceActivationStatus, LegacyTextPluginActivationStatus,
-    ManagementHealthStatus, ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus,
-    ModelLoadStrategyRequest, PluginLoadRequest, PluginLoadSourceKind, PluginLoadStatus,
-    PluginRuntimeDetail, PluginRuntimeStatus, RuntimeSnapshot, TextGenerationRequest,
-    TextGenerationResponse, UiInventoryStatus, WorkflowInventoryStatus,
+    CoreRewriterStatus, EventInventoryStatus, EventPublishRequest, EventPublishStatus,
+    InferenceActivationStatus, LegacyTextPluginActivationStatus, ManagementHealthStatus,
+    ModelLoadRequest, ModelLoadSplitMode, ModelLoadStatus, ModelLoadStrategyRequest,
+    PluginLoadRequest, PluginLoadSourceKind, PluginLoadStatus, PluginRuntimeDetail,
+    PluginRuntimeStatus, RuntimeSnapshot, TextGenerationRequest, TextGenerationResponse,
+    UiInventoryStatus, WorkflowInventoryStatus,
 };
 use crate::engine::InferenceEngine;
 use crate::error::{LociError, Result};
@@ -88,8 +89,40 @@ impl ManagementService {
         self.with_engine(|engine| Ok(engine.ui_inventory()))
     }
 
+    pub fn event_inventory(&self) -> Result<EventInventoryStatus> {
+        self.with_engine(|engine| Ok(engine.event_inventory()))
+    }
+
     pub fn command_inventory(&self) -> Result<CommandInventoryStatus> {
         self.with_engine(|engine| Ok(engine.command_inventory()))
+    }
+
+    pub fn publish_event(&self, request: EventPublishRequest) -> Result<EventPublishStatus> {
+        self.with_engine(|engine| {
+            let event = request.event.trim().to_string();
+            if event.is_empty() {
+                return Err(LociError::InvalidArgument(
+                    "event must not be empty".to_string(),
+                ));
+            }
+
+            let routed_plugin_name = engine
+                .active_core_rewriter(CoreComponent::EventBus)
+                .ok_or_else(|| {
+                    LociError::from(anyhow::anyhow!(
+                        "no active event bus rewriter is configured"
+                    ))
+                })?
+                .to_string();
+
+            engine.publish_event(&event)?;
+
+            Ok(EventPublishStatus {
+                status: "published",
+                event,
+                routed_plugin_name,
+            })
+        })
     }
 
     pub fn run_command(&self, request: CommandExecutionRequest) -> Result<CommandExecutionStatus> {
@@ -469,6 +502,32 @@ mod tests {
         ManagementService::new(engine)
     }
 
+    fn event_service() -> ManagementService {
+        let mut engine = InferenceEngine::builder().build().expect("build engine");
+        engine
+            .register_plugin(RegisteredPlugin::new(PluginManifest {
+                name: "event-router".to_string(),
+                version: "1.0.0".to_string(),
+                api_version: "1.0".to_string(),
+                min_host_version: None,
+                max_host_version: None,
+                target_tracks: vec![PlatformTrack::AiInfra],
+                contributes: crate::ContributionPoints {
+                    events: vec!["models.loaded".to_string(), "plugins.synced".to_string()],
+                    ..Default::default()
+                },
+                core_rewriters: CoreRewriters {
+                    event_bus: true,
+                    ..Default::default()
+                },
+                runtime: PluginRuntime::default(),
+                bootstrap: PluginBootstrap::default(),
+                compatibility: PluginCompatibility::default(),
+            }))
+            .expect("register event bus plugin");
+        ManagementService::new(engine)
+    }
+
     fn legacy_service() -> ManagementService {
         let mut engine = InferenceEngine::builder().build().expect("build engine");
         engine
@@ -693,6 +752,80 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn service_reports_event_inventory() {
+        let service = event_service();
+        assert_eq!(
+            service.event_inventory().expect("event inventory"),
+            EventInventoryStatus {
+                active_event_bus_rewriter: None,
+                events: Vec::new(),
+                recent_events: Vec::new(),
+            }
+        );
+
+        service
+            .activate_core_rewriter(CoreRewriterActivationRequest {
+                component: CoreComponent::EventBus,
+                plugin_name: "event-router".to_string(),
+            })
+            .expect("activate event bus");
+
+        assert_eq!(
+            service.event_inventory().expect("event inventory"),
+            EventInventoryStatus {
+                active_event_bus_rewriter: Some("event-router".to_string()),
+                events: vec!["models.loaded".to_string(), "plugins.synced".to_string()],
+                recent_events: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn service_publishes_only_declared_events_through_active_event_bus() {
+        let service = event_service();
+
+        let missing_activation = service
+            .publish_event(EventPublishRequest {
+                event: "models.loaded".to_string(),
+            })
+            .expect_err("event bus activation should be required");
+        assert!(missing_activation
+            .to_string()
+            .contains("no active event bus rewriter"));
+
+        service
+            .activate_core_rewriter(CoreRewriterActivationRequest {
+                component: CoreComponent::EventBus,
+                plugin_name: "event-router".to_string(),
+            })
+            .expect("activate event bus");
+
+        let published = service
+            .publish_event(EventPublishRequest {
+                event: "models.loaded".to_string(),
+            })
+            .expect("publish declared event");
+        assert_eq!(published.status, "published");
+        assert_eq!(published.event, "models.loaded");
+        assert_eq!(published.routed_plugin_name, "event-router");
+
+        let inventory = service.event_inventory().expect("event inventory");
+        assert_eq!(
+            inventory.recent_events,
+            vec!["event_bus/event-router/models.loaded".to_string()]
+        );
+
+        let undeclared = service
+            .publish_event(EventPublishRequest {
+                event: "models.missing".to_string(),
+            })
+            .expect_err("undeclared event should fail");
+        assert!(undeclared
+            .to_string()
+            .contains("is not declared by active event bus rewriter"));
     }
 
     #[test]
