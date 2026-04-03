@@ -140,6 +140,19 @@ mod tests {
     use crate::backends::llamacpp::adapter::{LlamaCppBuildIntegration, LlamaCppSourceLayout};
     use std::path::{Path, PathBuf};
 
+    fn assert_path_ends_with(path: &Path, suffix: &[&str]) {
+        let suffix = suffix.iter().fold(PathBuf::new(), |mut acc, segment| {
+            acc.push(segment);
+            acc
+        });
+        assert!(
+            path.ends_with(&suffix),
+            "expected {} to end with {}",
+            path.display(),
+            suffix.display()
+        );
+    }
+
     #[test]
     fn load_plan_requires_gguf_extension() {
         let err =
@@ -257,25 +270,29 @@ mod tests {
     #[test]
     fn source_layout_matches_cloned_repo_structure() {
         let layout = LlamaCppSourceLayout::discover().expect("layout");
-        assert!(layout.include_dir.ends_with("deps\\llama.cpp\\include"));
-        assert!(layout
-            .llama_header
-            .ends_with("deps\\llama.cpp\\include\\llama.h"));
-        assert!(layout
-            .ggml_include_dir
-            .ends_with("deps\\llama.cpp\\ggml\\include"));
+        assert_path_ends_with(&layout.include_dir, &["deps", "llama.cpp", "include"]);
+        assert_path_ends_with(
+            &layout.llama_header,
+            &["deps", "llama.cpp", "include", "llama.h"],
+        );
+        assert_path_ends_with(
+            &layout.ggml_include_dir,
+            &["deps", "llama.cpp", "ggml", "include"],
+        );
     }
 
     #[test]
     fn build_integration_matches_workspace_layout() {
         let integration = LlamaCppBuildIntegration::discover().expect("integration");
-        assert!(integration.build_script.ends_with("crates\\core\\build.rs"));
-        assert!(integration
-            .ffi_module
-            .ends_with("crates\\core\\src\\backends\\llamacpp\\ffi.rs"));
-        assert!(integration
-            .ffi_shim_c
-            .ends_with("crates\\core\\src\\backends\\llamacpp\\ffi_shim.c"));
+        assert_path_ends_with(&integration.build_script, &["crates", "core", "build.rs"]);
+        assert_path_ends_with(
+            &integration.ffi_module,
+            &["crates", "core", "src", "backends", "llamacpp", "ffi.rs"],
+        );
+        assert_path_ends_with(
+            &integration.ffi_shim_c,
+            &["crates", "core", "src", "backends", "llamacpp", "ffi_shim.c"],
+        );
     }
 
     #[test]
@@ -302,10 +319,10 @@ mod tests {
             context.driver_protocol.phases.create_context.function,
             "LlamaContext::new"
         );
-        assert!(context
-            .driver_protocol
-            .ffi_module
-            .ends_with("crates\\core\\src\\backends\\llamacpp\\ffi.rs"));
+        assert_path_ends_with(
+            Path::new(&context.driver_protocol.ffi_module),
+            &["crates", "core", "src", "backends", "llamacpp", "ffi.rs"],
+        );
         assert_eq!(context.driver_protocol.lifecycle.model_type, "LlamaModel");
         assert_eq!(
             context.driver_protocol.lifecycle.context_type,
@@ -319,6 +336,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires an opt-in host-native llama.cpp backend smoke check"]
     fn native_driver_executes_backend_init_phase() {
         let adapter = StubLlamaCppAdapter::new();
         let context = adapter.build_context().expect("context");
