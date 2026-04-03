@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::backend::{GpuSplitMode, ModelMetadata};
 use crate::error::{LociError, Result};
 use std::fs;

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::driver::{
     discover_driver, LlamaCppCreateContextPhase, LlamaCppDriver, LlamaCppDriverPhases,
     LlamaCppDriverProtocol, LlamaCppInitPhase, LlamaCppLifecycleContract, LlamaCppLoadModelPhase,

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::backend::InferenceParams;
 use crate::error::{LociError, Result};
 

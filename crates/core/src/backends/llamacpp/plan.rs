@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::backend::{BackendParams, GpuSplitMode, InferenceParams, ModelMetadata};
 use crate::backends::llamacpp::runtime::LlamaCppRuntimeState;
 use crate::error::{LociError, Result};

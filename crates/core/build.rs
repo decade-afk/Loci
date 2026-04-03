@@ -42,6 +42,12 @@ fn main() {
         config.cxxflag("-Wa,-mbig-obj");
         config.cflag("-Wa,-mbig-obj");
     } else if target.contains("windows-msvc") {
+        // Rust links the dynamic release CRT even for debug profiles on MSVC.
+        // Keep the embedded llama.cpp build on the same runtime to avoid
+        // unresolved `_calloc_dbg` / `CrtDbgReport` symbols when downstream
+        // binaries such as `loci-cli` link loci-core in debug mode.
+        config.profile("Release");
+        config.define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreadedDLL");
         config.cxxflag("/bigobj");
         config.cflag("/bigobj");
     }
