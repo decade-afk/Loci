@@ -1450,6 +1450,15 @@ api_version = "1.0"
         let plugin = load_plugin_manifest_file(&manifest_path).expect("load example ui bundle");
         assert_eq!(plugin.manifest.name, "example-ui-shell");
         assert!(plugin.manifest.core_rewriters.ui_host);
+        assert_eq!(plugin.runtime.host_runtimes.len(), 1);
+        assert_eq!(
+            plugin.runtime.host_runtimes[0].kind,
+            RegisteredHostRuntimeKind::DynamicLibrary
+        );
+        assert_eq!(
+            plugin.runtime.host_runtimes[0].declared_path,
+            "runtime/plugin.dll"
+        );
         assert_eq!(
             plugin.manifest.contributes.ui_contributes.panels,
             vec![

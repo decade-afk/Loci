@@ -13,3 +13,6 @@ widgets = ["runtime-status"]
 
 [core_rewriters]
 ui_host = true
+
+[runtime]
+library_path = "runtime/plugin.dll"

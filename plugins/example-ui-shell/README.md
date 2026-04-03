@@ -6,6 +6,7 @@ It demonstrates:
 
 - a `ui_host` core rewriter claim
 - panel, window, and widget surface declarations
+- a real host runtime artifact that the current engine can materialize on activation
 - a neutral UI shell that can serve both `ai_infra` and `ai_agent` products
 - static preview assets that host applications can adapt into their own renderer
 
@@ -15,7 +16,8 @@ Declared surfaces:
 - windows: `operations-console`
 - widgets: `runtime-status`
 
-This example does not ship an executable runtime artifact yet. It exists to document the plugin contract and the intended UX envelope while the host-side UI renderer stays product-specific.
+This example ships a lightweight placeholder host runtime artifact at `runtime/plugin.dll`.
+In the current architecture, activating the plugin will materialize that host runtime artifact while UI rendering still remains product-specific.
 
 Quick activation flow:
 

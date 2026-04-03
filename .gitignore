@@ -42,6 +42,8 @@ dist/
 .hf_cache/
 outputs/
 runtime/
+!plugins/example-ui-shell/runtime/
+!plugins/example-ui-shell/runtime/plugin.dll
 sessions/
 tmp/
 examples/**/output/

@@ -2805,6 +2805,81 @@ wasm_path = "runtime/plugin.wasm"
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn workspace_example_ui_shell_materializes_host_runtime_on_activation() {
+        let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = crate_dir
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root");
+        let manifest_path = workspace_root
+            .join("plugins")
+            .join("example-ui-shell")
+            .join("manifest.toml");
+
+        let mut engine = InferenceEngine {
+            registry: Box::new(DefaultCoreRegistry::default()),
+            backend_registry: BackendRegistry::with_builtin_backends(),
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params: InferenceParams::default(),
+            host_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextCompatCoordinator::default(),
+        };
+
+        engine
+            .load_plugin_manifest_file(&manifest_path)
+            .expect("load workspace example ui shell");
+
+        let before = engine
+            .plugin_runtime_detail("example-ui-shell")
+            .expect("detail before activation");
+        assert!(before.status.declares_host_runtime);
+        assert!(before.status.registered_host_runtime);
+        assert!(!before.status.materialized_host_runtime);
+        assert_eq!(
+            before.status.host_runtime_kind,
+            Some(PluginHostRuntimeKind::DynamicLibrary)
+        );
+        assert!(before.runtime_artifacts.materialized_host_runtime.is_none());
+
+        engine
+            .activate_core_rewriter(CoreComponent::UiHost, "example-ui-shell")
+            .expect("activate ui host from workspace example");
+
+        let after = engine
+            .plugin_runtime_detail("example-ui-shell")
+            .expect("detail after activation");
+        assert!(after.status.materialized_host_runtime);
+        assert_eq!(
+            after.status.host_runtime_kind,
+            Some(PluginHostRuntimeKind::DynamicLibrary)
+        );
+        assert_eq!(
+            after.ui.panels,
+            vec![
+                "workspace-overview".to_string(),
+                "model-catalog".to_string()
+            ]
+        );
+        assert_eq!(after.ui.windows, vec!["operations-console".to_string()]);
+        assert_eq!(after.ui.widgets, vec!["runtime-status".to_string()]);
+        let materialized = after
+            .runtime_artifacts
+            .materialized_host_runtime
+            .as_ref()
+            .expect("materialized host runtime");
+        assert_eq!(materialized.kind, PluginHostRuntimeKind::DynamicLibrary);
+        assert!(materialized.file_size_bytes > 0);
+        assert!(Path::new(&materialized.resolved_path).ends_with(
+            Path::new("plugins")
+                .join("example-ui-shell")
+                .join("runtime")
+                .join("plugin.dll")
+        ));
+    }
+
     struct ForceTokenHook;
 
     impl SamplingHook for ForceTokenHook {
