@@ -95,19 +95,36 @@ jobs:
       - name: Run loci-ffi tests
         run: cargo test -q -p loci-ffi
 
-      - name: Run loci-core llama tests
+      - name: Run loci-core llama tests (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: cargo test -q -p loci-core --features llama
 
-      - name: Build loci-core with llama (Windows)
+      - name: Run loci-core llama host smoke tests (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo test -q -p loci-core --features llama native_driver_executes_backend_init_phase -- --ignored
+          cargo test -q -p loci-core --features llama backend_refcount_is_balanced -- --ignored
+          cargo test -q -p loci-core --features llama owned_batch_allocates_required_buffers -- --ignored
+
+      - name: Build loci-core with llama feature (Windows)
         if: matrix.os == 'windows-2022'
         run: cargo build -q -p loci-core --features llama
 
-      - name: Run loci-cli llama tests
+      - name: Run loci-cli tests with llama feature (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
         run: cargo test -q -p loci-cli --features llama
 
-      - name: Run loci-ffi llama tests
+      - name: Build loci-cli with llama feature (Windows)
+        if: matrix.os == 'windows-2022'
+        run: cargo build -q -p loci-cli --features llama
+
+      - name: Run loci-ffi tests with llama feature (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
         run: cargo test -q -p loci-ffi --features llama
+
+      - name: Build loci-ffi with llama feature (Windows)
+        if: matrix.os == 'windows-2022'
+        run: cargo build -q -p loci-ffi --features llama
 
       - name: Build loci-cli with llama
         run: cargo build -q -p loci-cli --release --features llama
