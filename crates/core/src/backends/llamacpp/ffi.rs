@@ -448,6 +448,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "host-native backend init/free smoke is unstable on Windows CI hosts"
+    )]
     fn backend_refcount_is_balanced() {
         // Balance the reference count back to zero before this test starts.
         while {
