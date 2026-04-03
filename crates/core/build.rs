@@ -6,6 +6,8 @@ fn main() {
         return;
     }
 
+    reset_stale_cmake_cache();
+
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
     let workspace_root = manifest_dir
         .parent()
@@ -27,6 +29,7 @@ fn main() {
     configure_bindgen_environment(&target);
 
     let mut config = cmake::Config::new(&llama_cpp_path);
+    configure_git_safe_directory(&mut config, &llama_cpp_path);
     config
         .define("BUILD_SHARED_LIBS", "OFF")
         .define("LLAMA_BUILD_TESTS", "OFF")
@@ -48,6 +51,11 @@ fn main() {
         // binaries such as `loci-cli` link loci-core in debug mode.
         config.profile("Release");
         config.define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreadedDLL");
+        // The VS 2026 generator can fail nondeterministically when Cargo asks
+        // CMake to fan out parallel jobs and MSBuild also enables /m. Keep the
+        // inner MSBuild layer single-threaded while preserving Cargo's outer
+        // parallelism.
+        config.build_arg("/m:1");
         config.cxxflag("/bigobj");
         config.cflag("/bigobj");
     }
@@ -113,6 +121,48 @@ fn resolve_libclang_dir(target: &str) -> Option<PathBuf> {
     libclang_candidates()
         .into_iter()
         .find(|dir| dir.join("libclang.dll").exists() || dir.join("clang.dll").exists())
+}
+
+fn configure_git_safe_directory(config: &mut cmake::Config, repo_path: &Path) {
+    let existing_count = env::var("GIT_CONFIG_COUNT")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    for index in 0..existing_count {
+        let key = format!("GIT_CONFIG_KEY_{index}");
+        let value = format!("GIT_CONFIG_VALUE_{index}");
+        if let Some(existing_key) = env::var_os(&key) {
+            config.env(&key, existing_key);
+        }
+        if let Some(existing_value) = env::var_os(&value) {
+            config.env(&value, existing_value);
+        }
+    }
+
+    config.env("GIT_CONFIG_COUNT", (existing_count + 1).to_string());
+    config.env(format!("GIT_CONFIG_KEY_{existing_count}"), "safe.directory");
+    config.env(
+        format!("GIT_CONFIG_VALUE_{existing_count}"),
+        repo_path.as_os_str(),
+    );
+}
+
+fn reset_stale_cmake_cache() {
+    let out_dir = match env::var_os("OUT_DIR") {
+        Some(value) => PathBuf::from(value),
+        None => return,
+    };
+    let build_dir = out_dir.join("build");
+    let cache = build_dir.join("CMakeCache.txt");
+    let cmake_files = build_dir.join("CMakeFiles");
+
+    if cache.exists() {
+        let _ = std::fs::remove_file(&cache);
+    }
+    if cmake_files.exists() {
+        let _ = std::fs::remove_dir_all(&cmake_files);
+    }
 }
 
 fn libclang_candidates() -> Vec<PathBuf> {

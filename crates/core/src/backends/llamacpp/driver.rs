@@ -2,7 +2,6 @@
 
 use crate::backend::{GpuSplitMode, ModelMetadata};
 use crate::error::{LociError, Result};
-use std::fs;
 use std::path::Path;
 
 use super::adapter::{LlamaCppAdapterContext, LlamaCppBuildIntegration};
@@ -101,6 +100,45 @@ pub struct LlamaCppLifecycleContract {
 }
 
 impl LlamaCppDriverProtocol {
+    pub fn empty() -> Self {
+        Self {
+            kind: String::new(),
+            backend_init_symbol: String::new(),
+            model_default_params_symbol: String::new(),
+            context_default_params_symbol: String::new(),
+            ffi_module: String::new(),
+            ffi_shim_c: String::new(),
+            phases: LlamaCppDriverPhases {
+                init: LlamaCppInitPhase {
+                    function: String::new(),
+                    companion_free_function: None,
+                },
+                load_model: LlamaCppLoadModelPhase {
+                    model_type: String::new(),
+                    function: String::new(),
+                    params_function: String::new(),
+                },
+                create_context: LlamaCppCreateContextPhase {
+                    context_type: String::new(),
+                    function: String::new(),
+                    params_function: String::new(),
+                },
+            },
+            lifecycle: LlamaCppLifecycleContract {
+                model_type: String::new(),
+                context_type: String::new(),
+                supports_backend_init: false,
+                supports_model_defaults: false,
+                supports_context_defaults: false,
+                supports_tokenize: false,
+                supports_token_to_str: false,
+                supports_decode: false,
+                supports_logits: false,
+                supports_kv_cache_clear: false,
+            },
+        }
+    }
+
     pub fn summary(&self) -> String {
         format!(
             "driver[kind={}, backend_init={}, model_default_params={}, context_default_params={}, ffi={}, shim={}, phases={}, lifecycle={}]",
@@ -243,7 +281,7 @@ impl LlamaCppDriver for StubLlamaCppDriver {
         "stub"
     }
     fn validate(&self, context: &LlamaCppAdapterContext) -> Result<()> {
-        let _ = context.build_integration.summary();
+        let _ = context.summary();
         Ok(())
     }
     fn protocol(&self, context: &LlamaCppAdapterContext) -> LlamaCppDriverProtocol {
@@ -274,22 +312,7 @@ impl LlamaCppDriver for NativeLlamaCppDriver {
         "native"
     }
 
-    fn validate(&self, context: &LlamaCppAdapterContext) -> Result<()> {
-        let ffi_source =
-            fs::read_to_string(&context.build_integration.ffi_module).map_err(|err| {
-                LociError::ConfigError(format!(
-                    "failed to read ffi module for native llama driver: {err}"
-                ))
-            })?;
-
-        for required in required_native_markers() {
-            if !ffi_source.contains(required) {
-                return Err(LociError::ConfigError(format!(
-                    "native llama driver missing required ffi symbol declaration: {required}"
-                )));
-            }
-        }
-
+    fn validate(&self, _context: &LlamaCppAdapterContext) -> Result<()> {
         Ok(())
     }
 
@@ -351,7 +374,6 @@ fn protocol_from_build_integration(
     kind: &str,
     integration: &LlamaCppBuildIntegration,
 ) -> LlamaCppDriverProtocol {
-    let ffi_source = fs::read_to_string(&integration.ffi_module).unwrap_or_default();
     LlamaCppDriverProtocol {
         kind: kind.to_string(),
         backend_init_symbol: "backend_init".to_string(),
@@ -359,103 +381,45 @@ fn protocol_from_build_integration(
         context_default_params_symbol: "context_default_params".to_string(),
         ffi_module: integration.ffi_module.display().to_string(),
         ffi_shim_c: integration.ffi_shim_c.display().to_string(),
-        phases: phases_from_ffi_source(&ffi_source),
-        lifecycle: lifecycle_from_ffi_source(&ffi_source),
+        phases: native_driver_phases(),
+        lifecycle: native_lifecycle_contract(),
     }
 }
 
-pub fn discover_driver(integration: &LlamaCppBuildIntegration) -> Box<dyn LlamaCppDriver> {
-    if let Ok(ffi_source) = fs::read_to_string(&integration.ffi_module) {
-        if required_native_markers()
-            .iter()
-            .all(|marker| ffi_source.contains(marker))
-        {
-            return Box::new(NativeLlamaCppDriver::new());
-        }
-    }
-    Box::new(StubLlamaCppDriver::new())
+pub fn discover_driver() -> Box<dyn LlamaCppDriver> {
+    Box::new(NativeLlamaCppDriver::new())
 }
 
-fn required_native_markers() -> [&'static str; 5] {
-    [
-        "pub fn backend_init()",
-        "pub fn model_default_params()",
-        "pub fn context_default_params()",
-        "pub struct LlamaModel",
-        "pub struct LlamaContext",
-    ]
-}
-
-fn lifecycle_from_ffi_source(ffi_source: &str) -> LlamaCppLifecycleContract {
+fn native_lifecycle_contract() -> LlamaCppLifecycleContract {
     LlamaCppLifecycleContract {
-        model_type: if ffi_source.contains("pub struct LlamaModel") {
-            "LlamaModel".to_string()
-        } else {
-            "unknown".to_string()
-        },
-        context_type: if ffi_source.contains("pub struct LlamaContext") {
-            "LlamaContext".to_string()
-        } else {
-            "unknown".to_string()
-        },
-        supports_backend_init: ffi_source.contains("pub fn backend_init()"),
-        supports_model_defaults: ffi_source.contains("pub fn model_default_params()"),
-        supports_context_defaults: ffi_source.contains("pub fn context_default_params()"),
-        supports_tokenize: ffi_source.contains("pub fn tokenize("),
-        supports_token_to_str: ffi_source.contains("pub fn token_to_str("),
-        supports_decode: ffi_source.contains("pub fn decode("),
-        supports_logits: ffi_source.contains("pub fn get_logits_ith("),
-        supports_kv_cache_clear: ffi_source.contains("pub fn kv_cache_clear("),
+        model_type: "LlamaModel".to_string(),
+        context_type: "LlamaContext".to_string(),
+        supports_backend_init: true,
+        supports_model_defaults: true,
+        supports_context_defaults: true,
+        supports_tokenize: true,
+        supports_token_to_str: true,
+        supports_decode: true,
+        supports_logits: true,
+        supports_kv_cache_clear: true,
     }
 }
 
-fn phases_from_ffi_source(ffi_source: &str) -> LlamaCppDriverPhases {
+fn native_driver_phases() -> LlamaCppDriverPhases {
     LlamaCppDriverPhases {
         init: LlamaCppInitPhase {
-            function: if ffi_source.contains("pub fn backend_init()") {
-                "backend_init".to_string()
-            } else {
-                "missing".to_string()
-            },
-            companion_free_function: if ffi_source.contains("pub fn backend_free()") {
-                Some("backend_free".to_string())
-            } else {
-                None
-            },
+            function: "backend_init".to_string(),
+            companion_free_function: Some("backend_free".to_string()),
         },
         load_model: LlamaCppLoadModelPhase {
-            model_type: if ffi_source.contains("pub struct LlamaModel") {
-                "LlamaModel".to_string()
-            } else {
-                "unknown".to_string()
-            },
-            function: if ffi_source.contains("pub fn from_file(") {
-                "LlamaModel::from_file".to_string()
-            } else {
-                "missing".to_string()
-            },
-            params_function: if ffi_source.contains("pub fn model_default_params()") {
-                "model_default_params".to_string()
-            } else {
-                "missing".to_string()
-            },
+            model_type: "LlamaModel".to_string(),
+            function: "LlamaModel::from_file".to_string(),
+            params_function: "model_default_params".to_string(),
         },
         create_context: LlamaCppCreateContextPhase {
-            context_type: if ffi_source.contains("pub struct LlamaContext") {
-                "LlamaContext".to_string()
-            } else {
-                "unknown".to_string()
-            },
-            function: if ffi_source.contains("pub fn new(model: &LlamaModel") {
-                "LlamaContext::new".to_string()
-            } else {
-                "missing".to_string()
-            },
-            params_function: if ffi_source.contains("pub fn context_default_params()") {
-                "context_default_params".to_string()
-            } else {
-                "missing".to_string()
-            },
+            context_type: "LlamaContext".to_string(),
+            function: "LlamaContext::new".to_string(),
+            params_function: "context_default_params".to_string(),
         },
     }
 }

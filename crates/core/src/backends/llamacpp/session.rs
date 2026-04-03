@@ -16,7 +16,7 @@ impl LlamaCppModel {
             return Ok(());
         }
 
-        let driver = discover_driver(&self.adapter_context.build_integration);
+        let driver = discover_driver();
         let native_context = driver.create_context(LlamaCppContextCreateRequest {
             loaded_model: &self.native_model,
             load_plan: &self.load_plan,

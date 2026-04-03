@@ -13,7 +13,8 @@ use crate::error::{LociError, Result};
 use crate::model::{ModelConfig, ModelLoadStrategy};
 use crate::plugin::{
     discover_plugin_bundle_files, legacy_sampling_hook_from_compat, load_plugin_bundle_file,
-    load_plugin_manifest_file, RegisteredHostRuntimeKind, RegisteredPlugin, SamplingHook,
+    load_plugin_manifest_file, LegacyCapability, RegisteredHostRuntimeKind, RegisteredPlugin,
+    SamplingHook,
 };
 use loci_legacy_plugin_compat::{load_legacy_text_plugin_compat, LegacyTextCompat};
 use loci_plugin_api::{CoreComponent, PlatformTrack};
@@ -35,6 +36,55 @@ struct GovernedModelLoad {
     backend_params: BackendParams,
 }
 
+#[derive(Default)]
+pub(crate) struct LegacyTextRuntimeRegistry {
+    active_plugins: BTreeSet<String>,
+    runtimes: BTreeMap<String, Arc<dyn LegacyTextCompat>>,
+}
+
+impl LegacyTextRuntimeRegistry {
+    fn is_active(&self, plugin_name: &str) -> bool {
+        self.active_plugins.contains(plugin_name)
+    }
+
+    fn activate(&mut self, plugin_name: &str, runtime: Arc<dyn LegacyTextCompat>) -> bool {
+        self.runtimes.insert(plugin_name.to_string(), runtime);
+        self.active_plugins.insert(plugin_name.to_string())
+    }
+
+    fn deactivate(&mut self, plugin_name: &str) -> bool {
+        self.active_plugins.remove(plugin_name)
+    }
+
+    fn runtime(&self, plugin_name: &str) -> Option<Arc<dyn LegacyTextCompat>> {
+        self.runtimes.get(plugin_name).map(Arc::clone)
+    }
+
+    fn materialize(
+        &mut self,
+        plugin_name: &str,
+        runtime: Arc<dyn LegacyTextCompat>,
+    ) -> Arc<dyn LegacyTextCompat> {
+        let runtime = self
+            .runtimes
+            .entry(plugin_name.to_string())
+            .or_insert(runtime);
+        Arc::clone(runtime)
+    }
+
+    fn has_materialized_runtime(&self, plugin_name: &str) -> bool {
+        self.runtimes.contains_key(plugin_name)
+    }
+
+    fn active_plugin_names(&self, plugins: &[RegisteredPlugin]) -> Vec<String> {
+        plugins
+            .iter()
+            .filter(|plugin| self.is_active(&plugin.manifest.name))
+            .map(|plugin| plugin.manifest.name.clone())
+            .collect()
+    }
+}
+
 pub struct InferenceEngine {
     pub(crate) registry: Box<dyn CoreRegistry>,
     pub(crate) backend_registry: BackendRegistry,
@@ -42,9 +92,8 @@ pub struct InferenceEngine {
     pub(crate) model: Option<Box<dyn Model>>,
     pub(crate) model_path: Option<PathBuf>,
     pub(crate) default_inference_params: InferenceParams,
-    pub(crate) active_legacy_text_plugins: BTreeSet<String>,
     pub(crate) host_plugin_runtimes: BTreeMap<String, MaterializedHostRuntime>,
-    pub(crate) legacy_text_plugin_runtimes: BTreeMap<String, Arc<dyn LegacyTextCompat>>,
+    pub(crate) legacy_text_runtime: LegacyTextRuntimeRegistry,
 }
 
 impl InferenceEngine {
@@ -286,7 +335,7 @@ impl InferenceEngine {
                 )));
             }
 
-            if plugin.declares_legacy_capability("on_token") {
+            if plugin.declares_legacy_capability(LegacyCapability::OnToken) {
                 return Err(LociError::from(anyhow::anyhow!(
                     "plugin `{plugin_name}` declares legacy `on_token`, but streaming compat is not implemented"
                 )));
@@ -299,21 +348,18 @@ impl InferenceEngine {
             }
         }
 
-        if self.active_legacy_text_plugins.contains(plugin_name) {
+        if self.legacy_text_runtime.is_active(plugin_name) {
             return Ok(());
         }
 
         let runtime = self.materialize_legacy_text_runtime(plugin_name)?;
 
-        self.legacy_text_plugin_runtimes
-            .insert(plugin_name.to_string(), runtime);
-        self.active_legacy_text_plugins
-            .insert(plugin_name.to_string());
+        self.legacy_text_runtime.activate(plugin_name, runtime);
         Ok(())
     }
 
     pub fn deactivate_legacy_text_plugin(&mut self, plugin_name: &str) -> Result<()> {
-        let existed = self.active_legacy_text_plugins.remove(plugin_name);
+        let existed = self.legacy_text_runtime.deactivate(plugin_name);
         if existed {
             return Ok(());
         }
@@ -324,16 +370,8 @@ impl InferenceEngine {
     }
 
     pub fn active_legacy_text_plugins(&self) -> Vec<String> {
-        self.registry
-            .plugin_manager()
-            .list()
-            .iter()
-            .filter(|plugin| {
-                self.active_legacy_text_plugins
-                    .contains(&plugin.manifest.name)
-            })
-            .map(|plugin| plugin.manifest.name.clone())
-            .collect()
+        self.legacy_text_runtime
+            .active_plugin_names(self.registry.plugin_manager().list())
     }
 
     pub fn legacy_text_plugin_candidates(&self) -> Vec<String> {
@@ -343,7 +381,7 @@ impl InferenceEngine {
             .iter()
             .filter(|plugin| {
                 plugin.is_legacy_compat_bundle()
-                    && !plugin.declares_legacy_capability("on_token")
+                    && !plugin.declares_legacy_capability(LegacyCapability::OnToken)
                     && (plugin.supports_legacy_pre_generate()
                         || plugin.supports_legacy_post_generate())
             })
@@ -852,8 +890,8 @@ impl InferenceEngine {
         &mut self,
         plugin_name: &str,
     ) -> Result<Arc<dyn LegacyTextCompat>> {
-        if let Some(runtime) = self.legacy_text_plugin_runtimes.get(plugin_name) {
-            return Ok(Arc::clone(runtime));
+        if let Some(runtime) = self.legacy_text_runtime.runtime(plugin_name) {
+            return Ok(runtime);
         }
 
         let (manifest_name, manifest_version, legacy_runtime_path, legacy_capabilities, runtime) = {
@@ -902,9 +940,7 @@ impl InferenceEngine {
             })?
         };
 
-        self.legacy_text_plugin_runtimes
-            .insert(plugin_name.to_string(), Arc::clone(&runtime));
-        Ok(runtime)
+        Ok(self.legacy_text_runtime.materialize(plugin_name, runtime))
     }
 
     fn ensure_host_runtime_materialized(&mut self, plugin_name: &str) -> Result<()> {
@@ -990,17 +1026,15 @@ impl InferenceEngine {
     fn apply_legacy_pre_generate(&self, prompt: &str) -> Result<String> {
         let mut prompt = prompt.to_string();
         for plugin in self.registry.plugin_manager().list() {
-            if !self
-                .active_legacy_text_plugins
-                .contains(&plugin.manifest.name)
+            if !self.legacy_text_runtime.is_active(&plugin.manifest.name)
                 || !plugin.supports_legacy_pre_generate()
             {
                 continue;
             }
 
             let runtime = self
-                .legacy_text_plugin_runtimes
-                .get(&plugin.manifest.name)
+                .legacy_text_runtime
+                .runtime(&plugin.manifest.name)
                 .ok_or_else(|| {
                     LociError::from(anyhow::anyhow!(
                         "legacy text runtime missing for active plugin `{}`",
@@ -1015,17 +1049,15 @@ impl InferenceEngine {
     fn apply_legacy_post_generate(&self, response: &str) -> Result<String> {
         let mut response = response.to_string();
         for plugin in self.registry.plugin_manager().list() {
-            if !self
-                .active_legacy_text_plugins
-                .contains(&plugin.manifest.name)
+            if !self.legacy_text_runtime.is_active(&plugin.manifest.name)
                 || !plugin.supports_legacy_post_generate()
             {
                 continue;
             }
 
             let runtime = self
-                .legacy_text_plugin_runtimes
-                .get(&plugin.manifest.name)
+                .legacy_text_runtime
+                .runtime(&plugin.manifest.name)
                 .ok_or_else(|| {
                     LociError::from(anyhow::anyhow!(
                         "legacy text runtime missing for active plugin `{}`",
@@ -1135,8 +1167,8 @@ impl InferenceEngine {
             materialized_host_runtime,
             host_runtime_kind,
             materialized_legacy_runtime: self
-                .legacy_text_plugin_runtimes
-                .contains_key(&plugin.manifest.name),
+                .legacy_text_runtime
+                .has_materialized_runtime(&plugin.manifest.name),
             active_inference_rewriter,
             has_sampling_hook: registered_sampling_hook,
             is_legacy_compat: plugin.is_legacy_compat_bundle(),
@@ -1233,7 +1265,7 @@ mod tests {
         ContributionPoints, CoreRewriters, PluginBootstrap, PluginCompatibility, PluginManifest,
         PluginRuntime,
     };
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
@@ -1455,9 +1487,8 @@ mod tests {
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         engine
@@ -1526,9 +1557,8 @@ mod tests {
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         }
         .run_workflow("agent.plan")
         .expect_err("workflow should require activation");
@@ -1563,9 +1593,8 @@ mod tests {
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         let err = engine
@@ -1591,9 +1620,8 @@ mod tests {
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         engine
@@ -1641,9 +1669,8 @@ mod tests {
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         engine
@@ -1710,9 +1737,8 @@ mod tests {
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         engine
@@ -1795,9 +1821,8 @@ mod tests {
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         let err = engine
@@ -1815,9 +1840,8 @@ mod tests {
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         engine
@@ -1874,9 +1898,8 @@ mod tests {
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         engine
@@ -1938,9 +1961,8 @@ mod tests {
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         engine
@@ -1995,9 +2017,8 @@ mod tests {
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         engine
@@ -2078,9 +2099,8 @@ workflow = true
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         let loaded = engine.load_plugins_from_dir(&dir).expect("load plugins");
@@ -2157,9 +2177,8 @@ logit = 42.0
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         let loaded = engine.load_plugins_from_dir(&dir).expect("load plugins");
@@ -2206,9 +2225,8 @@ logit = 42.0
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         let loaded = engine.load_plugins_from_dir(&dir).expect("load plugins");
@@ -2244,9 +2262,8 @@ logit = 42.0
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         let loaded = engine.load_plugins_from_dir(&dir).expect("load plugins");
@@ -2284,9 +2301,8 @@ logit = 42.0
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         engine
@@ -2338,9 +2354,8 @@ logit = 42.0
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         engine
@@ -2367,9 +2382,8 @@ logit = 42.0
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         engine
@@ -2400,9 +2414,8 @@ logit = 42.0
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         engine
@@ -2506,9 +2519,8 @@ activate_on_load = ["inference"]
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         engine
@@ -2624,9 +2636,8 @@ library_path = "runtime/plugin.dll"
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         engine
@@ -2726,9 +2737,8 @@ wasm_path = "runtime/plugin.wasm"
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         engine
@@ -2783,9 +2793,8 @@ wasm_path = "runtime/plugin.wasm"
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         engine
@@ -2865,9 +2874,8 @@ wasm_path = "runtime/plugin.wasm"
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         engine
@@ -2939,9 +2947,8 @@ wasm_path = "runtime/plugin.wasm"
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         let mut plugin = registered_legacy_text_plugin_for_tests(
@@ -2994,9 +3001,8 @@ wasm_path = "runtime/plugin.wasm"
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         let err = engine
@@ -3031,9 +3037,8 @@ wasm_path = "runtime/plugin.wasm"
             model: None,
             model_path: None,
             default_inference_params: InferenceParams::default(),
-            active_legacy_text_plugins: BTreeSet::new(),
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_plugin_runtimes: BTreeMap::new(),
+            legacy_text_runtime: LegacyTextRuntimeRegistry::default(),
         };
 
         engine

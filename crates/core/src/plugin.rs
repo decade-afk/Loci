@@ -19,13 +19,49 @@ const LEGACY_PLUGIN_ABI_VERSION_CURRENT: u32 = 2;
 const LEGACY_PLUGIN_ABI_VERSION_SUPPORTED: &[u32] = &[1, 2];
 const LEGACY_DYNAMIC_EXTENSIONS: &[&str] = &["dll", "so", "dylib"];
 const LEGACY_WASM_EXTENSIONS: &[&str] = &["wasm"];
-const LEGACY_SAMPLING_CAPABILITIES: &[&str] = &["transform_logits", "post_sample"];
-const LEGACY_TEXT_COMPAT_CAPABILITIES: &[&str] = &[
-    "pre_generate",
-    "post_generate",
-    "transform_logits",
-    "post_sample",
-];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LegacyCapability {
+    PreGenerate,
+    PostGenerate,
+    OnToken,
+    TransformLogits,
+    PostSample,
+}
+
+impl LegacyCapability {
+    fn from_str(raw: &str) -> Option<Self> {
+        match raw {
+            "pre_generate" => Some(Self::PreGenerate),
+            "post_generate" => Some(Self::PostGenerate),
+            "on_token" => Some(Self::OnToken),
+            "transform_logits" => Some(Self::TransformLogits),
+            "post_sample" => Some(Self::PostSample),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PreGenerate => "pre_generate",
+            Self::PostGenerate => "post_generate",
+            Self::OnToken => "on_token",
+            Self::TransformLogits => "transform_logits",
+            Self::PostSample => "post_sample",
+        }
+    }
+
+    fn is_sampling(self) -> bool {
+        matches!(self, Self::TransformLogits | Self::PostSample)
+    }
+
+    fn supports_text_compat_bridge(self) -> bool {
+        matches!(
+            self,
+            Self::PreGenerate | Self::PostGenerate | Self::TransformLogits | Self::PostSample
+        )
+    }
+}
 
 pub trait SamplingHook: Send + Sync {
     fn transform_logits(
@@ -291,19 +327,11 @@ impl RegisteredPlugin {
     }
 
     pub fn supports_legacy_pre_generate(&self) -> bool {
-        self.manifest
-            .compatibility
-            .legacy_capabilities
-            .iter()
-            .any(|candidate| candidate == "pre_generate")
+        self.declares_legacy_capability(LegacyCapability::PreGenerate)
     }
 
     pub fn supports_legacy_post_generate(&self) -> bool {
-        self.manifest
-            .compatibility
-            .legacy_capabilities
-            .iter()
-            .any(|candidate| candidate == "post_generate")
+        self.declares_legacy_capability(LegacyCapability::PostGenerate)
     }
 
     pub fn supports_legacy_sampling(&self) -> bool {
@@ -311,7 +339,8 @@ impl RegisteredPlugin {
             .compatibility
             .legacy_capabilities
             .iter()
-            .any(|candidate| LEGACY_SAMPLING_CAPABILITIES.contains(&candidate.as_str()))
+            .filter_map(|candidate| LegacyCapability::from_str(candidate))
+            .any(LegacyCapability::is_sampling)
     }
 
     fn with_manifest_location(mut self, manifest_path: PathBuf) -> Self {
@@ -333,11 +362,12 @@ impl RegisteredPlugin {
         self.runtime.legacy_text_compat.as_ref().map(Arc::clone)
     }
 
-    pub(crate) fn declares_legacy_capability(&self, capability: &str) -> bool {
+    pub(crate) fn declares_legacy_capability(&self, capability: LegacyCapability) -> bool {
         self.manifest
             .compatibility
             .legacy_capabilities
             .iter()
+            .filter_map(|candidate| LegacyCapability::from_str(candidate))
             .any(|candidate| candidate == capability)
     }
 
@@ -512,8 +542,9 @@ fn legacy_sampling_capabilities(contract: &LegacyPluginContractManifest) -> Vec<
     contract
         .capabilities
         .iter()
-        .filter(|capability| LEGACY_SAMPLING_CAPABILITIES.contains(&capability.as_str()))
-        .cloned()
+        .filter_map(|capability| LegacyCapability::from_str(capability))
+        .filter(|capability| capability.is_sampling())
+        .map(|capability| capability.as_str().to_string())
         .collect()
 }
 
@@ -525,8 +556,9 @@ fn legacy_text_compat_capabilities(contract: &LegacyPluginContractManifest) -> V
     contract
         .capabilities
         .iter()
-        .filter(|capability| LEGACY_TEXT_COMPAT_CAPABILITIES.contains(&capability.as_str()))
-        .cloned()
+        .filter_map(|capability| LegacyCapability::from_str(capability))
+        .filter(|capability| capability.supports_text_compat_bridge())
+        .map(|capability| capability.as_str().to_string())
         .collect()
 }
 
@@ -1090,15 +1122,17 @@ pub(crate) fn registered_legacy_text_plugin_for_tests(
             contributes: ContributionPoints {
                 inference_hooks: capabilities
                     .iter()
-                    .filter(|capability| LEGACY_SAMPLING_CAPABILITIES.contains(capability))
-                    .map(|capability| (*capability).to_string())
+                    .filter_map(|capability| LegacyCapability::from_str(capability))
+                    .filter(|capability| capability.is_sampling())
+                    .map(|capability| capability.as_str().to_string())
                     .collect(),
                 ..Default::default()
             },
             core_rewriters: CoreRewriters {
                 inference: capabilities
                     .iter()
-                    .any(|capability| LEGACY_SAMPLING_CAPABILITIES.contains(capability)),
+                    .filter_map(|capability| LegacyCapability::from_str(capability))
+                    .any(LegacyCapability::is_sampling),
                 ..Default::default()
             },
             runtime: PluginRuntime::default(),

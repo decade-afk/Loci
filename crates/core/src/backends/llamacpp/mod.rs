@@ -11,7 +11,7 @@ use crate::backend::{
 };
 use crate::error::{LociError, Result};
 use crate::plugin::PluginSamplingRuntime;
-use adapter::{LlamaCppAdapter, LlamaCppAdapterContext, StubLlamaCppAdapter};
+use adapter::{LlamaCppAdapter, StubLlamaCppAdapter};
 use driver::{
     discover_driver, LlamaCppBackendSession, LlamaCppContextCreateRequest, LlamaCppCreatedContext,
     LlamaCppLoadedModel, LlamaCppModelLoadRequest,
@@ -46,7 +46,6 @@ pub struct LlamaCppModel {
     native_model: LlamaCppLoadedModel,
     #[allow(dead_code)]
     backend_session: LlamaCppBackendSession,
-    adapter_context: LlamaCppAdapterContext,
     load_plan: LlamaCppLoadPlan,
     metadata: ModelMetadata,
     runtime_state: LlamaCppRuntimeState,
@@ -100,7 +99,7 @@ impl InferenceBackend for LlamaCppBackend {
 
         let adapter_context = self.adapter.build_context()?;
         let load_plan = LlamaCppLoadPlan::from_backend_params(model_path, backend_params)?;
-        let driver = discover_driver(&adapter_context.build_integration);
+        let driver = discover_driver();
         let backend_session = driver.init_backend(&adapter_context)?;
         let native_model = driver.load_model(LlamaCppModelLoadRequest {
             model_path,
@@ -118,7 +117,6 @@ impl InferenceBackend for LlamaCppBackend {
             native_context,
             native_model,
             backend_session,
-            adapter_context,
             load_plan,
             metadata,
             runtime_state,
@@ -347,7 +345,7 @@ mod tests {
     fn native_driver_executes_backend_init_phase() {
         let adapter = StubLlamaCppAdapter::new();
         let context = adapter.build_context().expect("context");
-        let driver = discover_driver(&context.build_integration);
+        let driver = discover_driver();
         let backend = driver.init_backend(&context).expect("backend init");
         assert_eq!(backend.kind(), "native");
         assert!(backend.is_native());

@@ -1,9 +1,6 @@
 #![allow(dead_code)]
 
-use super::driver::{
-    discover_driver, LlamaCppCreateContextPhase, LlamaCppDriver, LlamaCppDriverPhases,
-    LlamaCppDriverProtocol, LlamaCppInitPhase, LlamaCppLifecycleContract, LlamaCppLoadModelPhase,
-};
+use super::driver::{discover_driver, LlamaCppDriver, LlamaCppDriverProtocol};
 use crate::error::{LociError, Result};
 use std::path::PathBuf;
 
@@ -27,8 +24,8 @@ impl StubLlamaCppAdapter {
         LlamaCppBuildIntegration::discover()
     }
 
-    pub fn driver(&self, integration: &LlamaCppBuildIntegration) -> Box<dyn LlamaCppDriver> {
-        discover_driver(integration)
+    pub fn driver(&self) -> Box<dyn LlamaCppDriver> {
+        discover_driver()
     }
 }
 
@@ -38,48 +35,13 @@ impl LlamaCppAdapter for StubLlamaCppAdapter {
     }
 
     fn build_context(&self) -> Result<LlamaCppAdapterContext> {
-        let source_layout = self.source_layout()?;
+        let source_layout = self.source_layout().ok();
         let build_integration = self.build_integration()?;
-        let driver = self.driver(&build_integration);
+        let driver = self.driver();
         let mut context = LlamaCppAdapterContext {
             source_layout,
             build_integration,
-            driver_protocol: LlamaCppDriverProtocol {
-                kind: String::new(),
-                backend_init_symbol: String::new(),
-                model_default_params_symbol: String::new(),
-                context_default_params_symbol: String::new(),
-                ffi_module: String::new(),
-                ffi_shim_c: String::new(),
-                phases: LlamaCppDriverPhases {
-                    init: LlamaCppInitPhase {
-                        function: String::new(),
-                        companion_free_function: None,
-                    },
-                    load_model: LlamaCppLoadModelPhase {
-                        model_type: String::new(),
-                        function: String::new(),
-                        params_function: String::new(),
-                    },
-                    create_context: LlamaCppCreateContextPhase {
-                        context_type: String::new(),
-                        function: String::new(),
-                        params_function: String::new(),
-                    },
-                },
-                lifecycle: LlamaCppLifecycleContract {
-                    model_type: String::new(),
-                    context_type: String::new(),
-                    supports_backend_init: false,
-                    supports_model_defaults: false,
-                    supports_context_defaults: false,
-                    supports_tokenize: false,
-                    supports_token_to_str: false,
-                    supports_decode: false,
-                    supports_logits: false,
-                    supports_kv_cache_clear: false,
-                },
-            },
+            driver_protocol: LlamaCppDriverProtocol::empty(),
         };
         driver.validate(&context)?;
         context.driver_protocol = driver.protocol(&context);
@@ -88,16 +50,21 @@ impl LlamaCppAdapter for StubLlamaCppAdapter {
 }
 
 pub struct LlamaCppAdapterContext {
-    pub source_layout: LlamaCppSourceLayout,
+    pub source_layout: Option<LlamaCppSourceLayout>,
     pub build_integration: LlamaCppBuildIntegration,
     pub driver_protocol: LlamaCppDriverProtocol,
 }
 
 impl LlamaCppAdapterContext {
     pub fn summary(&self) -> String {
+        let source_layout = self
+            .source_layout
+            .as_ref()
+            .map(LlamaCppSourceLayout::summary)
+            .unwrap_or_else(|| "source[unavailable]".to_string());
         format!(
             "{} {} {}",
-            self.source_layout.summary(),
+            source_layout,
             self.build_integration.summary(),
             self.driver_protocol.summary()
         )
@@ -167,15 +134,6 @@ impl LlamaCppBuildIntegration {
             .join("backends")
             .join("llamacpp")
             .join("ffi_shim.c");
-
-        for required in [&build_script, &ffi_module, &ffi_shim_c] {
-            if !required.exists() {
-                return Err(LociError::ConfigError(format!(
-                    "llama.cpp build integration missing required path: {}",
-                    required.display()
-                )));
-            }
-        }
 
         Ok(Self {
             crate_root,
