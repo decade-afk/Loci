@@ -12,13 +12,28 @@ pub enum SamplingHookSource {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PluginCompatibilityStatus {
+    pub runtime_bridge: LegacyRuntimeBridge,
+    pub legacy_bundle: bool,
+    pub text_generation_candidate: bool,
+    pub active_text_generation: bool,
+    pub materialized_runtime: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PluginCompatibilityDetail {
+    pub status: PluginCompatibilityStatus,
+    pub legacy_runtime_path: Option<String>,
+    pub legacy_capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PluginRuntimeStatus {
     pub name: String,
     pub version: String,
     pub supports_ai_infra: bool,
     pub supports_ai_agent: bool,
     pub source_format: PluginSourceFormat,
-    pub runtime_bridge: LegacyRuntimeBridge,
     pub declares_inference_rewriter: bool,
     pub declares_sampling_hook: bool,
     pub sampling_hook_source: SamplingHookSource,
@@ -28,12 +43,9 @@ pub struct PluginRuntimeStatus {
     pub registered_host_runtime: bool,
     pub materialized_host_runtime: bool,
     pub host_runtime_kind: Option<PluginHostRuntimeKind>,
-    pub materialized_legacy_runtime: bool,
     pub active_inference_rewriter: bool,
     pub has_sampling_hook: bool,
-    pub is_legacy_compat: bool,
-    pub legacy_text_candidate: bool,
-    pub active_legacy_text: bool,
+    pub compat: PluginCompatibilityStatus,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -51,7 +63,7 @@ pub struct PluginRuntimeDetail {
     pub custom_nodes: Vec<String>,
     pub commands: Vec<String>,
     pub ui: PluginUiContributionStatus,
-    pub legacy_capabilities: Vec<String>,
+    pub compat: PluginCompatibilityDetail,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -80,7 +92,6 @@ pub struct PluginRuntimeArtifacts {
     pub library_path: Option<String>,
     pub wasm_path: Option<String>,
     pub sampling_profile: Option<String>,
-    pub legacy_runtime_path: Option<String>,
     pub host_runtimes: Vec<PluginHostRuntimeRegistration>,
     pub materialized_host_runtime: Option<PluginHostRuntimeMaterialization>,
 }
@@ -174,9 +185,14 @@ pub struct RuntimeSnapshot {
     pub active_model_info: Option<ModelRuntimeInfo>,
     pub active_inference: Option<String>,
     pub configured_core_rewriters: Vec<CoreRewriterStatus>,
-    pub legacy_text_candidates: Vec<String>,
-    pub active_legacy_text: Vec<String>,
+    pub compat: RuntimeCompatibilitySnapshot,
     pub plugins: Vec<PluginRuntimeStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RuntimeCompatibilitySnapshot {
+    pub text_generation_candidates: Vec<String>,
+    pub active_text_generation_plugins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

@@ -3,9 +3,11 @@ use crate::backend::{
 };
 use crate::control_plane::{
     CommandInventoryStatus, CoreRewriterStatus, EventInventoryStatus, ModelRuntimeInfo,
-    PluginHostRuntimeKind, PluginHostRuntimeMaterialization, PluginHostRuntimeRegistration,
-    PluginRuntimeArtifacts, PluginRuntimeDetail, PluginRuntimeStatus, PluginUiContributionStatus,
-    RuntimeSnapshot, SamplingHookSource, UiInventoryStatus, UiSurfaceKind, WorkflowInventoryStatus,
+    PluginCompatibilityDetail, PluginCompatibilityStatus, PluginHostRuntimeKind,
+    PluginHostRuntimeMaterialization, PluginHostRuntimeRegistration, PluginRuntimeArtifacts,
+    PluginRuntimeDetail, PluginRuntimeStatus, PluginUiContributionStatus,
+    RuntimeCompatibilitySnapshot, RuntimeSnapshot, SamplingHookSource, UiInventoryStatus,
+    UiSurfaceKind, WorkflowInventoryStatus,
 };
 use crate::core::CoreRegistry;
 use crate::engine::types::{GenerationParams, ModelInfo};
@@ -524,6 +526,7 @@ impl InferenceEngine {
     pub fn plugin_runtime_detail(&self, plugin_name: &str) -> Option<PluginRuntimeDetail> {
         let plugin = self.registry.plugin_manager().get(plugin_name)?;
         let status = self.plugin_runtime_status(plugin);
+        let compat_status = status.compat.clone();
         let active_core_rewriters = self
             .registry
             .configured_core_rewriters()
@@ -546,7 +549,6 @@ impl InferenceEngine {
                 library_path: plugin.manifest.runtime.library_path.clone(),
                 wasm_path: plugin.manifest.runtime.wasm_path.clone(),
                 sampling_profile: plugin.manifest.runtime.sampling_profile.clone(),
-                legacy_runtime_path: plugin.manifest.compatibility.legacy_runtime_path.clone(),
                 host_runtimes: plugin
                     .registered_host_runtimes()
                     .iter()
@@ -583,7 +585,11 @@ impl InferenceEngine {
                 windows: plugin.manifest.contributes.ui_contributes.windows.clone(),
                 widgets: plugin.manifest.contributes.ui_contributes.widgets.clone(),
             },
-            legacy_capabilities: plugin.manifest.compatibility.legacy_capabilities.clone(),
+            compat: PluginCompatibilityDetail {
+                status: compat_status,
+                legacy_runtime_path: plugin.manifest.compatibility.legacy_runtime_path.clone(),
+                legacy_capabilities: plugin.manifest.compatibility.legacy_capabilities.clone(),
+            },
         })
     }
 
@@ -747,8 +753,10 @@ impl InferenceEngine {
                 plugin_name,
             })
             .collect();
-        let legacy_text_candidates = self.legacy_text_plugin_candidates();
-        let active_legacy_text = self.active_legacy_text_plugins();
+        let compat = RuntimeCompatibilitySnapshot {
+            text_generation_candidates: self.legacy_text_plugin_candidates(),
+            active_text_generation_plugins: self.active_legacy_text_plugins(),
+        };
         let plugins = self
             .registry
             .plugin_manager()
@@ -766,8 +774,7 @@ impl InferenceEngine {
             active_model_info,
             active_inference,
             configured_core_rewriters,
-            legacy_text_candidates,
-            active_legacy_text,
+            compat,
             plugins,
         }
     }
@@ -1181,7 +1188,6 @@ impl InferenceEngine {
             supports_ai_infra: plugin.supports_track(PlatformTrack::AiInfra),
             supports_ai_agent: plugin.supports_track(PlatformTrack::AiAgent),
             source_format: plugin.manifest.compatibility.source_format,
-            runtime_bridge: plugin.manifest.compatibility.runtime_bridge,
             declares_inference_rewriter: plugin.declares_core_rewriter(CoreComponent::Inference),
             declares_sampling_hook,
             sampling_hook_source,
@@ -1191,20 +1197,23 @@ impl InferenceEngine {
             registered_host_runtime,
             materialized_host_runtime,
             host_runtime_kind,
-            materialized_legacy_runtime: self
-                .legacy_text_runtime
-                .has_materialized_runtime(&plugin.manifest.name),
             active_inference_rewriter,
             has_sampling_hook: registered_sampling_hook,
-            is_legacy_compat: plugin.is_legacy_compat_bundle(),
-            legacy_text_candidate: self
-                .legacy_text_plugin_candidates()
-                .iter()
-                .any(|candidate| candidate == &plugin.manifest.name),
-            active_legacy_text: self
-                .active_legacy_text_plugins()
-                .iter()
-                .any(|active| active == &plugin.manifest.name),
+            compat: PluginCompatibilityStatus {
+                runtime_bridge: plugin.manifest.compatibility.runtime_bridge,
+                legacy_bundle: plugin.is_legacy_compat_bundle(),
+                text_generation_candidate: self
+                    .legacy_text_plugin_candidates()
+                    .iter()
+                    .any(|candidate| candidate == &plugin.manifest.name),
+                active_text_generation: self
+                    .active_legacy_text_plugins()
+                    .iter()
+                    .any(|active| active == &plugin.manifest.name),
+                materialized_runtime: self
+                    .legacy_text_runtime
+                    .has_materialized_runtime(&plugin.manifest.name),
+            },
         }
     }
 }
@@ -2303,7 +2312,7 @@ logit = 42.0
         );
         assert!(!status.registered_sampling_hook);
         assert!(!status.effective_sampling_hook);
-        assert!(!status.materialized_legacy_runtime);
+        assert!(!status.compat.materialized_runtime);
         assert!(!status.active_inference_rewriter);
         assert!(!status.has_sampling_hook);
 
@@ -2460,11 +2469,11 @@ logit = 42.0
             vec!["legacy-prepost".to_string()]
         );
         assert_eq!(
-            snapshot.legacy_text_candidates,
+            snapshot.compat.text_generation_candidates,
             vec!["legacy-prepost".to_string()]
         );
         assert_eq!(
-            snapshot.active_legacy_text,
+            snapshot.compat.active_text_generation_plugins,
             vec!["legacy-prepost".to_string()]
         );
         assert_eq!(snapshot.plugins.len(), 1);
@@ -2472,10 +2481,10 @@ logit = 42.0
             snapshot.configured_core_rewriters,
             Vec::<CoreRewriterStatus>::new()
         );
-        assert!(snapshot.plugins[0].is_legacy_compat);
-        assert!(snapshot.plugins[0].legacy_text_candidate);
-        assert!(snapshot.plugins[0].active_legacy_text);
-        assert!(snapshot.plugins[0].materialized_legacy_runtime);
+        assert!(snapshot.plugins[0].compat.legacy_bundle);
+        assert!(snapshot.plugins[0].compat.text_generation_candidate);
+        assert!(snapshot.plugins[0].compat.active_text_generation);
+        assert!(snapshot.plugins[0].compat.materialized_runtime);
         assert!(!snapshot.plugins[0].declares_inference_rewriter);
         assert!(!snapshot.plugins[0].declares_sampling_hook);
         assert_eq!(
@@ -2590,7 +2599,7 @@ activate_on_load = ["inference"]
             detail.runtime_artifacts.sampling_profile.as_deref(),
             Some("sampling-hook.toml")
         );
-        assert_eq!(detail.runtime_artifacts.legacy_runtime_path, None);
+        assert_eq!(detail.compat.legacy_runtime_path, None);
         assert_eq!(detail.runtime_artifacts.host_runtimes.len(), 1);
         assert!(detail.runtime_artifacts.materialized_host_runtime.is_some());
         assert_eq!(
@@ -2922,7 +2931,7 @@ wasm_path = "runtime/plugin.wasm"
         );
         assert!(!before.plugins[0].registered_sampling_hook);
         assert!(!before.plugins[0].effective_sampling_hook);
-        assert!(!before.plugins[0].materialized_legacy_runtime);
+        assert!(!before.plugins[0].compat.materialized_runtime);
         assert!(!before.plugins[0].active_inference_rewriter);
         assert!(!before.plugins[0].has_sampling_hook);
         assert_eq!(engine.sampling_hook_count(), 0);
@@ -2944,7 +2953,7 @@ wasm_path = "runtime/plugin.wasm"
         );
         assert!(after.plugins[0].registered_sampling_hook);
         assert!(after.plugins[0].effective_sampling_hook);
-        assert!(after.plugins[0].materialized_legacy_runtime);
+        assert!(after.plugins[0].compat.materialized_runtime);
         assert!(after.plugins[0].active_inference_rewriter);
         assert!(after.plugins[0].has_sampling_hook);
         assert_eq!(
@@ -3003,7 +3012,7 @@ wasm_path = "runtime/plugin.wasm"
         );
         assert!(snapshot.plugins[0].registered_sampling_hook);
         assert!(snapshot.plugins[0].effective_sampling_hook);
-        assert!(snapshot.plugins[0].materialized_legacy_runtime);
+        assert!(snapshot.plugins[0].compat.materialized_runtime);
         assert!(snapshot.plugins[0].active_inference_rewriter);
         assert!(snapshot.plugins[0].has_sampling_hook);
 

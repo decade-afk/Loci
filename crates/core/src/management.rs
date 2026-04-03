@@ -1400,7 +1400,7 @@ target_tracks = ["ai_agent"]
             .plugin_detail("legacy-sampler")
             .expect("detail query")
             .expect("plugin detail");
-        assert!(detail.status.materialized_legacy_runtime);
+        assert!(detail.status.compat.materialized_runtime);
         assert!(detail.status.registered_sampling_hook);
         assert!(detail.status.effective_sampling_hook);
     }
@@ -1530,7 +1530,7 @@ target_tracks = ["ai_agent"]
             Some("sampling-hook.toml")
         );
         assert_eq!(
-            detail.runtime_artifacts.legacy_runtime_path.as_deref(),
+            detail.compat.legacy_runtime_path.as_deref(),
             Some("legacy/compat.dll")
         );
         assert!(detail.runtime_artifacts.host_runtimes.is_empty());
@@ -1574,7 +1574,7 @@ target_tracks = ["ai_agent"]
         );
         assert!(!before.status.registered_sampling_hook);
         assert!(!before.status.effective_sampling_hook);
-        assert!(!before.status.materialized_legacy_runtime);
+        assert!(!before.status.compat.materialized_runtime);
         assert!(!before.status.active_inference_rewriter);
         assert!(!before.status.has_sampling_hook);
         assert!(before.active_core_rewriters.is_empty());
@@ -1598,7 +1598,7 @@ target_tracks = ["ai_agent"]
         );
         assert!(after.status.registered_sampling_hook);
         assert!(after.status.effective_sampling_hook);
-        assert!(after.status.materialized_legacy_runtime);
+        assert!(after.status.compat.materialized_runtime);
         assert!(after.status.active_inference_rewriter);
         assert!(after.status.has_sampling_hook);
         assert_eq!(after.active_core_rewriters, vec![CoreComponent::Inference]);

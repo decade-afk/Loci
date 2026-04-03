@@ -77,14 +77,14 @@ fn main() -> anyhow::Result<()> {
 
     let snapshot = engine.runtime_snapshot();
     println!(
-        "loci-cli ready; plugins={}, loaded_now={}, infra_plugins={}, agent_plugins={}, active_inference={}, legacy_text_candidates={}, active_legacy_text={}, management_bind={}",
+        "loci-cli ready; plugins={}, loaded_now={}, infra_plugins={}, agent_plugins={}, active_inference={}, compat_text_candidates={}, compat_active_text={}, management_bind={}",
         snapshot.plugin_count,
         loaded,
         engine.plugins_for_track(PlatformTrack::AiInfra).len(),
         engine.plugins_for_track(PlatformTrack::AiAgent).len(),
         snapshot.active_inference.as_deref().unwrap_or("none"),
-        comma_or_none(&snapshot.legacy_text_candidates),
-        comma_or_none(&snapshot.active_legacy_text),
+        comma_or_none(&snapshot.compat.text_generation_candidates),
+        comma_or_none(&snapshot.compat.active_text_generation_plugins),
         args.management_bind.as_deref().unwrap_or("none"),
     );
 

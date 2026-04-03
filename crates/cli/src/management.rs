@@ -767,7 +767,7 @@ mod tests {
         );
         assert_eq!(value["active_model_path"], Value::Null);
         assert_eq!(value["active_model_info"], Value::Null);
-        assert_eq!(value["legacy_text_candidates"], json!([]));
+        assert_eq!(value["compat"]["text_generation_candidates"], json!([]));
     }
 
     #[test]
@@ -1266,10 +1266,7 @@ mod tests {
             value["runtime_artifacts"]["sampling_profile"],
             "sampling-hook.toml"
         );
-        assert_eq!(
-            value["runtime_artifacts"]["legacy_runtime_path"],
-            "legacy/compat.dll"
-        );
+        assert_eq!(value["compat"]["legacy_runtime_path"], "legacy/compat.dll");
         assert_eq!(value["runtime_artifacts"]["host_runtimes"], json!([]));
         assert_eq!(
             value["runtime_artifacts"]["materialized_host_runtime"],
