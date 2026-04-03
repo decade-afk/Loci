@@ -291,7 +291,14 @@ mod tests {
         );
         assert_path_ends_with(
             &integration.ffi_shim_c,
-            &["crates", "core", "src", "backends", "llamacpp", "ffi_shim.c"],
+            &[
+                "crates",
+                "core",
+                "src",
+                "backends",
+                "llamacpp",
+                "ffi_shim.c",
+            ],
         );
     }
 
