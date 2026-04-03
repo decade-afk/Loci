@@ -21,12 +21,17 @@ env:
 
 jobs:
   verify:
-    name: Verify (${{ matrix.os }})
+    name: Verify (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - name: ubuntu
+            os: ubuntu-latest
+          - name: windows
+            os: windows-2022
+            cmake_generator: Visual Studio 17 2022
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -37,6 +42,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+
+      - name: Initialize MSVC build environment
+        if: matrix.os == 'windows-2022'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Pin CMake generator (Windows)
+        if: matrix.os == 'windows-2022'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_ENV -Value "CMAKE_GENERATOR=${{ matrix.cmake_generator }}"
 
       - name: Install dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
@@ -49,7 +63,7 @@ jobs:
         run: echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
 
       - name: Configure bindgen (Windows)
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-2022'
         shell: pwsh
         run: |
           $libclang = Get-ChildItem -Path @(
