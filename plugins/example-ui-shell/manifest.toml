@@ -16,3 +16,8 @@ ui_host = true
 
 [runtime]
 library_path = "runtime/plugin.dll"
+
+[runtime.host_contract]
+protocol = "loci.host-runtime.v1"
+entrypoint = "loci_ui_host_bootstrap_v1"
+capabilities = ["ui_host", "surface_registry"]

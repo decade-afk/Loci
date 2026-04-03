@@ -489,6 +489,26 @@ fn validate_plugin_manifest(manifest: &PluginManifest) -> Result<()> {
             manifest.api_version
         );
     }
+    if let Some(contract) = manifest.runtime.host_contract.as_ref() {
+        if contract.protocol.trim().is_empty() {
+            bail!(
+                "plugin `{}` declares an empty runtime.host_contract.protocol",
+                manifest.name
+            );
+        }
+        if contract.entrypoint.trim().is_empty() {
+            bail!(
+                "plugin `{}` declares an empty runtime.host_contract.entrypoint",
+                manifest.name
+            );
+        }
+        if manifest.runtime.library_path.is_none() && manifest.runtime.wasm_path.is_none() {
+            bail!(
+                "plugin `{}` declares runtime.host_contract without a host runtime artifact",
+                manifest.name
+            );
+        }
+    }
 
     validate_host_version_range(
         &manifest.name,
@@ -1450,6 +1470,16 @@ api_version = "1.0"
         let plugin = load_plugin_manifest_file(&manifest_path).expect("load example ui bundle");
         assert_eq!(plugin.manifest.name, "example-ui-shell");
         assert!(plugin.manifest.core_rewriters.ui_host);
+        assert_eq!(
+            plugin
+                .manifest
+                .runtime
+                .host_contract
+                .as_ref()
+                .expect("host contract")
+                .protocol,
+            "loci.host-runtime.v1"
+        );
         assert_eq!(plugin.runtime.host_runtimes.len(), 1);
         assert_eq!(
             plugin.runtime.host_runtimes[0].kind,
@@ -1474,6 +1504,33 @@ api_version = "1.0"
             plugin.manifest.contributes.ui_contributes.widgets,
             vec!["runtime-status".to_string()]
         );
+    }
+
+    #[test]
+    fn load_plugin_manifest_file_rejects_host_contract_without_host_runtime() {
+        let dir = unique_temp_dir("host-contract-without-runtime");
+        fs::create_dir_all(dir.join("plugin")).expect("mkdir");
+        fs::write(
+            dir.join("plugin").join(MANIFEST_FILE_NAME),
+            r#"
+name = "host-contract-only"
+version = "1.0.0"
+api_version = "1.0"
+
+[runtime.host_contract]
+protocol = "loci.host-runtime.v1"
+entrypoint = "bootstrap"
+"#,
+        )
+        .expect("write manifest");
+
+        let err = load_plugin_manifest_file(dir.join("plugin").join(MANIFEST_FILE_NAME))
+            .expect_err("load should fail");
+        assert!(err
+            .to_string()
+            .contains("declares runtime.host_contract without a host runtime artifact"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     struct BiasHook;

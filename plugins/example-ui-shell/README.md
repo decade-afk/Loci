@@ -19,6 +19,12 @@ Declared surfaces:
 This example ships a lightweight placeholder host runtime artifact at `runtime/plugin.dll`.
 In the current architecture, activating the plugin will materialize that host runtime artifact while UI rendering still remains product-specific.
 
+Declared host contract:
+
+- protocol: `loci.host-runtime.v1`
+- entrypoint: `loci_ui_host_bootstrap_v1`
+- capabilities: `ui_host`, `surface_registry`
+
 Quick activation flow:
 
 ```bash

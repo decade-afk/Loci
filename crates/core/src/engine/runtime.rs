@@ -3,9 +3,9 @@ use crate::backend::{
 };
 use crate::control_plane::{
     CommandInventoryStatus, CoreRewriterStatus, EventInventoryStatus, ModelRuntimeInfo,
-    PluginCompatibilityDetail, PluginCompatibilityStatus, PluginHostRuntimeKind,
-    PluginHostRuntimeMaterialization, PluginHostRuntimeRegistration, PluginRuntimeArtifacts,
-    PluginRuntimeDetail, PluginRuntimeStatus, PluginUiContributionStatus,
+    PluginCompatibilityDetail, PluginCompatibilityStatus, PluginHostRuntimeContract,
+    PluginHostRuntimeKind, PluginHostRuntimeMaterialization, PluginHostRuntimeRegistration,
+    PluginRuntimeArtifacts, PluginRuntimeDetail, PluginRuntimeStatus, PluginUiContributionStatus,
     RuntimeCompatibilitySnapshot, RuntimeSnapshot, SamplingHookSource, UiInventoryStatus,
     UiSurfaceKind, WorkflowInventoryStatus,
 };
@@ -549,6 +549,16 @@ impl InferenceEngine {
                 library_path: plugin.manifest.runtime.library_path.clone(),
                 wasm_path: plugin.manifest.runtime.wasm_path.clone(),
                 sampling_profile: plugin.manifest.runtime.sampling_profile.clone(),
+                host_contract: plugin
+                    .manifest
+                    .runtime
+                    .host_contract
+                    .as_ref()
+                    .map(|contract| PluginHostRuntimeContract {
+                        protocol: contract.protocol.clone(),
+                        entrypoint: contract.entrypoint.clone(),
+                        capabilities: contract.capabilities.clone(),
+                    }),
                 host_runtimes: plugin
                     .registered_host_runtimes()
                     .iter()
@@ -2599,6 +2609,7 @@ activate_on_load = ["inference"]
             detail.runtime_artifacts.sampling_profile.as_deref(),
             Some("sampling-hook.toml")
         );
+        assert_eq!(detail.runtime_artifacts.host_contract, None);
         assert_eq!(detail.compat.legacy_runtime_path, None);
         assert_eq!(detail.runtime_artifacts.host_runtimes.len(), 1);
         assert!(detail.runtime_artifacts.materialized_host_runtime.is_some());
@@ -2865,6 +2876,17 @@ wasm_path = "runtime/plugin.wasm"
         );
         assert_eq!(after.ui.windows, vec!["operations-console".to_string()]);
         assert_eq!(after.ui.widgets, vec!["runtime-status".to_string()]);
+        let contract = after
+            .runtime_artifacts
+            .host_contract
+            .as_ref()
+            .expect("host contract");
+        assert_eq!(contract.protocol, "loci.host-runtime.v1");
+        assert_eq!(contract.entrypoint, "loci_ui_host_bootstrap_v1");
+        assert_eq!(
+            contract.capabilities,
+            vec!["ui_host".to_string(), "surface_registry".to_string()]
+        );
         let materialized = after
             .runtime_artifacts
             .materialized_host_runtime

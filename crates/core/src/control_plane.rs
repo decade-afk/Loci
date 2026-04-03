@@ -88,10 +88,18 @@ pub struct PluginHostRuntimeMaterialization {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PluginHostRuntimeContract {
+    pub protocol: String,
+    pub entrypoint: String,
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PluginRuntimeArtifacts {
     pub library_path: Option<String>,
     pub wasm_path: Option<String>,
     pub sampling_profile: Option<String>,
+    pub host_contract: Option<PluginHostRuntimeContract>,
     pub host_runtimes: Vec<PluginHostRuntimeRegistration>,
     pub materialized_host_runtime: Option<PluginHostRuntimeMaterialization>,
 }

@@ -558,6 +558,7 @@ mod tests {
                 library_path: Some("runtime/plugin.dll".to_string()),
                 wasm_path: None,
                 sampling_profile: Some("sampling-hook.toml".to_string()),
+                host_contract: None,
             },
             bootstrap: PluginBootstrap::default(),
             compatibility: PluginCompatibility {
@@ -1529,6 +1530,7 @@ target_tracks = ["ai_agent"]
             detail.runtime_artifacts.sampling_profile.as_deref(),
             Some("sampling-hook.toml")
         );
+        assert_eq!(detail.runtime_artifacts.host_contract, None);
         assert_eq!(
             detail.compat.legacy_runtime_path.as_deref(),
             Some("legacy/compat.dll")

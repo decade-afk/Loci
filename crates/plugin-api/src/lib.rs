@@ -75,6 +75,16 @@ pub struct PluginRuntime {
     pub wasm_path: Option<String>,
     #[serde(default)]
     pub sampling_profile: Option<String>,
+    #[serde(default)]
+    pub host_contract: Option<HostRuntimeContract>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostRuntimeContract {
+    pub protocol: String,
+    pub entrypoint: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -271,6 +281,7 @@ mod tests {
             },
             runtime: PluginRuntime {
                 sampling_profile: Some("sampling-hook.toml".to_string()),
+                host_contract: None,
                 ..Default::default()
             },
             bootstrap: PluginBootstrap {
@@ -311,5 +322,46 @@ mod tests {
 
         assert!(manifest.is_legacy_compat_manifest());
         assert!(manifest.uses_legacy_runtime_bridge(LegacyRuntimeBridge::LegacyTextPluginV1));
+    }
+
+    #[test]
+    fn runtime_can_embed_host_contract_metadata() {
+        let manifest = PluginManifest {
+            name: "ui-shell".to_string(),
+            version: "1.0.0".to_string(),
+            api_version: "1.0".to_string(),
+            min_host_version: None,
+            max_host_version: None,
+            target_tracks: vec![PlatformTrack::AiAgent],
+            contributes: ContributionPoints::default(),
+            core_rewriters: CoreRewriters {
+                ui_host: true,
+                ..Default::default()
+            },
+            runtime: PluginRuntime {
+                library_path: Some("runtime/plugin.dll".to_string()),
+                wasm_path: None,
+                sampling_profile: None,
+                host_contract: Some(HostRuntimeContract {
+                    protocol: "loci.host-runtime.v1".to_string(),
+                    entrypoint: "loci_ui_host_bootstrap_v1".to_string(),
+                    capabilities: vec!["ui_host".to_string(), "surface_registry".to_string()],
+                }),
+            },
+            bootstrap: PluginBootstrap::default(),
+            compatibility: PluginCompatibility::default(),
+        };
+
+        let contract = manifest
+            .runtime
+            .host_contract
+            .as_ref()
+            .expect("host contract");
+        assert_eq!(contract.protocol, "loci.host-runtime.v1");
+        assert_eq!(contract.entrypoint, "loci_ui_host_bootstrap_v1");
+        assert_eq!(
+            contract.capabilities,
+            vec!["ui_host".to_string(), "surface_registry".to_string()]
+        );
     }
 }
