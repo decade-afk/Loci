@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Loci Example UI Shell</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">L</span>
+          <div>
+            <p class="eyebrow">Loci Plugin</p>
+            <h1>Example UI Shell</h1>
+          </div>
+        </div>
+        <nav class="nav">
+          <a class="nav-item active" href="#overview">Workspace Overview</a>
+          <a class="nav-item" href="#catalog">Model Catalog</a>
+          <a class="nav-item" href="#ops">Operations Console</a>
+        </nav>
+      </aside>
+
+      <section class="content">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">White Minimal Theme</p>
+            <h2>Local AI runtime governance</h2>
+          </div>
+          <div class="status-chip">Runtime Status: Healthy</div>
+        </header>
+
+        <section id="overview" class="card-grid">
+          <article class="card metric-card">
+            <p class="label">Active Backend</p>
+            <strong>llama.cpp</strong>
+            <span>Native local inference path</span>
+          </article>
+          <article class="card metric-card">
+            <p class="label">Loaded Plugins</p>
+            <strong>4</strong>
+            <span>Governed by manifest bundles</span>
+          </article>
+          <article class="card metric-card">
+            <p class="label">UI Host</p>
+            <strong>example-ui-shell</strong>
+            <span>Surface registry online</span>
+          </article>
+        </section>
+
+        <section id="catalog" class="card split-card">
+          <div>
+            <p class="eyebrow">Panel</p>
+            <h3>Model Catalog</h3>
+            <p class="body-copy">
+              Keep the main shell calm and operational. Surfaces stay sparse,
+              typography stays crisp, and runtime metadata remains legible.
+            </p>
+          </div>
+          <ul class="model-list">
+            <li>Qwen 3 8B GGUF</li>
+            <li>Llama 3.1 8B Instruct</li>
+            <li>DeepSeek R1 Distill</li>
+          </ul>
+        </section>
+
+        <section id="ops" class="card console-card">
+          <div class="console-header">
+            <p class="eyebrow">Window</p>
+            <h3>Operations Console</h3>
+          </div>
+          <div class="console-log">
+            <p>09:00 plugin inventory synchronized</p>
+            <p>09:01 ui_host activated: example-ui-shell</p>
+            <p>09:03 backend ready: llama.cpp</p>
+            <p>09:05 governance snapshot updated</p>
+          </div>
+        </section>
+      </section>
+    </main>
+  </body>
+</html>

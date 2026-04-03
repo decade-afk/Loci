@@ -1,0 +1,15 @@
+name = "example-ui-shell"
+version = "0.1.0"
+api_version = "1.0"
+target_tracks = ["ai_infra", "ai_agent"]
+
+[contributes]
+commands = ["ui:open-dashboard", "ui:open-model-catalog"]
+
+[contributes.ui_contributes]
+panels = ["workspace-overview", "model-catalog"]
+windows = ["operations-console"]
+widgets = ["runtime-status"]
+
+[core_rewriters]
+ui_host = true

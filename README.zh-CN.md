@@ -114,6 +114,7 @@ Loci 现在优先使用 manifest bundle，而不是旧式的随意运行时契�
 - `plugins/example-inference`
 - `plugins/example-infra`
 - `plugins/example-agent`
+- `plugins/example-ui-shell`
 
 细节见 [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md)。
 

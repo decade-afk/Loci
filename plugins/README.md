@@ -7,6 +7,7 @@ Current examples:
 - `example-inference`: inference rewriter and sampling profile contribution
 - `example-infra`: infrastructure-side model contribution example
 - `example-agent`: agent-side workflow contribution example
+- `example-ui-shell`: clean white UI host example with declared panels, windows, widgets, and static preview assets
 
 Use them with:
 

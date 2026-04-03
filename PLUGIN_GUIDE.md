@@ -76,6 +76,7 @@ The repository ships manifest-first examples in:
 - `plugins/example-inference`
 - `plugins/example-infra`
 - `plugins/example-agent`
+- `plugins/example-ui-shell`
 
 These examples are intentionally simple and aligned with the current workspace architecture.
 
@@ -108,6 +109,15 @@ Activate a declared rewriter:
 curl http://127.0.0.1:8080/v1/core/rewriters/activate \
   -H "Content-Type: application/json" \
   -d "{\"component\":\"workflow\",\"plugin_name\":\"example-agent\"}"
+```
+
+Activate the example UI host:
+
+```bash
+curl http://127.0.0.1:8080/v1/core/rewriters/activate \
+  -H "Content-Type: application/json" \
+  -d "{\"component\":\"ui_host\",\"plugin_name\":\"example-ui-shell\"}"
+curl http://127.0.0.1:8080/v1/ui
 ```
 
 Inspect runtime status:

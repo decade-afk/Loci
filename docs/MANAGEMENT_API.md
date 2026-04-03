@@ -31,7 +31,7 @@ Returns the runtime snapshot:
 - active backend and model
 - active inference rewriter
 - configured core rewriters
-- legacy compatibility activation state
+- compatibility diagnostics
 - plugin runtime status list
 
 ### `GET /v1/backends`

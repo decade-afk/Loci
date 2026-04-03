@@ -1429,6 +1429,44 @@ api_version = "1.0"
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn workspace_example_plugins_include_ui_shell_bundle() {
+        let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = crate_dir
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root");
+        let plugin_root = workspace_root.join("plugins");
+        let bundles = discover_plugin_bundle_files(&plugin_root).expect("discover bundles");
+        let manifest_path = plugin_root
+            .join("example-ui-shell")
+            .join(MANIFEST_FILE_NAME);
+
+        assert!(
+            bundles.iter().any(|path| path == &manifest_path),
+            "expected example-ui-shell bundle to be discoverable from workspace plugins dir"
+        );
+
+        let plugin = load_plugin_manifest_file(&manifest_path).expect("load example ui bundle");
+        assert_eq!(plugin.manifest.name, "example-ui-shell");
+        assert!(plugin.manifest.core_rewriters.ui_host);
+        assert_eq!(
+            plugin.manifest.contributes.ui_contributes.panels,
+            vec![
+                "workspace-overview".to_string(),
+                "model-catalog".to_string()
+            ]
+        );
+        assert_eq!(
+            plugin.manifest.contributes.ui_contributes.windows,
+            vec!["operations-console".to_string()]
+        );
+        assert_eq!(
+            plugin.manifest.contributes.ui_contributes.widgets,
+            vec!["runtime-status".to_string()]
+        );
+    }
+
     struct BiasHook;
 
     impl SamplingHook for BiasHook {

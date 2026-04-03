@@ -114,6 +114,7 @@ Example manifests live in:
 - `plugins/example-inference`
 - `plugins/example-infra`
 - `plugins/example-agent`
+- `plugins/example-ui-shell`
 
 More detail is in [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md).
 
