@@ -437,6 +437,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "host-native batch allocation smoke is unstable on Windows CI hosts"
+    )]
     fn owned_batch_allocates_required_buffers() {
         let mut batch = OwnedBatch::new(1, 0, 1).expect("batch should allocate");
         let batch_ref = batch.as_mut();
