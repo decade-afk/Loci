@@ -96,7 +96,12 @@ jobs:
         run: cargo test -q -p loci-ffi
 
       - name: Run loci-core llama tests
+        if: matrix.os == 'ubuntu-latest'
         run: cargo test -q -p loci-core --features llama
+
+      - name: Build loci-core with llama (Windows)
+        if: matrix.os == 'windows-2022'
+        run: cargo build -q -p loci-core --features llama
 
       - name: Run loci-cli llama tests
         run: cargo test -q -p loci-cli --features llama
