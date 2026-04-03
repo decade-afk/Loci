@@ -189,7 +189,7 @@ impl InferenceEngineBuilder {
                 ..Default::default()
             },
             host_plugin_runtimes: BTreeMap::new(),
-            legacy_text_runtime: crate::engine::runtime::LegacyTextRuntimeRegistry::default(),
+            legacy_text_runtime: crate::engine::runtime::LegacyTextCompatCoordinator::default(),
         };
 
         if let Some(model_config) = self.model_config {
