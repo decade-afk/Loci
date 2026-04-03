@@ -15,7 +15,8 @@ use std::sync::Arc;
 
 const MANIFEST_FILE_NAME: &str = "manifest.toml";
 const HOST_PLUGIN_API_VERSION: &str = "1.0";
-const LEGACY_PLUGIN_ABI_VERSION: u32 = 1;
+const LEGACY_PLUGIN_ABI_VERSION_CURRENT: u32 = 2;
+const LEGACY_PLUGIN_ABI_VERSION_SUPPORTED: &[u32] = &[1, 2];
 const LEGACY_DYNAMIC_EXTENSIONS: &[&str] = &["dll", "so", "dylib"];
 const LEGACY_WASM_EXTENSIONS: &[&str] = &["wasm"];
 const LEGACY_SAMPLING_CAPABILITIES: &[&str] = &["transform_logits", "post_sample"];
@@ -119,7 +120,7 @@ struct LegacyPluginContractManifest {
 }
 
 fn default_legacy_plugin_abi_version() -> u32 {
-    LEGACY_PLUGIN_ABI_VERSION
+    LEGACY_PLUGIN_ABI_VERSION_CURRENT
 }
 
 #[derive(Clone)]
@@ -473,12 +474,12 @@ fn validate_legacy_contract_manifest(contract: &LegacyPluginContractManifest) ->
     if contract.version.trim().is_empty() {
         bail!("legacy plugin `{}` has empty version", contract.name);
     }
-    if contract.abi_version != LEGACY_PLUGIN_ABI_VERSION {
+    if !LEGACY_PLUGIN_ABI_VERSION_SUPPORTED.contains(&contract.abi_version) {
         bail!(
-            "legacy plugin `{}` requires ABI v{}, host provides v{}",
+            "legacy plugin `{}` requires ABI v{}, host supports {:?}",
             contract.name,
             contract.abi_version,
-            LEGACY_PLUGIN_ABI_VERSION
+            LEGACY_PLUGIN_ABI_VERSION_SUPPORTED
         );
     }
 
@@ -1105,7 +1106,7 @@ pub(crate) fn registered_legacy_text_plugin_for_tests(
             compatibility: PluginCompatibility {
                 source_format: PluginSourceFormat::LegacyContract,
                 legacy_kind: Some("text_plugin".to_string()),
-                legacy_abi_version: Some(LEGACY_PLUGIN_ABI_VERSION),
+                legacy_abi_version: Some(LEGACY_PLUGIN_ABI_VERSION_CURRENT),
                 legacy_runtime_path: Some(format!("plugins/{plugin_name}.dll")),
                 legacy_capabilities: capabilities
                     .iter()

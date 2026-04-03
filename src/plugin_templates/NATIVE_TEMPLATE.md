@@ -37,6 +37,7 @@ crate-type = ["cdylib"]  # Important for dynamic loading
 
 [dependencies]
 loci = { path = "../../" }  # Adjust path to Loci
+loci_legacy_plugin_api = { path = "../../crates/legacy-plugin-api" }
 anyhow = "1.0"
 ```
 
@@ -101,20 +102,8 @@ impl Plugin for MyPlugin {
     }
 }
 
-// Export plugin constructor
-#[no_mangle]
-pub extern "C" fn create_plugin() -> *mut dyn Plugin {
-    Box::into_raw(Box::new(MyPlugin))
-}
-
-#[no_mangle]
-pub extern "C" fn destroy_plugin(plugin: *mut dyn Plugin) {
-    if !plugin.is_null() {
-        unsafe {
-            let _ = Box::from_raw(plugin);
-        }
-    }
-}
+// Export the stable legacy plugin ABI v2 entrypoint
+loci_legacy_plugin_api::export_legacy_plugin_v2!(MyPlugin);
 ```
 
 ### 4. Create Plugin Metadata
