@@ -22,6 +22,18 @@ typedef enum LociModelLoadStrategyKind {
     LOCI_MODEL_LOAD_AUTO_REDUCE_GPU_LAYERS = 1
 } LociModelLoadStrategyKind;
 
+typedef enum LociStatusCode {
+    LOCI_STATUS_OK = 0,
+    LOCI_STATUS_INVALID_ARGUMENT = 1,
+    LOCI_STATUS_CONFIG_ERROR = 2,
+    LOCI_STATUS_BACKEND_NOT_AVAILABLE = 3,
+    LOCI_STATUS_BACKEND_ERROR = 4,
+    LOCI_STATUS_MODEL_LOAD_ERROR = 5,
+    LOCI_STATUS_INFERENCE_ERROR = 6,
+    LOCI_STATUS_UNSUPPORTED_OPERATION = 7,
+    LOCI_STATUS_INTERNAL_ERROR = 8
+} LociStatusCode;
+
 typedef struct LociModelLoadOptions {
     uint32_t n_ctx;
     uint32_t n_batch;
@@ -56,7 +68,9 @@ typedef struct LociGenerationOptions {
 
 uint32_t loci_abi_version(void);
 const char* loci_version(void);
+LociStatusCode loci_get_last_status_code(void);
 const char* loci_get_last_error(void);
+char* loci_get_last_error_json(void);
 
 LociModelLoadOptions loci_default_model_load_options(void);
 LociGenerationOptions loci_default_generation_options(void);

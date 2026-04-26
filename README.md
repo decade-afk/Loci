@@ -55,6 +55,7 @@ The current C ABI stays narrow and runtime-oriented:
 - load and unload a model
 - raw text generation or structured inference JSON
 - runtime snapshot and backend capability queries
+- stable last-status reporting via enum code plus structured error JSON
 
 ## Quick Start
 

@@ -1,4 +1,5 @@
-use loci_core::{InferenceEngine, InferenceParams, ModelConfig, ModelLoadStrategy};
+use loci_core::{InferenceEngine, InferenceParams, LociError, ModelConfig, ModelLoadStrategy};
+use serde::Serialize;
 use std::cell::RefCell;
 use std::ffi::{c_char, CStr, CString};
 use std::ptr;
@@ -8,11 +9,62 @@ const LOCI_ABI_VERSION: u32 = 1;
 static LOCI_VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 
 thread_local! {
-    static LAST_ERROR: RefCell<CString> = RefCell::new(CString::new("").expect("empty cstring"));
+    static LAST_ERROR: RefCell<LastErrorState> = RefCell::new(LastErrorState::default());
 }
 
 pub struct LociEngine {
     engine: InferenceEngine,
+}
+
+#[derive(Debug, Clone)]
+struct LastErrorState {
+    code: LociStatusCode,
+    message: CString,
+}
+
+impl Default for LastErrorState {
+    fn default() -> Self {
+        Self {
+            code: LociStatusCode::Ok,
+            message: CString::new("").expect("empty cstring"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LociErrorInfo {
+    code: &'static str,
+    message: String,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LociStatusCode {
+    Ok = 0,
+    InvalidArgument = 1,
+    ConfigError = 2,
+    BackendNotAvailable = 3,
+    BackendError = 4,
+    ModelLoadError = 5,
+    InferenceError = 6,
+    UnsupportedOperation = 7,
+    InternalError = 8,
+}
+
+impl LociStatusCode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::InvalidArgument => "invalid_argument",
+            Self::ConfigError => "config_error",
+            Self::BackendNotAvailable => "backend_not_available",
+            Self::BackendError => "backend_error",
+            Self::ModelLoadError => "model_load_error",
+            Self::InferenceError => "inference_error",
+            Self::UnsupportedOperation => "unsupported_operation",
+            Self::InternalError => "internal_error",
+        }
+    }
 }
 
 #[repr(C)]
@@ -106,15 +158,34 @@ impl Default for LociGenerationOptions {
     }
 }
 
-fn set_last_error(message: &str) {
+fn set_last_error(code: LociStatusCode, message: &str) {
     let sanitized = message.replace('\0', " ");
     let value = CString::new(sanitized)
         .unwrap_or_else(|_| CString::new("error message contains interior NUL").expect("cstring"));
-    LAST_ERROR.with(|slot| *slot.borrow_mut() = value);
+    LAST_ERROR.with(|slot| {
+        *slot.borrow_mut() = LastErrorState {
+            code,
+            message: value,
+        }
+    });
 }
 
 fn clear_last_error() {
-    set_last_error("");
+    set_last_error(LociStatusCode::Ok, "");
+}
+
+fn set_last_core_error(error: &LociError) {
+    let code = match error {
+        LociError::ConfigError(_) => LociStatusCode::ConfigError,
+        LociError::InvalidArgument(_) => LociStatusCode::InvalidArgument,
+        LociError::BackendNotAvailable(_) => LociStatusCode::BackendNotAvailable,
+        LociError::BackendError(_) => LociStatusCode::BackendError,
+        LociError::ModelLoadError(_) => LociStatusCode::ModelLoadError,
+        LociError::InferenceError(_) => LociStatusCode::InferenceError,
+        LociError::UnsupportedOperation(_) => LociStatusCode::UnsupportedOperation,
+        LociError::Other(_) => LociStatusCode::InternalError,
+    };
+    set_last_error(code, &error.to_string());
 }
 
 fn bool_from_u8(value: u8) -> bool {
@@ -125,7 +196,10 @@ fn string_into_raw(value: String) -> *mut c_char {
     match CString::new(value) {
         Ok(value) => value.into_raw(),
         Err(_) => {
-            set_last_error("result contains interior NUL byte");
+            set_last_error(
+                LociStatusCode::InternalError,
+                "result contains interior NUL byte",
+            );
             ptr::null_mut()
         }
     }
@@ -135,7 +209,10 @@ fn json_into_raw<T: serde::Serialize>(value: &T) -> *mut c_char {
     match serde_json::to_string(value) {
         Ok(json) => string_into_raw(json),
         Err(error) => {
-            set_last_error(&format!("serialization failed: {error}"));
+            set_last_error(
+                LociStatusCode::InternalError,
+                &format!("serialization failed: {error}"),
+            );
             ptr::null_mut()
         }
     }
@@ -143,20 +220,29 @@ fn json_into_raw<T: serde::Serialize>(value: &T) -> *mut c_char {
 
 unsafe fn required_cstr(value: *const c_char, field: &str) -> Result<String, ()> {
     if value.is_null() {
-        set_last_error(&format!("{field} must not be null"));
+        set_last_error(
+            LociStatusCode::InvalidArgument,
+            &format!("{field} must not be null"),
+        );
         return Err(());
     }
 
     let text = match CStr::from_ptr(value).to_str() {
         Ok(text) => text.trim(),
         Err(_) => {
-            set_last_error(&format!("{field} must be valid UTF-8"));
+            set_last_error(
+                LociStatusCode::InvalidArgument,
+                &format!("{field} must be valid UTF-8"),
+            );
             return Err(());
         }
     };
 
     if text.is_empty() {
-        set_last_error(&format!("{field} must not be empty"));
+        set_last_error(
+            LociStatusCode::InvalidArgument,
+            &format!("{field} must not be empty"),
+        );
         return Err(());
     }
 
@@ -168,14 +254,20 @@ unsafe fn prompt_from_ptr_len(prompt: *const c_char, prompt_len: u32) -> Result<
         return Ok(String::new());
     }
     if prompt.is_null() {
-        set_last_error("prompt must not be null when prompt_len > 0");
+        set_last_error(
+            LociStatusCode::InvalidArgument,
+            "prompt must not be null when prompt_len > 0",
+        );
         return Err(());
     }
     let bytes = slice::from_raw_parts(prompt as *const u8, prompt_len as usize);
     match std::str::from_utf8(bytes) {
         Ok(text) => Ok(text.to_owned()),
         Err(_) => {
-            set_last_error("prompt must be valid UTF-8");
+            set_last_error(
+                LociStatusCode::InvalidArgument,
+                "prompt must be valid UTF-8",
+            );
             Err(())
         }
     }
@@ -204,7 +296,10 @@ unsafe fn tensor_split_from_options(
         return Ok(None);
     }
     if options.tensor_split.is_null() {
-        set_last_error("tensor_split must not be null when tensor_split_len > 0");
+        set_last_error(
+            LociStatusCode::InvalidArgument,
+            "tensor_split must not be null when tensor_split_len > 0",
+        );
         return Err(());
     }
 
@@ -218,14 +313,14 @@ unsafe fn with_engine<T>(
     f: impl FnOnce(&mut LociEngine) -> loci_core::Result<T>,
 ) -> Result<T, ()> {
     if engine.is_null() {
-        set_last_error("engine must not be null");
+        set_last_error(LociStatusCode::InvalidArgument, "engine must not be null");
         return Err(());
     }
 
     match f(&mut *engine) {
         Ok(value) => Ok(value),
         Err(error) => {
-            set_last_error(&error.to_string());
+            set_last_core_error(&error);
             Err(())
         }
     }
@@ -308,8 +403,25 @@ pub unsafe extern "C" fn loci_version() -> *const c_char {
 }
 
 #[no_mangle]
+pub extern "C" fn loci_get_last_status_code() -> LociStatusCode {
+    LAST_ERROR.with(|slot| slot.borrow().code)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn loci_get_last_error() -> *const c_char {
-    LAST_ERROR.with(|slot| slot.borrow().as_ptr())
+    LAST_ERROR.with(|slot| slot.borrow().message.as_ptr())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn loci_get_last_error_json() -> *mut c_char {
+    let payload = LAST_ERROR.with(|slot| {
+        let state = slot.borrow();
+        LociErrorInfo {
+            code: state.code.as_str(),
+            message: state.message.to_string_lossy().into_owned(),
+        }
+    });
+    json_into_raw(&payload)
 }
 
 #[no_mangle]
@@ -324,7 +436,7 @@ pub unsafe extern "C" fn loci_engine_new() -> *mut LociEngine {
     match InferenceEngine::builder().build() {
         Ok(engine) => Box::into_raw(Box::new(LociEngine { engine })),
         Err(error) => {
-            set_last_error(&error.to_string());
+            set_last_core_error(&error);
             ptr::null_mut()
         }
     }
@@ -474,6 +586,7 @@ mod tests {
         unsafe {
             let engine = loci_engine_new();
             assert!(!engine.is_null(), "engine");
+            assert_eq!(loci_get_last_status_code(), LociStatusCode::Ok);
 
             let backend = CString::new("mock").expect("backend");
             let model_path = temp_model_path("infer-unload");
@@ -487,6 +600,7 @@ mod tests {
                 ptr::null(),
             ));
             assert!(load_json.contains("\"active_backend\":\"mock\""));
+            assert_eq!(loci_get_last_status_code(), LociStatusCode::Ok);
 
             let prompt = b"hello";
             let infer_json = take_owned_string(loci_infer_with_len_and_options_json(
@@ -497,10 +611,12 @@ mod tests {
             ));
             assert!(infer_json.contains("\"output\":\"mock:hello"));
             assert!(infer_json.contains("\"backend\":\"mock\""));
+            assert_eq!(loci_get_last_status_code(), LociStatusCode::Ok);
 
             let unload_json = take_owned_string(loci_engine_unload_model_json(engine));
             assert!(unload_json.contains("\"unloaded\":true"));
             assert!(unload_json.contains("\"previous_backend\":\"mock\""));
+            assert_eq!(loci_get_last_status_code(), LociStatusCode::Ok);
 
             loci_engine_free(engine);
         }
@@ -514,11 +630,47 @@ mod tests {
 
             let result = loci_infer_with_len_and_options_json(engine, ptr::null(), 5, ptr::null());
             assert!(result.is_null(), "call should fail");
+            assert_eq!(loci_get_last_status_code(), LociStatusCode::InvalidArgument);
 
             let error = CStr::from_ptr(loci_get_last_error())
                 .to_str()
                 .expect("utf8");
             assert!(error.contains("prompt must not be null"));
+
+            let error_json = take_owned_string(loci_get_last_error_json());
+            assert!(error_json.contains("\"code\":\"invalid_argument\""));
+            assert!(error_json.contains("prompt must not be null"));
+
+            loci_engine_free(engine);
+        }
+    }
+
+    #[test]
+    fn ffi_classifies_backend_errors() {
+        unsafe {
+            let engine = loci_engine_new();
+            assert!(!engine.is_null(), "engine");
+
+            let backend = CString::new("missing-backend").expect("backend");
+            let model_path = temp_model_path("missing-backend");
+            let model_path_cstr =
+                CString::new(model_path.display().to_string()).expect("model_path");
+
+            let result = loci_engine_load_model_json(
+                engine,
+                backend.as_ptr(),
+                model_path_cstr.as_ptr(),
+                ptr::null(),
+            );
+            assert!(result.is_null(), "call should fail");
+            assert_eq!(
+                loci_get_last_status_code(),
+                LociStatusCode::BackendNotAvailable
+            );
+
+            let error_json = take_owned_string(loci_get_last_error_json());
+            assert!(error_json.contains("\"code\":\"backend_not_available\""));
+            assert!(error_json.contains("backend not available"));
 
             loci_engine_free(engine);
         }
