@@ -49,6 +49,13 @@ Loci follows the three-layer design agreed for the infra track:
 
 The current implementation keeps `llama.cpp` as the primary backend and uses plugin activation to gate hardware-specific behavior instead of baking application logic into the runtime.
 
+The current C ABI stays narrow and runtime-oriented:
+
+- create and free an engine
+- load and unload a model
+- raw text generation or structured inference JSON
+- runtime snapshot and backend capability queries
+
 ## Quick Start
 
 Build the workspace:

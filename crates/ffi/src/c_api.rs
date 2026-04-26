@@ -395,6 +395,40 @@ pub unsafe extern "C" fn loci_generate_with_len_and_options(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn loci_engine_unload_model_json(engine: *mut LociEngine) -> *mut c_char {
+    match with_engine(engine, |engine| Ok(engine.engine.unload_model())) {
+        Ok(status) => {
+            clear_last_error();
+            json_into_raw(&status)
+        }
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn loci_infer_with_len_and_options_json(
+    engine: *mut LociEngine,
+    prompt: *const c_char,
+    prompt_len: u32,
+    options: *const LociGenerationOptions,
+) -> *mut c_char {
+    let prompt = match prompt_from_ptr_len(prompt, prompt_len) {
+        Ok(value) => value,
+        Err(_) => return ptr::null_mut(),
+    };
+    let options = generation_options(options);
+    let params = build_generation_params(options);
+
+    match with_engine(engine, |engine| engine.engine.infer(&prompt, &params)) {
+        Ok(response) => {
+            clear_last_error();
+            json_into_raw(&response)
+        }
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn loci_engine_runtime_snapshot_json(engine: *mut LociEngine) -> *mut c_char {
     match with_engine(engine, |engine| Ok(engine.engine.runtime_snapshot())) {
         Ok(snapshot) => {
@@ -402,6 +436,92 @@ pub unsafe extern "C" fn loci_engine_runtime_snapshot_json(engine: *mut LociEngi
             json_into_raw(&snapshot)
         }
         Err(_) => ptr::null_mut(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_model_path(name: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "loci-ffi-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("demo.gguf");
+        fs::write(&path, b"mock-model").expect("write model");
+        path
+    }
+
+    unsafe fn take_owned_string(value: *mut c_char) -> String {
+        assert!(!value.is_null(), "ffi returned null");
+        let text = CStr::from_ptr(value).to_str().expect("utf8").to_owned();
+        loci_free_string(value);
+        text
+    }
+
+    #[test]
+    fn ffi_can_infer_and_unload_model_as_json() {
+        unsafe {
+            let engine = loci_engine_new();
+            assert!(!engine.is_null(), "engine");
+
+            let backend = CString::new("mock").expect("backend");
+            let model_path = temp_model_path("infer-unload");
+            let model_path_cstr =
+                CString::new(model_path.display().to_string()).expect("model_path");
+
+            let load_json = take_owned_string(loci_engine_load_model_json(
+                engine,
+                backend.as_ptr(),
+                model_path_cstr.as_ptr(),
+                ptr::null(),
+            ));
+            assert!(load_json.contains("\"active_backend\":\"mock\""));
+
+            let prompt = b"hello";
+            let infer_json = take_owned_string(loci_infer_with_len_and_options_json(
+                engine,
+                prompt.as_ptr() as *const c_char,
+                prompt.len() as u32,
+                ptr::null(),
+            ));
+            assert!(infer_json.contains("\"output\":\"mock:hello"));
+            assert!(infer_json.contains("\"backend\":\"mock\""));
+
+            let unload_json = take_owned_string(loci_engine_unload_model_json(engine));
+            assert!(unload_json.contains("\"unloaded\":true"));
+            assert!(unload_json.contains("\"previous_backend\":\"mock\""));
+
+            loci_engine_free(engine);
+        }
+    }
+
+    #[test]
+    fn ffi_reports_errors_for_null_prompt_pointer() {
+        unsafe {
+            let engine = loci_engine_new();
+            assert!(!engine.is_null(), "engine");
+
+            let result = loci_infer_with_len_and_options_json(engine, ptr::null(), 5, ptr::null());
+            assert!(result.is_null(), "call should fail");
+
+            let error = CStr::from_ptr(loci_get_last_error())
+                .to_str()
+                .expect("utf8");
+            assert!(error.contains("prompt must not be null"));
+
+            loci_engine_free(engine);
+        }
     }
 }
 

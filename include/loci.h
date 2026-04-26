@@ -71,7 +71,16 @@ char* loci_engine_load_model_json(
     const LociModelLoadOptions* options
 );
 
+char* loci_engine_unload_model_json(LociEngine* engine);
+
 char* loci_generate_with_len_and_options(
+    LociEngine* engine,
+    const char* prompt,
+    uint32_t prompt_len,
+    const LociGenerationOptions* options
+);
+
+char* loci_infer_with_len_and_options_json(
     LociEngine* engine,
     const char* prompt,
     uint32_t prompt_len,

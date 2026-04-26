@@ -42,6 +42,8 @@ Loci exposes three embedding surfaces:
 - C ABI via `loci-ffi`
 - local sidecar HTTP surface via `loci-server`
 
+The C ABI is intentionally limited to runtime host concerns: engine lifecycle, model load/unload, text generation, structured inference JSON, runtime snapshots, and backend capability queries.
+
 ## Runtime Flow
 
 1. Discover plugin manifests from a directory or explicit path.
