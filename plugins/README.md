@@ -1,26 +1,12 @@
-# Plugin Bundle Examples
+# Plugin Examples
 
-This directory contains manifest-first example bundles for the new Loci architecture.
+This directory keeps only Infra-aligned sample plugins for the new Loci mainline.
 
-Current examples:
+- `example-inference`: inference-side plugin sample
+- `example-infra`: hardware/backend-side plugin sample
 
-- `example-inference`: inference rewriter and sampling profile contribution
-- `example-infra`: infrastructure-side model contribution example
-- `example-agent`: agent-side workflow contribution example
-- `example-ui-shell`: clean white UI host example with declared panels, windows, widgets, and static preview assets
-
-Use them with:
+Load them with:
 
 ```bash
 cargo run -p loci-cli -- --plugin-dir plugins
 ```
-
-or:
-
-```bash
-curl http://127.0.0.1:8080/v1/plugins/load \
-  -H "Content-Type: application/json" \
-  -d "{\"path\":\"plugins\",\"source_kind\":\"directory\"}"
-```
-
-These examples intentionally use manifest bundles instead of the removed root-level dynamic example programs.

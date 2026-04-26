@@ -11,6 +11,7 @@ llama = ["loci-core/llama"]
 
 [dependencies]
 loci-core = { path = "../core" }
+loci-server = { path = "../server" }
 anyhow.workspace = true
 serde_json.workspace = true
 

@@ -1,12 +1,11 @@
 name = "example-infra"
 version = "0.1.0"
 api_version = "1.0"
-target_tracks = ["ai_infra"]
+kind = "hardware_backend"
+description = "Example hardware backend plugin manifest for local acceleration policy."
+auto_activate = true
+priority = 90
 
-[contributes]
-model_providers = ["private-registry"]
-inference_hooks = ["pre_tokenize"]
-commands = ["infra:warmup"]
-
-[core_rewriters]
-model = true
+[capabilities]
+hardware_targets = ["cpu", "cuda", "vulkan"]
+features = ["auto_detect", "mixed_offload", "fallback_cpu"]

@@ -435,7 +435,9 @@ fn model_params_from_load_plan(load_plan: &LlamaCppLoadPlan) -> ffi::llama_model
     params.main_gpu = if load_plan.gpu_active() && load_plan.split_mode() == GpuSplitMode::None {
         load_plan.main_gpu() as i32
     } else {
-        0
+        // llama.cpp uses `main_gpu < 0` as the CPU-only sentinel when split mode is `none`.
+        // Passing `0` on a host with no GPU devices makes model load fail during packaged startup.
+        -1
     };
     params.tensor_split = load_plan
         .tensor_split()
@@ -469,4 +471,53 @@ fn context_params_from_request(
         params.n_threads = n_threads as i32;
     }
     params
+}
+
+#[cfg(test)]
+mod tests {
+    use super::model_params_from_load_plan;
+    use crate::backend::{BackendParams, GpuSplitMode};
+    use crate::backends::llamacpp::plan::LlamaCppLoadPlan;
+    use std::path::Path;
+
+    #[test]
+    fn cpu_only_model_params_use_negative_main_gpu_sentinel() {
+        let plan = LlamaCppLoadPlan::from_backend_params(
+            Path::new("demo.gguf"),
+            BackendParams {
+                use_gpu: false,
+                n_gpu_layers: 16,
+                main_gpu: 3,
+                ..Default::default()
+            },
+        )
+        .expect("plan");
+
+        let params = model_params_from_load_plan(&plan);
+        assert_eq!(params.n_gpu_layers, 0);
+        assert_eq!(
+            params.split_mode,
+            super::ffi::llama_split_mode_LLAMA_SPLIT_MODE_NONE
+        );
+        assert_eq!(params.main_gpu, -1);
+    }
+
+    #[test]
+    fn single_gpu_model_params_keep_selected_main_gpu() {
+        let plan = LlamaCppLoadPlan::from_backend_params(
+            Path::new("demo.gguf"),
+            BackendParams {
+                use_gpu: true,
+                n_gpu_layers: 24,
+                split_mode: GpuSplitMode::None,
+                main_gpu: 2,
+                ..Default::default()
+            },
+        )
+        .expect("plan");
+
+        let params = model_params_from_load_plan(&plan);
+        assert_eq!(params.n_gpu_layers, 24);
+        assert_eq!(params.main_gpu, 2);
+    }
 }

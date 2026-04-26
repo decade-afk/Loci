@@ -1,220 +1,63 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlatformTrack {
-    AiInfra,
-    AiAgent,
-}
+pub const HOST_PLUGIN_API_VERSION: &str = "1.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CoreComponent {
-    Inference,
-    Model,
-    Hardware,
-    Workflow,
-    EventBus,
-    PluginManager,
-    UiHost,
+pub enum PluginKind {
+    ModelLoader,
+    HardwareBackend,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct UiContributionPoints {
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginCapabilities {
     #[serde(default)]
-    pub panels: Vec<String>,
+    pub model_formats: Vec<String>,
     #[serde(default)]
-    pub windows: Vec<String>,
+    pub hardware_targets: Vec<String>,
     #[serde(default)]
-    pub widgets: Vec<String>,
+    pub features: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ContributionPoints {
-    #[serde(default)]
-    pub model_providers: Vec<String>,
-    #[serde(default)]
-    pub accelerators: Vec<String>,
-    #[serde(default)]
-    pub inference_hooks: Vec<String>,
-    #[serde(default)]
-    pub events: Vec<String>,
-    #[serde(default)]
-    pub workflows: Vec<String>,
-    #[serde(default)]
-    pub custom_nodes: Vec<String>,
-    #[serde(default)]
-    pub commands: Vec<String>,
-    #[serde(default)]
-    pub ui_contributes: UiContributionPoints,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CoreRewriters {
-    #[serde(default)]
-    pub inference: bool,
-    #[serde(default)]
-    pub model: bool,
-    #[serde(default)]
-    pub hardware: bool,
-    #[serde(default)]
-    pub workflow: bool,
-    #[serde(default)]
-    pub event_bus: bool,
-    #[serde(default)]
-    pub plugin_manager: bool,
-    #[serde(default)]
-    pub ui_host: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginRuntime {
     #[serde(default)]
     pub library_path: Option<String>,
     #[serde(default)]
     pub wasm_path: Option<String>,
-    #[serde(default)]
-    pub sampling_profile: Option<String>,
-    #[serde(default)]
-    pub host_contract: Option<HostRuntimeContract>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostRuntimeContract {
-    pub protocol: String,
-    pub entrypoint: String,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PluginBootstrap {
-    #[serde(default)]
-    pub activate_on_load: Vec<CoreComponent>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginSourceFormat {
-    #[default]
-    NativeManifest,
-    LegacyContract,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum LegacyRuntimeBridge {
-    #[default]
-    None,
-    LegacyTextPluginV1,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PluginCompatibility {
-    #[serde(default)]
-    pub source_format: PluginSourceFormat,
-    #[serde(default)]
-    pub legacy_kind: Option<String>,
-    #[serde(default)]
-    pub legacy_abi_version: Option<u32>,
-    #[serde(default)]
-    pub legacy_runtime_path: Option<String>,
-    #[serde(default)]
-    pub legacy_capabilities: Vec<String>,
-    #[serde(default)]
-    pub runtime_bridge: LegacyRuntimeBridge,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginManifest {
     pub name: String,
     pub version: String,
     pub api_version: String,
+    pub kind: PluginKind,
     #[serde(default)]
-    pub min_host_version: Option<String>,
+    pub description: Option<String>,
     #[serde(default)]
-    pub max_host_version: Option<String>,
+    pub auto_activate: bool,
     #[serde(default)]
-    pub target_tracks: Vec<PlatformTrack>,
+    pub priority: i32,
     #[serde(default)]
-    pub contributes: ContributionPoints,
-    #[serde(default)]
-    pub core_rewriters: CoreRewriters,
+    pub capabilities: PluginCapabilities,
     #[serde(default)]
     pub runtime: PluginRuntime,
-    #[serde(default)]
-    pub bootstrap: PluginBootstrap,
-    #[serde(default)]
-    pub compatibility: PluginCompatibility,
-}
-
-impl ContributionPoints {
-    pub fn is_empty(&self) -> bool {
-        self.model_providers.is_empty()
-            && self.accelerators.is_empty()
-            && self.inference_hooks.is_empty()
-            && self.events.is_empty()
-            && self.workflows.is_empty()
-            && self.custom_nodes.is_empty()
-            && self.commands.is_empty()
-            && self.ui_contributes.panels.is_empty()
-            && self.ui_contributes.windows.is_empty()
-            && self.ui_contributes.widgets.is_empty()
-    }
-}
-
-impl CoreRewriters {
-    pub fn supports(&self, component: CoreComponent) -> bool {
-        match component {
-            CoreComponent::Inference => self.inference,
-            CoreComponent::Model => self.model,
-            CoreComponent::Hardware => self.hardware,
-            CoreComponent::Workflow => self.workflow,
-            CoreComponent::EventBus => self.event_bus,
-            CoreComponent::PluginManager => self.plugin_manager,
-            CoreComponent::UiHost => self.ui_host,
-        }
-    }
-
-    pub fn declared_components(&self) -> Vec<CoreComponent> {
-        [
-            CoreComponent::Inference,
-            CoreComponent::Model,
-            CoreComponent::Hardware,
-            CoreComponent::Workflow,
-            CoreComponent::EventBus,
-            CoreComponent::PluginManager,
-            CoreComponent::UiHost,
-        ]
-        .into_iter()
-        .filter(|component| self.supports(*component))
-        .collect()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.declared_components().is_empty()
-    }
 }
 
 impl PluginManifest {
-    pub fn supports_track(&self, track: PlatformTrack) -> bool {
-        self.target_tracks.is_empty() || self.target_tracks.contains(&track)
+    pub fn supports_model_format(&self, format: &str) -> bool {
+        self.capabilities
+            .model_formats
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(format))
     }
 
-    pub fn declares_core_rewriter(&self, component: CoreComponent) -> bool {
-        self.core_rewriters.supports(component)
-    }
-
-    pub fn activates_on_load(&self, component: CoreComponent) -> bool {
-        self.bootstrap.activate_on_load.contains(&component)
-    }
-
-    pub fn is_legacy_compat_manifest(&self) -> bool {
-        self.compatibility.source_format == PluginSourceFormat::LegacyContract
-    }
-
-    pub fn uses_legacy_runtime_bridge(&self, bridge: LegacyRuntimeBridge) -> bool {
-        self.compatibility.runtime_bridge == bridge
+    pub fn targets_hardware(&self, hardware: &str) -> bool {
+        self.capabilities
+            .hardware_targets
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(hardware))
     }
 }
 
@@ -227,141 +70,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manifest_defaults_to_all_tracks_when_unspecified() {
+    fn manifest_matches_model_formats_case_insensitively() {
         let manifest = PluginManifest {
-            name: "demo".to_string(),
-            version: "1.0.0".to_string(),
-            api_version: "1.0".to_string(),
-            min_host_version: None,
-            max_host_version: None,
-            target_tracks: Vec::new(),
-            contributes: ContributionPoints::default(),
-            core_rewriters: CoreRewriters::default(),
-            runtime: PluginRuntime::default(),
-            bootstrap: PluginBootstrap::default(),
-            compatibility: PluginCompatibility::default(),
-        };
-
-        assert!(manifest.supports_track(PlatformTrack::AiInfra));
-        assert!(manifest.supports_track(PlatformTrack::AiAgent));
-    }
-
-    #[test]
-    fn core_rewriters_report_declared_components() {
-        let rewriters = CoreRewriters {
-            inference: true,
-            workflow: true,
-            ui_host: true,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            rewriters.declared_components(),
-            vec![
-                CoreComponent::Inference,
-                CoreComponent::Workflow,
-                CoreComponent::UiHost,
-            ]
-        );
-    }
-
-    #[test]
-    fn manifest_reports_bootstrap_activation_targets() {
-        let manifest = PluginManifest {
-            name: "demo".to_string(),
-            version: "1.0.0".to_string(),
-            api_version: "1.0".to_string(),
-            min_host_version: None,
-            max_host_version: None,
-            target_tracks: vec![PlatformTrack::AiInfra],
-            contributes: ContributionPoints::default(),
-            core_rewriters: CoreRewriters {
-                inference: true,
-                ..Default::default()
-            },
-            runtime: PluginRuntime {
-                sampling_profile: Some("sampling-hook.toml".to_string()),
-                host_contract: None,
-                ..Default::default()
-            },
-            bootstrap: PluginBootstrap {
-                activate_on_load: vec![CoreComponent::Inference],
-            },
-            compatibility: PluginCompatibility::default(),
-        };
-
-        assert!(manifest.activates_on_load(CoreComponent::Inference));
-        assert!(!manifest.activates_on_load(CoreComponent::Workflow));
-    }
-
-    #[test]
-    fn manifest_reports_legacy_compat_source() {
-        let manifest = PluginManifest {
-            name: "legacy-demo".to_string(),
+            name: "gguf-loader".to_string(),
             version: "0.1.0".to_string(),
-            api_version: "1.0".to_string(),
-            min_host_version: Some("0.1.0".to_string()),
-            max_host_version: None,
-            target_tracks: Vec::new(),
-            contributes: ContributionPoints::default(),
-            core_rewriters: CoreRewriters::default(),
+            api_version: HOST_PLUGIN_API_VERSION.to_string(),
+            kind: PluginKind::ModelLoader,
+            description: None,
+            auto_activate: true,
+            priority: 10,
+            capabilities: PluginCapabilities {
+                model_formats: vec!["gguf".to_string()],
+                hardware_targets: Vec::new(),
+                features: vec!["dynamic_load".to_string()],
+            },
             runtime: PluginRuntime::default(),
-            bootstrap: PluginBootstrap::default(),
-            compatibility: PluginCompatibility {
-                source_format: PluginSourceFormat::LegacyContract,
-                legacy_kind: Some("text_plugin".to_string()),
-                legacy_abi_version: Some(1),
-                legacy_runtime_path: Some("plugins/legacy.dll".to_string()),
-                legacy_capabilities: vec![
-                    "transform_logits".to_string(),
-                    "post_sample".to_string(),
-                ],
-                runtime_bridge: LegacyRuntimeBridge::LegacyTextPluginV1,
-            },
         };
 
-        assert!(manifest.is_legacy_compat_manifest());
-        assert!(manifest.uses_legacy_runtime_bridge(LegacyRuntimeBridge::LegacyTextPluginV1));
-    }
-
-    #[test]
-    fn runtime_can_embed_host_contract_metadata() {
-        let manifest = PluginManifest {
-            name: "ui-shell".to_string(),
-            version: "1.0.0".to_string(),
-            api_version: "1.0".to_string(),
-            min_host_version: None,
-            max_host_version: None,
-            target_tracks: vec![PlatformTrack::AiAgent],
-            contributes: ContributionPoints::default(),
-            core_rewriters: CoreRewriters {
-                ui_host: true,
-                ..Default::default()
-            },
-            runtime: PluginRuntime {
-                library_path: Some("runtime/plugin.dll".to_string()),
-                wasm_path: None,
-                sampling_profile: None,
-                host_contract: Some(HostRuntimeContract {
-                    protocol: "loci.host-runtime.v1".to_string(),
-                    entrypoint: "loci_ui_host_bootstrap_v1".to_string(),
-                    capabilities: vec!["ui_host".to_string(), "surface_registry".to_string()],
-                }),
-            },
-            bootstrap: PluginBootstrap::default(),
-            compatibility: PluginCompatibility::default(),
-        };
-
-        let contract = manifest
-            .runtime
-            .host_contract
-            .as_ref()
-            .expect("host contract");
-        assert_eq!(contract.protocol, "loci.host-runtime.v1");
-        assert_eq!(contract.entrypoint, "loci_ui_host_bootstrap_v1");
-        assert_eq!(
-            contract.capabilities,
-            vec!["ui_host".to_string(), "surface_registry".to_string()]
-        );
+        assert!(manifest.supports_model_format("GGUF"));
+        assert!(!manifest.supports_model_format("onnx"));
     }
 }

@@ -1,14 +1,11 @@
 name = "example-inference"
 version = "0.1.0"
 api_version = "1.0"
-target_tracks = ["ai_infra"]
+kind = "model_loader"
+description = "Example local model loader plugin for the Loci infra track."
+auto_activate = true
+priority = 100
 
-[contributes]
-inference_hooks = ["sampling-profile"]
-commands = ["inference:activate"]
-
-[core_rewriters]
-inference = true
-
-[runtime]
-sampling_profile = "sampling-hook.toml"
+[capabilities]
+model_formats = ["gguf"]
+features = ["dynamic_load", "local_models"]

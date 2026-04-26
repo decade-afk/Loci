@@ -2,10 +2,9 @@
 members = [
     "crates/cli",
     "crates/core",
-    "crates/legacy-plugin-compat",
-    "crates/legacy-plugin-api",
     "crates/ffi",
     "crates/plugin-api",
+    "crates/server",
 ]
 resolver = "2"
 

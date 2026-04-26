@@ -10,7 +10,6 @@ default = []
 llama = []
 
 [dependencies]
-loci-legacy-plugin-compat = { path = "../legacy-plugin-compat" }
 loci-plugin-api = { path = "../plugin-api" }
 anyhow.workspace = true
 serde.workspace = true

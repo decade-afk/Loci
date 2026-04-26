@@ -1,149 +1,53 @@
 # Loci Architecture
 
-Last updated: 2026-04-02
-
 ## Positioning
 
-Loci is a plugin-governed local AI runtime and management plane for host products.
+Loci is the infra runtime below products such as `PetCompanion`. It owns local inference concerns and avoids application-layer ownership.
 
-It sits between low-level backend bindings and end-user UX shells:
+## Layering
 
-- below product-specific chat or agent UIs
-- above raw inference backend integration
-- focused on governable runtime seams, pluginized upgrades, and host-controlled operations
+### 1. Core Layer
 
-## Workspace Structure
+`crates/core` contains:
 
-The repository is a Rust workspace instead of a root monolith.
+- backend registry
+- model load configuration
+- inference pipeline
+- plugin manifest loading
+- runtime snapshot and active plugin state
 
-| Crate | Responsibility |
-|---|---|
-| `crates/core` | runtime kernel, model loading, plugin inventory, governance seams, management service |
-| `crates/cli` | `loci` binary and management HTTP serving |
-| `crates/plugin-api` | plugin manifest schema and shared capability types |
-| `crates/ffi` | stable public C ABI over the current runtime and management surface |
-| `crates/legacy-plugin-api` | legacy plugin contract types |
-| `crates/legacy-plugin-compat` | bounded bridge for legacy text plugins |
+The core does not know about product UI, desktop windows, or end-user workflow shells.
 
-## Architectural Thesis
+### 2. Plugin Layer
 
-The primary rule is that governable behavior should exist behind explicit seams rather than hardcoded branches.
+Plugins are declared through `manifest.toml`.
 
-The current rewriter seams are defined by `CoreComponent`:
+The current stable mainline only recognizes:
 
-- `Inference`
-- `Model`
-- `Hardware`
-- `Workflow`
-- `EventBus`
-- `PluginManager`
-- `UiHost`
+- `model_loader`
+- `hardware_backend`
 
-Each seam can be:
+Other plugin categories remain roadmap items and are intentionally not part of the current stable host contract. `llama.cpp` remains the default built-in backend rather than being treated as product logic.
 
-- declared by a plugin manifest
-- inspected in runtime inventory
-- activated by the host through the management plane
+### 3. Interface Layer
 
-## Layer Model
+Loci exposes three embedding surfaces:
 
-```text
-Host product / automation system / IDE assistant
-    |
-    v
-CLI management surface (`crates/cli`)
-    |
-    v
-Management service (`crates/core::management`)
-    |
-    +--> runtime snapshot / plugin inventory / activation
-    +--> model load governance
-    +--> workflow, command, event, ui routing
-    |
-    v
-Inference engine (`crates/core::engine`)
-    |
-    +--> backend registry
-    +--> core registry traits
-    +--> plugin manager
-    +--> legacy compatibility materialization
-    |
-    v
-Optional `llama.cpp` backend (`crates/core --features llama`)
-```
+- Rust crate API via `loci-core`
+- C ABI via `loci-ffi`
+- local sidecar HTTP surface via `loci-server`
 
-## Core Registry
+## Runtime Flow
 
-The core runtime is intentionally decomposed behind traits:
+1. Discover plugin manifests from a directory or explicit path.
+2. Register or activate plugins by kind.
+3. Load a model through the selected backend.
+4. Build effective inference params from the pipeline defaults and request overrides.
+5. Run generation and return runtime-aware output metadata.
 
-- `ModelRepository`
-- `WorkflowEngine`
-- `EventBus`
-- `HardwareAbstraction`
-- `UiHost`
-- `PluginManager`
-- `CoreRegistry`
+## Boundary Rules
 
-This keeps the engine open for plugin-driven or host-driven replacement without turning the runtime into one monolithic service object.
-
-## Plugin Model
-
-Plugins are manifest-first.
-
-Important manifest concepts:
-
-- target tracks: `ai_infra`, `ai_agent`
-- contribution points: model providers, accelerators, inference hooks, events, workflows, custom nodes, commands, UI contributions
-- core rewriters: seam-level governance claims
-- runtime artifacts: library path, wasm path, sampling profile
-- bootstrap activation: optional auto-activation for declared seams
-- compatibility metadata: legacy bridge information
-
-Example manifests live under `plugins/`.
-
-## Management Plane
-
-The management plane is intentionally narrow and operational:
-
-- runtime discovery
-- backend discovery
-- plugin status and detailed inspection
-- core rewriter inventory and activation
-- model load requests
-- text generation requests
-- workflow execution
-- UI surface presentation
-- command routing
-- event publishing
-- legacy text plugin activation
-
-See `docs/MANAGEMENT_API.md` for the route surface.
-
-## Compatibility Strategy
-
-Compatibility is bounded.
-
-- New architecture is the source of truth.
-- Legacy text plugin support remains available only through `legacy-plugin-api` and `legacy-plugin-compat`.
-- Old root-level monolith modules, old CLI routes, and old example programs are not part of the maintained architecture.
-
-This keeps migration debt contained instead of leaking old contracts back into the mainline runtime.
-
-## Runtime Backends
-
-`loci-core` can be built without native backend bindings for architectural work and governance validation.
-
-For real local model execution, enable:
-
-```bash
-cargo build -p loci-core --features llama
-```
-
-The `llama.cpp` integration is wired through the `deps/llama.cpp` submodule and the crate-local build script in `crates/core/build.rs`.
-
-## Maintenance Rules
-
-- Workspace crates are authoritative.
-- New runtime capabilities should land behind a seam or registry when they are governable.
-- Documentation should describe only maintained entry points.
-- Legacy compatibility must stay isolated and explicitly activated.
+- No desktop shell logic in `loci-core`.
+- No Tauri or product animation concerns in the workspace mainline.
+- No requirement for `PetCompanion`-specific abstractions in the plugin API.
+- Hardware-specific policy belongs to hardware backend plugins or backend config, not app code.

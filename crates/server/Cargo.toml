@@ -1,11 +1,12 @@
 [package]
-name = "loci-legacy-plugin-compat"
+name = "loci-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
 [dependencies]
+loci-core = { path = "../core" }
 anyhow.workspace = true
-libloading.workspace = true
-loci-legacy-plugin-api = { path = "../legacy-plugin-api" }
+serde.workspace = true
+serde_json.workspace = true
