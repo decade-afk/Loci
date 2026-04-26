@@ -17,10 +17,10 @@ pub use crate::error::{LociError, Result};
 pub use crate::model::{ModelConfig, ModelLoadStrategy, ModelLoader};
 pub use crate::pipeline::{merge_inference_params, InferenceResponse};
 pub use crate::plugin::{
-    discover_plugin_manifest_files, load_plugin_manifest_file, PluginSamplingRuntime,
-    PluginStatus, RegisteredPlugin,
+    discover_plugin_manifest_files, load_plugin_manifest_file, PluginRuntimeKind,
+    PluginSamplingRuntime, PluginStatus, RegisteredPlugin,
 };
-pub use crate::runtime::{ActiveModelStatus, RuntimeSnapshot};
+pub use crate::runtime::{ActiveModelStatus, ModelUnloadStatus, RuntimeSnapshot};
 pub use crate::sampler::{sample_token, LogitsView, SamplingParams};
 pub use loci_plugin_api::{
     PluginCapabilities, PluginKind, PluginManifest, PluginRuntime, HOST_PLUGIN_API_VERSION,

@@ -13,6 +13,13 @@ pub struct ActiveModelStatus {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ModelUnloadStatus {
+    pub unloaded: bool,
+    pub previous_backend: Option<String>,
+    pub previous_model_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RuntimeSnapshot {
     pub plugin_count: usize,
     pub plugins: Vec<PluginStatus>,

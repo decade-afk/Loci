@@ -27,10 +27,10 @@ impl CliArgs {
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--plugin-dir" => {
-                    parsed.plugin_dir = Some(PathBuf::from(
-                        args.next()
-                            .ok_or_else(|| anyhow::anyhow!("--plugin-dir requires a path"))?,
-                    ));
+                    parsed.plugin_dir =
+                        Some(PathBuf::from(args.next().ok_or_else(|| {
+                            anyhow::anyhow!("--plugin-dir requires a path")
+                        })?));
                 }
                 "--backend" => {
                     parsed.backend = Some(
@@ -71,10 +71,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Some(bind) = args.server_bind {
-        return run_server(ServerConfig {
-            bind,
-            engine,
-        });
+        return run_server(ServerConfig { bind, engine });
     }
 
     println!(

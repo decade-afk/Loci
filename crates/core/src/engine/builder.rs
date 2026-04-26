@@ -2,7 +2,6 @@ use crate::backend::{BackendRegistry, GpuSplitMode, InferenceParams};
 use crate::backends;
 use crate::engine::runtime::InferenceEngine;
 use crate::model::{ModelConfig, ModelLoadStrategy};
-use crate::plugin::PluginSamplingRuntime;
 use crate::Result;
 use std::path::PathBuf;
 
@@ -111,18 +110,11 @@ impl InferenceEngineBuilder {
     }
 
     pub fn build(self) -> Result<InferenceEngine> {
-        let mut engine = InferenceEngine {
-            backend_registry: self
-                .backend_registry
+        let mut engine = InferenceEngine::new(
+            self.backend_registry
                 .unwrap_or_else(BackendRegistry::with_builtin_backends),
-            active_backend: None,
-            model: None,
-            model_path: None,
-            default_inference_params: self.defaults,
-            plugin_manifests: Vec::new(),
-            active_plugins: Default::default(),
-            sampling_runtime: PluginSamplingRuntime::default(),
-        };
+            self.defaults,
+        );
 
         if let Some(config) = self.model_config {
             let backend_name = self

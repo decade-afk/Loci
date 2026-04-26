@@ -12,6 +12,7 @@ llama = []
 [dependencies]
 loci-plugin-api = { path = "../plugin-api" }
 anyhow.workspace = true
+libloading.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

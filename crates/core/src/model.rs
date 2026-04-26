@@ -1,8 +1,10 @@
 use crate::backend::{BackendParams, GpuSplitMode};
 use crate::error::{LociError, Result};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ModelLoadStrategy {
     #[default]
     Strict,
@@ -11,7 +13,7 @@ pub enum ModelLoadStrategy {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub model_path: PathBuf,
     pub n_ctx: u32,

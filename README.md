@@ -8,6 +8,7 @@ This repository is intentionally scoped as infra only:
 - inference runtime
 - hardware backend selection
 - plugin discovery and activation
+- plugin runtime materialization for declared native or wasm artifacts
 - embeddable Rust and C interfaces
 - optional local HTTP server surface
 
@@ -41,6 +42,7 @@ Loci follows the three-layer design agreed for the infra track:
    Unified inference API, load/switch pipeline, runtime snapshot, plugin registry.
 2. Plugin layer
    The current mainline only stabilizes `model_loader` and `hardware_backend`.
+   Declared plugin runtimes can currently be materialized as native libraries or validated as wasm artifacts during activation, but there is not yet a stable symbol ABI.
    `kv_cache`, `distributed`, `multimodal`, and `agent` stay as roadmap topics until they have real core contracts.
 3. Interface layer
    Rust crate API, C ABI, and a local HTTP server surface for sidecar mode.
@@ -70,6 +72,18 @@ cargo run -p loci-cli -- \
   --model D:/models/demo.gguf \
   --server-bind 127.0.0.1:8080
 ```
+
+Current `loci-server` routes stay inference-focused:
+
+- `GET /health`
+- `GET /v1/runtime`
+- `POST /v1/model/load`
+- `POST /v1/model/unload`
+- `GET /v1/models`
+- `POST /v1/completions`
+- `POST /v1/chat/completions`
+
+OpenAI-compatible routes currently support single-active-model text inference only. Streaming, tools, assistants, and workflow orchestration are intentionally out of scope.
 
 ## Current Boundary Decisions
 

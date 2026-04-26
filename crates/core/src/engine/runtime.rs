@@ -3,13 +3,32 @@ use crate::error::{LociError, Result};
 use crate::model::{ModelConfig, ModelLoadStrategy};
 use crate::pipeline::{merge_inference_params, InferenceResponse};
 use crate::plugin::{
-    discover_plugin_manifest_files, load_plugin_manifest_file, PluginSamplingRuntime, PluginStatus,
-    RegisteredPlugin,
+    discover_plugin_manifest_files, load_plugin_manifest_file, PluginRuntimeKind,
+    PluginSamplingRuntime, PluginStatus, RegisteredPlugin,
 };
-use crate::runtime::{ActiveModelStatus, RuntimeSnapshot};
+use crate::runtime::{ActiveModelStatus, ModelUnloadStatus, RuntimeSnapshot};
 use crate::{PluginKind, PluginManifest};
+use libloading::Library;
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
+
+const WASM_MAGIC: [u8; 4] = [0x00, 0x61, 0x73, 0x6d];
+
+#[allow(dead_code)]
+enum LoadedPluginRuntime {
+    Native { path: PathBuf, library: Library },
+    Wasm { path: PathBuf, bytes: Vec<u8> },
+}
+
+impl LoadedPluginRuntime {
+    fn kind(&self) -> PluginRuntimeKind {
+        match self {
+            Self::Native { .. } => PluginRuntimeKind::Native,
+            Self::Wasm { .. } => PluginRuntimeKind::Wasm,
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct InferenceEngine {
@@ -20,6 +39,7 @@ pub struct InferenceEngine {
     pub(crate) default_inference_params: InferenceParams,
     pub(crate) plugin_manifests: Vec<RegisteredPlugin>,
     pub(crate) active_plugins: BTreeMap<PluginKind, String>,
+    loaded_plugin_runtimes: BTreeMap<String, LoadedPluginRuntime>,
     pub(crate) sampling_runtime: PluginSamplingRuntime,
 }
 
@@ -30,6 +50,23 @@ impl InferenceEngine {
 
     pub fn backend_capabilities(&self) -> Vec<crate::BackendCapabilities> {
         self.backend_registry.list()
+    }
+
+    pub(crate) fn new(
+        backend_registry: BackendRegistry,
+        default_inference_params: InferenceParams,
+    ) -> Self {
+        Self {
+            backend_registry,
+            active_backend: None,
+            model: None,
+            model_path: None,
+            default_inference_params,
+            plugin_manifests: Vec::new(),
+            active_plugins: BTreeMap::new(),
+            loaded_plugin_runtimes: BTreeMap::new(),
+            sampling_runtime: PluginSamplingRuntime::default(),
+        }
     }
 
     pub fn active_backend(&self) -> Option<&str> {
@@ -61,6 +98,23 @@ impl InferenceEngine {
         Ok(())
     }
 
+    pub fn unload_model(&mut self) -> ModelUnloadStatus {
+        let previous_backend = self.active_backend.take();
+        let previous_model_path = self
+            .model_path
+            .take()
+            .map(|path| path.display().to_string());
+        let unloaded =
+            previous_backend.is_some() || previous_model_path.is_some() || self.model.is_some();
+        self.model = None;
+
+        ModelUnloadStatus {
+            unloaded,
+            previous_backend,
+            previous_model_path,
+        }
+    }
+
     pub fn generate(&mut self, prompt: &str, params: &InferenceParams) -> Result<String> {
         let model = self
             .model
@@ -76,16 +130,15 @@ impl InferenceEngine {
         model.infer_text(prompt, &params)
     }
 
-    pub fn infer(
-        &mut self,
-        prompt: &str,
-        params: &InferenceParams,
-    ) -> Result<InferenceResponse> {
+    pub fn infer(&mut self, prompt: &str, params: &InferenceParams) -> Result<InferenceResponse> {
         let output = self.generate(prompt, params)?;
         Ok(InferenceResponse {
             output,
             backend: self.active_backend.clone(),
-            model_path: self.model_path.as_ref().map(|path| path.display().to_string()),
+            model_path: self
+                .model_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
         })
     }
 
@@ -93,14 +146,13 @@ impl InferenceEngine {
         RuntimeSnapshot {
             plugin_count: self.plugin_manifests.len(),
             plugins: self.plugin_statuses(),
-            active_plugins: self
-                .active_plugins
-                .values()
-                .cloned()
-                .collect::<Vec<_>>(),
+            active_plugins: self.active_plugins.values().cloned().collect::<Vec<_>>(),
             available_backends: self.backend_registry.list(),
             active_backend: self.active_backend.clone(),
-            active_model_path: self.model_path.as_ref().map(|path| path.display().to_string()),
+            active_model_path: self
+                .model_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
             active_model_info: self.model.as_ref().map(|model| {
                 let metadata = model.metadata();
                 ActiveModelStatus {
@@ -157,10 +209,8 @@ impl InferenceEngine {
             )));
         }
 
-        if plugin.manifest.auto_activate {
-            self.active_plugins
-                .insert(plugin.manifest.kind, plugin.manifest.name.clone());
-        }
+        let plugin_name = plugin.manifest.name.clone();
+        let auto_activate = plugin.manifest.auto_activate;
         self.plugin_manifests.push(plugin);
         self.plugin_manifests.sort_by(|left, right| {
             right
@@ -169,20 +219,28 @@ impl InferenceEngine {
                 .cmp(&left.manifest.priority)
                 .then_with(|| left.manifest.name.cmp(&right.manifest.name))
         });
+        if auto_activate {
+            if let Err(error) = self.activate_plugin(&plugin_name) {
+                self.plugin_manifests
+                    .retain(|existing| existing.manifest.name != plugin_name);
+                return Err(error);
+            }
+        }
         Ok(())
     }
 
     pub fn activate_plugin(&mut self, plugin_name: &str) -> Result<()> {
-        let manifest = self
+        let plugin = self
             .plugin_manifests
             .iter()
             .find(|plugin| plugin.manifest.name == plugin_name)
-            .map(|plugin| plugin.manifest.clone())
+            .cloned()
             .ok_or_else(|| {
                 LociError::ConfigError(format!("plugin not registered: {plugin_name}"))
             })?;
+        self.materialize_plugin_runtime(&plugin)?;
         self.active_plugins
-            .insert(manifest.kind, manifest.name.clone());
+            .insert(plugin.manifest.kind, plugin.manifest.name.clone());
         Ok(())
     }
 
@@ -202,6 +260,11 @@ impl InferenceEngine {
         self.plugin_manifests
             .iter()
             .map(|plugin| PluginStatus {
+                runtime_kind: self
+                    .loaded_plugin_runtimes
+                    .get(plugin.manifest.name.as_str())
+                    .map(LoadedPluginRuntime::kind)
+                    .or_else(|| plugin.declared_runtime_kind()),
                 name: plugin.manifest.name.clone(),
                 version: plugin.manifest.version.clone(),
                 kind: plugin.manifest.kind,
@@ -210,12 +273,94 @@ impl InferenceEngine {
                 model_formats: plugin.manifest.capabilities.model_formats.clone(),
                 hardware_targets: plugin.manifest.capabilities.hardware_targets.clone(),
                 features: plugin.manifest.capabilities.features.clone(),
+                declares_runtime: plugin.declared_runtime_kind().is_some(),
+                runtime_loaded: self
+                    .loaded_plugin_runtimes
+                    .contains_key(plugin.manifest.name.as_str()),
                 has_native_runtime: plugin.manifest.runtime.library_path.is_some(),
                 has_wasm_runtime: plugin.manifest.runtime.wasm_path.is_some(),
                 is_active: self.active_plugin(plugin.manifest.kind)
                     == Some(plugin.manifest.name.as_str()),
             })
             .collect()
+    }
+
+    fn materialize_plugin_runtime(&mut self, plugin: &RegisteredPlugin) -> Result<()> {
+        if self
+            .loaded_plugin_runtimes
+            .contains_key(plugin.manifest.name.as_str())
+        {
+            return Ok(());
+        }
+
+        let Some(runtime) = self.load_plugin_runtime(plugin)? else {
+            return Ok(());
+        };
+
+        self.loaded_plugin_runtimes
+            .insert(plugin.manifest.name.clone(), runtime);
+        Ok(())
+    }
+
+    fn load_plugin_runtime(
+        &self,
+        plugin: &RegisteredPlugin,
+    ) -> Result<Option<LoadedPluginRuntime>> {
+        let Some(runtime_kind) = plugin.declared_runtime_kind() else {
+            return Ok(None);
+        };
+        let runtime_path = plugin.resolved_runtime_path().ok_or_else(|| {
+            LociError::ConfigError(format!(
+                "plugin `{}` declared a runtime without a runtime path",
+                plugin.manifest.name
+            ))
+        })?;
+
+        match runtime_kind {
+            PluginRuntimeKind::Native => {
+                if !runtime_path.is_file() {
+                    return Err(LociError::ConfigError(format!(
+                        "plugin `{}` native runtime not found: {}",
+                        plugin.manifest.name,
+                        runtime_path.display()
+                    )));
+                }
+
+                let library = unsafe { Library::new(&runtime_path) }.map_err(|error| {
+                    LociError::ConfigError(format!(
+                        "failed to load native runtime for plugin `{}` from {}: {error}",
+                        plugin.manifest.name,
+                        runtime_path.display()
+                    ))
+                })?;
+
+                Ok(Some(LoadedPluginRuntime::Native {
+                    path: runtime_path,
+                    library,
+                }))
+            }
+            PluginRuntimeKind::Wasm => {
+                let bytes = fs::read(&runtime_path).map_err(|error| {
+                    LociError::ConfigError(format!(
+                        "failed to read wasm runtime for plugin `{}` from {}: {error}",
+                        plugin.manifest.name,
+                        runtime_path.display()
+                    ))
+                })?;
+                if bytes.len() < WASM_MAGIC.len() || bytes[..WASM_MAGIC.len()] != WASM_MAGIC {
+                    return Err(LociError::ConfigError(format!(
+                        "plugin `{}` runtime is not a valid wasm module: {}",
+                        plugin.manifest.name,
+                        runtime_path.display()
+                    )));
+                }
+
+                Ok(Some(LoadedPluginRuntime::Wasm {
+                    path: runtime_path,
+                    bytes,
+                }))
+            }
+        }
     }
 
     fn govern_model_config(&self, config: &ModelConfig) -> ModelConfig {
@@ -285,6 +430,28 @@ mod tests {
     }
 
     #[test]
+    fn engine_can_unload_model() {
+        let model_path = temp_model_path("unload");
+        let model_path_text = model_path.display().to_string();
+        let mut engine = InferenceEngine::builder()
+            .backend("mock")
+            .model_path(&model_path)
+            .build()
+            .expect("build");
+
+        let status = engine.unload_model();
+        assert!(status.unloaded);
+        assert_eq!(status.previous_backend.as_deref(), Some("mock"));
+        assert_eq!(
+            status.previous_model_path.as_deref(),
+            Some(model_path_text.as_str())
+        );
+        assert!(engine.active_backend().is_none());
+        assert!(engine.model_path().is_none());
+        assert!(engine.model.is_none());
+    }
+
+    #[test]
     fn engine_auto_activates_plugin() {
         let plugin_dir = temp_model_path("plugin-dir")
             .parent()
@@ -308,6 +475,81 @@ auto_activate = true
             .load_plugins_from_dir(&plugin_dir)
             .expect("load plugins");
 
-        assert_eq!(engine.active_plugin(PluginKind::HardwareBackend), Some("cpu"));
+        assert_eq!(
+            engine.active_plugin(PluginKind::HardwareBackend),
+            Some("cpu")
+        );
+    }
+
+    #[test]
+    fn engine_activation_materializes_wasm_runtime() {
+        let root_dir = temp_model_path("plugin-wasm")
+            .parent()
+            .expect("parent")
+            .join("plugins");
+        fs::create_dir_all(root_dir.join("sampler")).expect("mkdir");
+        fs::write(root_dir.join("sampler").join("runtime.wasm"), WASM_MAGIC).expect("write wasm");
+        fs::write(
+            root_dir.join("sampler").join("manifest.toml"),
+            r#"
+name = "sampler"
+version = "0.1.0"
+api_version = "1.0"
+kind = "model_loader"
+
+[runtime]
+wasm_path = "runtime.wasm"
+"#,
+        )
+        .expect("write manifest");
+
+        let mut engine = InferenceEngine::builder().build().expect("build");
+        engine
+            .load_plugin_manifest_file(root_dir.join("sampler").join("manifest.toml"))
+            .expect("register plugin");
+        engine.activate_plugin("sampler").expect("activate plugin");
+
+        let status = engine
+            .runtime_snapshot()
+            .plugins
+            .into_iter()
+            .find(|plugin| plugin.name == "sampler")
+            .expect("status");
+        assert!(status.declares_runtime);
+        assert!(status.runtime_loaded);
+        assert_eq!(status.runtime_kind, Some(PluginRuntimeKind::Wasm));
+    }
+
+    #[test]
+    fn engine_rejects_invalid_wasm_runtime() {
+        let root_dir = temp_model_path("plugin-invalid-wasm")
+            .parent()
+            .expect("parent")
+            .join("plugins");
+        fs::create_dir_all(root_dir.join("broken")).expect("mkdir");
+        fs::write(root_dir.join("broken").join("runtime.wasm"), b"not-wasm").expect("write wasm");
+        fs::write(
+            root_dir.join("broken").join("manifest.toml"),
+            r#"
+name = "broken"
+version = "0.1.0"
+api_version = "1.0"
+kind = "hardware_backend"
+
+[runtime]
+wasm_path = "runtime.wasm"
+"#,
+        )
+        .expect("write manifest");
+
+        let mut engine = InferenceEngine::builder().build().expect("build");
+        engine
+            .load_plugin_manifest_file(root_dir.join("broken").join("manifest.toml"))
+            .expect("register plugin");
+
+        let err = engine.activate_plugin("broken").expect_err("should reject");
+        assert!(err
+            .to_string()
+            .contains("runtime is not a valid wasm module"));
     }
 }

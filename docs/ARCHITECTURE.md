@@ -27,7 +27,12 @@ The current stable mainline only recognizes:
 - `model_loader`
 - `hardware_backend`
 
-Other plugin categories remain roadmap items and are intentionally not part of the current stable host contract. `llama.cpp` remains the default built-in backend rather than being treated as product logic.
+Activation now materializes declared runtime artifacts in a narrow way:
+
+- native runtimes are loaded as shared libraries
+- wasm runtimes are validated and retained as runtime artifacts
+
+This keeps the host contract practical without pretending that a stable plugin symbol ABI already exists. Other plugin categories remain roadmap items and are intentionally not part of the current stable host contract. `llama.cpp` remains the default built-in backend rather than being treated as product logic.
 
 ### 3. Interface Layer
 
@@ -45,9 +50,12 @@ Loci exposes three embedding surfaces:
 4. Build effective inference params from the pipeline defaults and request overrides.
 5. Run generation and return runtime-aware output metadata.
 
+The local HTTP sidecar stays minimal and inference-only. It exposes runtime/model control plus basic OpenAI-compatible `models`, `completions`, and `chat/completions` routes for a single active model.
+
 ## Boundary Rules
 
 - No desktop shell logic in `loci-core`.
 - No Tauri or product animation concerns in the workspace mainline.
 - No requirement for `PetCompanion`-specific abstractions in the plugin API.
 - Hardware-specific policy belongs to hardware backend plugins or backend config, not app code.
+- No tools, assistants, workflow engines, or agent loops in the server surface.

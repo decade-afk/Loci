@@ -3,6 +3,7 @@ use crate::sampler::LogitsView;
 use anyhow::Context;
 use loci_plugin_api::{PluginKind, PluginManifest, HOST_PLUGIN_API_VERSION};
 use serde::Serialize;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -64,6 +65,41 @@ impl RegisteredPlugin {
     pub fn is_kind(&self, kind: PluginKind) -> bool {
         self.manifest.kind == kind
     }
+
+    pub fn declared_runtime_kind(&self) -> Option<PluginRuntimeKind> {
+        if self.manifest.runtime.library_path.is_some() {
+            Some(PluginRuntimeKind::Native)
+        } else if self.manifest.runtime.wasm_path.is_some() {
+            Some(PluginRuntimeKind::Wasm)
+        } else {
+            None
+        }
+    }
+
+    pub fn resolved_runtime_path(&self) -> Option<PathBuf> {
+        self.manifest
+            .runtime
+            .library_path
+            .as_deref()
+            .or(self.manifest.runtime.wasm_path.as_deref())
+            .map(|relative| self.root_dir.join(relative))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginRuntimeKind {
+    Native,
+    Wasm,
+}
+
+impl fmt::Display for PluginRuntimeKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Native => f.write_str("native"),
+            Self::Wasm => f.write_str("wasm"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -76,6 +112,9 @@ pub struct PluginStatus {
     pub model_formats: Vec<String>,
     pub hardware_targets: Vec<String>,
     pub features: Vec<String>,
+    pub declares_runtime: bool,
+    pub runtime_loaded: bool,
+    pub runtime_kind: Option<PluginRuntimeKind>,
     pub has_native_runtime: bool,
     pub has_wasm_runtime: bool,
     pub is_active: bool,

@@ -177,6 +177,7 @@ dependencies = [
  "bindgen",
  "cc",
  "cmake",
+ "libloading",
  "loci-plugin-api",
  "serde",
  "serde_json",
