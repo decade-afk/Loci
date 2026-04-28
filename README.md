@@ -1,100 +1,60 @@
 # Loci
 
-Loci is a lightweight, plugin-oriented local LLM infra runtime built in Rust.
+Loci is a Rust inference infrastructure project for end-side heterogeneous execution, tiered offload, paged KV cache management, and optional dynamic model routing.
 
-This repository is intentionally scoped as infra only:
+Loci is organized around a small set of workspace crates:
 
-- model loading
-- inference runtime
-- hardware backend selection
-- plugin discovery and activation
-- plugin runtime materialization for declared native or wasm artifacts
-- embeddable Rust and C interfaces
-- optional local HTTP server surface
+- `loci-protocol` for shared contracts
+- `loci-core` for orchestration, routing, and planning
+- `loci-backend-openvino` and `loci-backend-candle` for backend integration boundaries
+- `loci-tiered-offload` and `loci-paged-kv` for specialized planning
+- `loci-cli` and `loci-server` for local runtime surfaces
 
-What is intentionally out of scope:
+`loci-core` exposes these feature switches:
 
-- desktop UI
-- pet / companion product logic
-- workflow shells for end-user apps
+- `openvino`
+- `candle`
+- `tiered-offload`
+- `paged-kv`
+- `power-aware`
+- `dynamic-routing`
 
-## Workspace
+Default features:
 
-```text
-loci/
-|-- crates/
-|   |-- cli/          # local runtime launcher
-|   |-- core/         # plugin registry, inference engine, llama.cpp binding
-|   |-- ffi/          # C ABI for embedding
-|   |-- plugin-api/   # stable plugin manifest types
-|   `-- server/       # minimal local HTTP server surface
-|-- deps/llama.cpp/   # pinned upstream backend source
-|-- docs/
-|-- include/
-`-- plugins/          # sample manifests
+```toml
+default = ["openvino", "power-aware", "tiered-offload", "paged-kv"]
 ```
 
-## Architecture
-
-Loci follows the three-layer design agreed for the infra track:
-
-1. `loci-core`
-   Unified inference API, load/switch pipeline, runtime snapshot, plugin registry.
-2. Plugin layer
-   The current mainline only stabilizes `model_loader` and `hardware_backend`.
-   Declared plugin runtimes can currently be materialized as native libraries or validated as wasm artifacts during activation, but there is not yet a stable symbol ABI.
-   `kv_cache`, `distributed`, `multimodal`, and `agent` stay as roadmap topics until they have real core contracts.
-3. Interface layer
-   Rust crate API, C ABI, and a local HTTP server surface for sidecar mode.
-
-The current implementation keeps `llama.cpp` as the primary backend and uses plugin activation to gate hardware-specific behavior instead of baking application logic into the runtime.
-
-The current C ABI stays narrow and runtime-oriented:
-
-- create and free an engine
-- load and unload a model
-- raw text generation or structured inference JSON
-- runtime snapshot and backend capability queries
-- stable last-status reporting via enum code plus structured error JSON
-
-## Quick Start
-
-Build the workspace:
+Basic usage:
 
 ```bash
-cargo build
+cargo run -p loci-cli -- --model-path D:/models/demo.gguf --model-name demo --model-memory-bytes 2147483648
 ```
-
-Run the CLI and print the runtime snapshot:
-
-```bash
-cargo run -p loci-cli
-```
-
-Load plugins, model, and start the local server:
 
 ```bash
 cargo run -p loci-cli -- \
-  --plugin-dir plugins \
-  --backend mock \
-  --model D:/models/demo.gguf \
+  --model-path D:/models/demo.gguf \
+  --model-name demo \
+  --model-memory-bytes 2147483648 \
+  --prompt "Explain the current execution plan."
+```
+
+```bash
+cargo run -p loci-cli -- \
+  --model-path D:/models/demo.gguf \
+  --model-name demo \
+  --model-memory-bytes 2147483648 \
   --server-bind 127.0.0.1:8080
 ```
 
-Current `loci-server` routes stay inference-focused:
+HTTP routes:
 
 - `GET /health`
 - `GET /v1/runtime`
-- `POST /v1/model/load`
-- `POST /v1/model/unload`
 - `GET /v1/models`
+- `POST /v1/models/register`
+- `POST /v1/models/unregister`
+- `POST /v1/plan`
+- `POST /v1/inference`
 - `POST /v1/completions`
 - `POST /v1/chat/completions`
-
-OpenAI-compatible routes currently support single-active-model text inference only. Streaming, tools, assistants, and workflow orchestration are intentionally out of scope.
-
-## Current Boundary Decisions
-
-- `Loci` remains pure infra and does not absorb `PetCompanion` product concerns.
-- UI-host and workflow-governance experiments from `Loci-refactor` are not part of the new mainline build.
-- Legacy plugin compatibility crates remain in the tree as historical material, but they are no longer workspace members or active dependencies.

@@ -1,21 +1,19 @@
-#[derive(Debug, thiserror::Error)]
+use thiserror::Error;
+
+#[derive(Debug, Error)]
 pub enum LociError {
-    #[error("config error: {0}")]
-    ConfigError(String),
-    #[error("invalid argument: {0}")]
-    InvalidArgument(String),
-    #[error("backend not available: {0}")]
-    BackendNotAvailable(String),
-    #[error("backend error: {0}")]
-    BackendError(String),
-    #[error("model load error: {0}")]
-    ModelLoadError(String),
-    #[error("inference error: {0}")]
-    InferenceError(String),
-    #[error("unsupported operation: {0}")]
-    UnsupportedOperation(String),
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    #[error("no backend is available for the current build")]
+    NoBackendAvailable,
+    #[error("no model has been registered")]
+    NoModelsRegistered,
+    #[error("requested model `{0}` is not registered")]
+    RequestedModelMissing(String),
+    #[error("no compatible backend is available for model `{model}` with format `{format}`")]
+    NoCompatibleBackend { model: String, format: String },
+    #[error("backend execution failed: {0}")]
+    Backend(String),
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
 }
 
 pub type Result<T> = std::result::Result<T, LociError>;

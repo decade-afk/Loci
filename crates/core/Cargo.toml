@@ -6,19 +6,19 @@ license.workspace = true
 authors.workspace = true
 
 [features]
-default = []
-llama = []
+default = ["openvino", "power-aware", "tiered-offload", "paged-kv"]
+openvino = ["dep:loci-backend-openvino"]
+candle = ["dep:loci-backend-candle"]
+tiered-offload = ["dep:loci-tiered-offload"]
+paged-kv = ["dep:loci-paged-kv"]
+power-aware = []
+dynamic-routing = []
 
 [dependencies]
-loci-plugin-api = { path = "../plugin-api" }
-anyhow.workspace = true
-libloading.workspace = true
+loci-protocol = { path = "../protocol" }
+loci-backend-openvino = { path = "../backend-openvino", optional = true }
+loci-backend-candle = { path = "../backend-candle", optional = true }
+loci-tiered-offload = { path = "../tiered-offload", optional = true }
+loci-paged-kv = { path = "../paged-kv", optional = true }
 serde.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true
-toml.workspace = true
-
-[build-dependencies]
-bindgen = "0.72"
-cc = "1.1"
-cmake = "0.1"

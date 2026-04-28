@@ -1,9 +1,12 @@
 [workspace]
 members = [
-    "crates/cli",
+    "crates/protocol",
     "crates/core",
-    "crates/ffi",
-    "crates/plugin-api",
+    "crates/backend-openvino",
+    "crates/backend-candle",
+    "crates/tiered-offload",
+    "crates/paged-kv",
+    "crates/cli",
     "crates/server",
 ]
 resolver = "2"
@@ -19,5 +22,3 @@ anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
-toml = "0.8"
-libloading = "0.8"

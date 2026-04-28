@@ -1,29 +1,60 @@
 # Loci
 
-Loci 是一个轻量、插件化、面向本地 LLM 推理的 Rust Infra 运行时。
+Loci 是一个面向端侧异构执行、分层 offload、Paged KV Cache 与可选动态模型路由的 Rust 推理基础设施项目。
 
-当前仓库只承担基础设施职责：
+Loci 当前由一组清晰的 workspace crate 组成：
 
-- 模型加载
-- 推理运行时
-- 硬件后端选择
-- 插件发现与激活
-- Rust / C / 本地 HTTP 接口
+- `loci-protocol` 负责共享契约
+- `loci-core` 负责编排、路由与规划
+- `loci-backend-openvino` 与 `loci-backend-candle` 负责 backend 集成边界
+- `loci-tiered-offload` 与 `loci-paged-kv` 负责专项规划
+- `loci-cli` 与 `loci-server` 提供本地运行入口
 
-明确不承担：
+`loci-core` 当前暴露这些 feature：
 
-- 桌面 UI
-- 桌宠业务逻辑
-- 终端产品工作流外壳
+- `openvino`
+- `candle`
+- `tiered-offload`
+- `paged-kv`
+- `power-aware`
+- `dynamic-routing`
 
-## 当前主线
+默认 feature：
 
-新的主构建路径已经按 Infra 边界收口：
+```toml
+default = ["openvino", "power-aware", "tiered-offload", "paged-kv"]
+```
 
-- `crates/core`: 推理引擎、插件注册表、运行时快照、`llama.cpp` 绑定
-- `crates/plugin-api`: 稳定插件清单类型
-- `crates/ffi`: C ABI
-- `crates/server`: 本地 sidecar HTTP 接口
-- `crates/cli`: 本地调试与启动入口
+基础用法：
 
-`Loci-refactor` 中的 UI host、workflow 治理、legacy 文本插件兼容等历史实验代码，不再属于新的 workspace 主线。
+```bash
+cargo run -p loci-cli -- --model-path D:/models/demo.gguf --model-name demo --model-memory-bytes 2147483648
+```
+
+```bash
+cargo run -p loci-cli -- \
+  --model-path D:/models/demo.gguf \
+  --model-name demo \
+  --model-memory-bytes 2147483648 \
+  --prompt "Explain the current execution plan."
+```
+
+```bash
+cargo run -p loci-cli -- \
+  --model-path D:/models/demo.gguf \
+  --model-name demo \
+  --model-memory-bytes 2147483648 \
+  --server-bind 127.0.0.1:8080
+```
+
+HTTP 路由：
+
+- `GET /health`
+- `GET /v1/runtime`
+- `GET /v1/models`
+- `POST /v1/models/register`
+- `POST /v1/models/unregister`
+- `POST /v1/plan`
+- `POST /v1/inference`
+- `POST /v1/completions`
+- `POST /v1/chat/completions`

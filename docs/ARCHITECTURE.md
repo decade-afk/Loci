@@ -2,62 +2,83 @@
 
 ## Positioning
 
-Loci is the infra runtime below products such as `PetCompanion`. It owns local inference concerns and avoids application-layer ownership.
+Loci is an end-side inference infrastructure project focused on heterogeneous CPU / GPU / NPU execution, tiered weight offload, paged KV cache planning, and optional dynamic model routing.
 
-## Layering
+## Workspace Layers
 
-### 1. Core Layer
+### 1. Protocol Layer
 
-`crates/core` contains:
+`crates/protocol` defines the shared contracts for:
 
-- backend registry
-- model load configuration
-- inference pipeline
-- plugin manifest loading
-- runtime snapshot and active plugin state
+- hardware topology
+- model descriptors
+- routing decisions
+- execution plans
+- backend traits
+- request / response payloads
 
-The core does not know about product UI, desktop windows, or end-user workflow shells.
+This crate is the shared language of the workspace.
 
-### 2. Plugin Layer
+### 2. Core Runtime Layer
 
-Plugins are declared through `manifest.toml`.
+`crates/core` is the orchestration layer. It owns:
 
-The current stable mainline only recognizes:
+- runtime configuration
+- hardware topology merge
+- backend selection
+- routing
+- heterogenous execution planning
+- runtime snapshot generation
 
-- `model_loader`
-- `hardware_backend`
+The core does not embed backend-specific execution logic directly. It delegates execution through backend crates and keeps planning decisions explicit.
 
-Activation now materializes declared runtime artifacts in a narrow way:
+### 3. Backend and Planning Extensions
 
-- native runtimes are loaded as shared libraries
-- wasm runtimes are validated and retained as runtime artifacts
+- `crates/backend-openvino`
+- `crates/backend-candle`
+- `crates/tiered-offload`
+- `crates/paged-kv`
 
-This keeps the host contract practical without pretending that a stable plugin symbol ABI already exists. Other plugin categories remain roadmap items and are intentionally not part of the current stable host contract. `llama.cpp` remains the default built-in backend rather than being treated as product logic.
+These crates provide the concrete integration points for backend capabilities and specialized planning logic.
 
-### 3. Interface Layer
+The architecture is intentionally feature-gated instead of plugin-driven. Backends are injected through Cargo features rather than runtime plugin activation.
 
-Loci exposes three embedding surfaces:
+The current backend crates should be read as integration boundaries, not as finished production bindings.
 
-- Rust crate API via `loci-core`
-- C ABI via `loci-ffi`
-- local sidecar HTTP surface via `loci-server`
+### 4. Interface Layer
 
-The C ABI is intentionally limited to runtime host concerns: engine lifecycle, model load/unload, text generation, structured inference JSON, runtime snapshots, backend capability queries, and stable last-status/error reporting.
+- `crates/cli`
+- `crates/server`
 
-## Runtime Flow
+These crates are thin entry points over `loci-core`.
 
-1. Discover plugin manifests from a directory or explicit path.
-2. Register or activate plugins by kind.
-3. Load a model through the selected backend.
-4. Build effective inference params from the pipeline defaults and request overrides.
-5. Run generation and return runtime-aware output metadata.
+## Execution Model
 
-The local HTTP sidecar stays minimal and inference-only. It exposes runtime/model control plus basic OpenAI-compatible `models`, `completions`, and `chat/completions` routes for a single active model.
+The runtime follows this high-level flow:
 
-## Boundary Rules
+1. Discover the available backend capabilities.
+2. Merge backend-reported devices into a single hardware topology.
+3. Select a model directly or through optional routing.
+4. Build a heterogeneous execution plan:
+   - throughput-biased prefill
+   - power-biased decode
+   - KV cache placement
+   - optional disk spill for cold weights
+5. Dispatch the request through the chosen backend.
 
-- No desktop shell logic in `loci-core`.
-- No Tauri or product animation concerns in the workspace mainline.
-- No requirement for `PetCompanion`-specific abstractions in the plugin API.
-- Hardware-specific policy belongs to hardware backend plugins or backend config, not app code.
-- No tools, assistants, workflow engines, or agent loops in the server surface.
+## Feature Model
+
+`loci-core` currently exposes these feature switches:
+
+- `openvino`
+- `candle`
+- `tiered-offload`
+- `paged-kv`
+- `power-aware`
+- `dynamic-routing`
+
+Default features:
+
+```toml
+default = ["openvino", "power-aware", "tiered-offload", "paged-kv"]
+```

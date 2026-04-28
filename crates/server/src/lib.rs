@@ -1,9 +1,9 @@
 use anyhow::Context;
-use loci_core::{InferenceEngine, InferenceParams, LociError, ModelConfig, ModelLoadStrategy};
+use loci_core::{InferenceEngine, LociError};
+use loci_protocol::{ModelDescriptor, SessionRequest, TieredOffloadProfile};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::Path;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,112 +13,122 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Deserialize)]
-struct GenerateRequest {
+struct RegisterModelRequest {
+    name: String,
+    path: PathBuf,
+    #[serde(default = "default_architecture")]
+    architecture: String,
+    #[serde(default)]
+    memory_bytes: Option<u64>,
+    #[serde(default)]
+    parameter_count: Option<u64>,
+    #[serde(default)]
+    context_length: Option<u32>,
+    #[serde(default)]
+    preferred_backend: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UnregisterModelRequest {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EvictModelRequest {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrewarmModelRequest {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default = "default_prewarm_prompt")]
     prompt: String,
-    #[serde(default)]
-    max_tokens: Option<u32>,
-    #[serde(default)]
-    temperature: Option<f32>,
+    #[serde(default = "default_prewarm_tokens")]
+    max_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]
-struct ModelLoadRequest {
-    backend_name: String,
-    config: ModelLoadConfigRequest,
+struct RegisterAliasRequest {
+    alias: String,
+    target: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct ModelLoadConfigRequest {
-    model_path: PathBuf,
-    #[serde(default = "default_n_ctx")]
-    n_ctx: u32,
-    #[serde(default)]
-    n_threads: Option<u32>,
-    #[serde(default = "default_n_batch")]
-    n_batch: u32,
-    #[serde(default = "default_true")]
-    use_gpu: bool,
-    #[serde(default = "default_n_gpu_layers")]
-    n_gpu_layers: i32,
-    #[serde(default = "default_true")]
-    use_mmap: bool,
-    #[serde(default)]
-    use_mlock: bool,
-    #[serde(default = "default_true")]
-    kv_offload: bool,
-    #[serde(default = "default_true")]
-    op_offload: bool,
-    #[serde(default)]
-    split_mode: loci_core::GpuSplitMode,
-    #[serde(default)]
-    main_gpu: u32,
-    #[serde(default)]
-    tensor_split: Option<Vec<f32>>,
-    #[serde(default)]
-    load_strategy: Option<ModelLoadStrategyRequest>,
+struct RemoveAliasRequest {
+    alias: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum ModelLoadStrategyRequest {
-    Strict,
-    AutoReduceGpuLayers { step: u32 },
+struct UpdatePlannerConfigRequest {
+    #[serde(default)]
+    keep_alive_secs: Option<u64>,
+    #[serde(default)]
+    offload_profile: Option<TieredOffloadProfile>,
+    #[serde(default)]
+    kv_block_size_tokens: Option<u32>,
+    #[serde(default)]
+    kv_prefix_cache_enabled: Option<bool>,
+    #[serde(default)]
+    kv_type_k: Option<String>,
+    #[serde(default)]
+    kv_type_v: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenAiCompletionsRequest {
-    model: String,
-    prompt: PromptInput,
+struct InferenceHttpRequest {
+    prompt: String,
+    #[serde(default = "default_max_tokens")]
+    max_tokens: u32,
+    #[serde(default = "default_temperature")]
+    temperature: f32,
     #[serde(default)]
-    max_tokens: Option<u32>,
+    target_model: Option<String>,
     #[serde(default)]
-    temperature: Option<f32>,
+    structured_output: bool,
     #[serde(default)]
-    top_p: Option<f32>,
-    #[serde(default)]
-    stream: bool,
+    tool_calling: bool,
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenAiChatCompletionsRequest {
-    model: String,
-    messages: Vec<OpenAiChatMessage>,
+struct PlanHttpRequest {
+    prompt: String,
+    #[serde(default = "default_max_tokens")]
+    max_tokens: u32,
+    #[serde(default = "default_temperature")]
+    temperature: f32,
     #[serde(default)]
-    max_tokens: Option<u32>,
+    target_model: Option<String>,
     #[serde(default)]
-    temperature: Option<f32>,
+    structured_output: bool,
     #[serde(default)]
-    top_p: Option<f32>,
-    #[serde(default)]
-    stream: bool,
+    tool_calling: bool,
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenAiChatMessage {
+struct CompletionRequest {
+    model: Option<String>,
+    prompt: String,
+    #[serde(default = "default_max_tokens")]
+    max_tokens: u32,
+    #[serde(default = "default_temperature")]
+    temperature: f32,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionsRequest {
+    model: Option<String>,
+    messages: Vec<ChatMessage>,
+    #[serde(default = "default_max_tokens")]
+    max_tokens: u32,
+    #[serde(default = "default_temperature")]
+    temperature: f32,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatMessage {
     role: String,
-    content: OpenAiChatContent,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum PromptInput {
-    Single(String),
-    Many(Vec<String>),
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum OpenAiChatContent {
-    Text(String),
-    Parts(Vec<OpenAiChatPart>),
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiChatPart {
-    #[serde(rename = "type")]
-    part_type: String,
-    #[serde(default)]
-    text: Option<String>,
+    content: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -142,7 +152,6 @@ struct OpenAiCompletionResponse {
     created: u64,
     model: String,
     choices: Vec<OpenAiCompletionChoice>,
-    usage: OpenAiUsage,
 }
 
 #[derive(Debug, Serialize)]
@@ -159,7 +168,6 @@ struct OpenAiChatCompletionResponse {
     created: u64,
     model: String,
     choices: Vec<OpenAiChatCompletionChoice>,
-    usage: OpenAiUsage,
 }
 
 #[derive(Debug, Serialize)]
@@ -175,360 +183,460 @@ struct OpenAiChatAssistantMessage {
     content: String,
 }
 
-#[derive(Debug, Serialize)]
-struct OpenAiUsage {
-    prompt_tokens: u32,
-    completion_tokens: u32,
-    total_tokens: u32,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenAiErrorEnvelope {
-    error: OpenAiErrorBody,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenAiErrorBody {
-    message: String,
-    #[serde(rename = "type")]
-    error_type: &'static str,
-    code: &'static str,
-}
-
-#[derive(Debug)]
-struct ServerHttpError {
-    status: &'static str,
-    message: String,
-    error_type: &'static str,
-    code: &'static str,
-}
-
-impl ServerHttpError {
-    fn invalid_request(message: impl Into<String>) -> Self {
-        Self {
-            status: "400 Bad Request",
-            message: message.into(),
-            error_type: "invalid_request_error",
-            code: "invalid_request",
-        }
-    }
-
-    fn not_found(message: impl Into<String>) -> Self {
-        Self {
-            status: "404 Not Found",
-            message: message.into(),
-            error_type: "not_found_error",
-            code: "not_found",
-        }
-    }
-
-    fn internal(message: impl Into<String>) -> Self {
-        Self {
-            status: "500 Internal Server Error",
-            message: message.into(),
-            error_type: "server_error",
-            code: "internal_error",
-        }
-    }
-
-    fn into_response(self) -> String {
-        let body = serde_json::to_string(&OpenAiErrorEnvelope {
-            error: OpenAiErrorBody {
-                message: self.message,
-                error_type: self.error_type,
-                code: self.code,
-            },
-        })
-        .unwrap_or_else(|_| {
-            r#"{"error":{"message":"serialization failure","type":"server_error","code":"internal_error"}}"#
-                .to_string()
-        });
-        http_response(self.status, "application/json", &body)
-    }
-}
-
-impl From<serde_json::Error> for ServerHttpError {
-    fn from(error: serde_json::Error) -> Self {
-        Self::invalid_request(format!("invalid json body: {error}"))
-    }
-}
-
 pub fn run_server(config: ServerConfig) -> anyhow::Result<()> {
     let listener = TcpListener::bind(&config.bind)
         .with_context(|| format!("failed to bind server on {}", config.bind))?;
     let mut engine = config.engine;
 
     for stream in listener.incoming() {
-        let mut stream = stream?;
-        let mut buffer = [0u8; 64 * 1024];
-        let size = stream.read(&mut buffer)?;
-        let request = String::from_utf8_lossy(&buffer[..size]);
-        let response = handle_request(&mut engine, &request)?;
-        stream.write_all(response.as_bytes())?;
-        stream.flush()?;
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(error) => {
+                eprintln!("loci-server: accept failed: {error}");
+                continue;
+            }
+        };
+
+        let request = match read_request(&mut stream) {
+            Ok(request) => request,
+            Err(response) => {
+                let _ = stream.write_all(response.as_bytes());
+                continue;
+            }
+        };
+
+        let response = handle_request(&mut engine, &request);
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
     }
 
     Ok(())
 }
 
-fn handle_request(engine: &mut InferenceEngine, request: &str) -> anyhow::Result<String> {
-    Ok(match route_request(engine, request) {
-        Ok(response) => response,
-        Err(error) => error.into_response(),
-    })
-}
-
-fn route_request(engine: &mut InferenceEngine, request: &str) -> Result<String, ServerHttpError> {
-    let mut lines = request.lines();
-    let request_line = lines.next().unwrap_or_default();
-    let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+fn handle_request(engine: &mut InferenceEngine, request: &str) -> String {
+    engine.evict_expired_models();
+    let (request_line, body) = parse_request_parts(request);
 
     if request_line.starts_with("GET /health ") {
-        return Ok(json_response(r#"{"status":"ok"}"#));
+        return json_response(r#"{"status":"ok"}"#);
     }
-
     if request_line.starts_with("GET /v1/runtime ") {
-        let json = serde_json::to_string(&engine.runtime_snapshot())
-            .map_err(|error| ServerHttpError::internal(error.to_string()))?;
-        return Ok(json_response(&json));
+        return serialize_response(&engine.runtime_snapshot());
     }
-
-    if request_line.starts_with("POST /v1/inference/generate ") {
-        let payload: GenerateRequest = serde_json::from_str(body)?;
-        let mut params = InferenceParams::default();
-        if let Some(max_tokens) = payload.max_tokens {
-            params.max_tokens = max_tokens;
-        }
-        if let Some(temperature) = payload.temperature {
-            params.temperature = temperature;
-        }
-        let response = engine
-            .infer(&payload.prompt, &params)
-            .map_err(map_engine_error)?;
-        let json = serde_json::to_string(&response)
-            .map_err(|error| ServerHttpError::internal(error.to_string()))?;
-        return Ok(json_response(&json));
+    if request_line.starts_with("GET /v1/config ") {
+        return serialize_response(&engine.runtime_snapshot().config);
     }
-
-    if request_line.starts_with("POST /v1/model/load ") {
-        let payload: ModelLoadRequest = serde_json::from_str(body)?;
-        let config = payload.config.into_model_config();
-        engine
-            .load_model_config(&payload.backend_name, &config)
-            .map_err(map_engine_error)?;
-        let json = serde_json::to_string(&engine.runtime_snapshot())
-            .map_err(|error| ServerHttpError::internal(error.to_string()))?;
-        return Ok(json_response(&json));
-    }
-
-    if request_line.starts_with("POST /v1/model/unload ") {
-        let status = engine.unload_model();
-        let json = serde_json::to_string(&status)
-            .map_err(|error| ServerHttpError::internal(error.to_string()))?;
-        return Ok(json_response(&json));
-    }
-
     if request_line.starts_with("GET /v1/models ") {
-        let response = openai_models_response(engine)?;
-        let json = serde_json::to_string(&response)
-            .map_err(|error| ServerHttpError::internal(error.to_string()))?;
-        return Ok(json_response(&json));
+        return serialize_response(&OpenAiModelListResponse {
+            object: "list",
+            data: engine
+                .models()
+                .into_iter()
+                .map(|model| OpenAiModel {
+                    id: model.name.clone(),
+                    object: "model",
+                    created: unix_timestamp(),
+                    owned_by: "loci",
+                })
+                .collect(),
+        });
     }
-
+    if request_line.starts_with("POST /v1/models/register ") {
+        return match serde_json::from_str::<RegisterModelRequest>(body) {
+            Ok(payload) => {
+                engine.register_model(payload.into_model());
+                serialize_response(&engine.runtime_snapshot())
+            }
+            Err(error) => bad_request(&format!("invalid model registration payload: {error}")),
+        };
+    }
+    if request_line.starts_with("POST /v1/models/unregister ") {
+        return match serde_json::from_str::<UnregisterModelRequest>(body) {
+            Ok(payload) => serialize_response(&serde_json::json!({
+                "removed": engine.unregister_model(&payload.name),
+                "name": payload.name,
+            })),
+            Err(error) => bad_request(&format!("invalid model removal payload: {error}")),
+        };
+    }
+    if request_line.starts_with("POST /v1/models/evict ") {
+        return match serde_json::from_str::<EvictModelRequest>(body) {
+            Ok(payload) => serialize_response(&serde_json::json!({
+                "evicted": engine.evict_model(&payload.name),
+                "name": payload.name,
+            })),
+            Err(error) => bad_request(&format!("invalid model eviction payload: {error}")),
+        };
+    }
+    if request_line.starts_with("POST /v1/models/prewarm ") {
+        return match serde_json::from_str::<PrewarmModelRequest>(body) {
+            Ok(payload) => match engine.prepare(payload.into_request()) {
+                Ok(prepared) => serialize_response(&prepared),
+                Err(error) => map_error(error),
+            },
+            Err(error) => bad_request(&format!("invalid model prewarm payload: {error}")),
+        };
+    }
+    if request_line.starts_with("POST /v1/config/aliases/register ") {
+        return match serde_json::from_str::<RegisterAliasRequest>(body) {
+            Ok(payload) => {
+                engine.register_alias(payload.alias, payload.target);
+                serialize_response(&engine.runtime_snapshot().config)
+            }
+            Err(error) => bad_request(&format!("invalid alias registration payload: {error}")),
+        };
+    }
+    if request_line.starts_with("POST /v1/config/aliases/remove ") {
+        return match serde_json::from_str::<RemoveAliasRequest>(body) {
+            Ok(payload) => serialize_response(&serde_json::json!({
+                "removed": engine.remove_alias(&payload.alias),
+                "alias": payload.alias,
+                "config": engine.runtime_snapshot().config,
+            })),
+            Err(error) => bad_request(&format!("invalid alias removal payload: {error}")),
+        };
+    }
+    if request_line.starts_with("POST /v1/config/planner ") {
+        return match serde_json::from_str::<UpdatePlannerConfigRequest>(body) {
+            Ok(payload) => {
+                apply_planner_config(engine, payload);
+                serialize_response(&engine.runtime_snapshot().config)
+            }
+            Err(error) => bad_request(&format!("invalid planner config payload: {error}")),
+        };
+    }
+    if request_line.starts_with("POST /v1/plan ") {
+        return match serde_json::from_str::<PlanHttpRequest>(body) {
+            Ok(payload) => match engine.plan(&payload.into_request()) {
+                Ok(plan) => serialize_response(&plan),
+                Err(error) => map_error(error),
+            },
+            Err(error) => bad_request(&format!("invalid plan payload: {error}")),
+        };
+    }
+    if request_line.starts_with("POST /v1/inference ") {
+        return match serde_json::from_str::<InferenceHttpRequest>(body) {
+            Ok(payload) => respond_inference(engine, payload.into_request()),
+            Err(error) => bad_request(&format!("invalid inference payload: {error}")),
+        };
+    }
     if request_line.starts_with("POST /v1/completions ") {
-        let payload: OpenAiCompletionsRequest = serde_json::from_str(body)?;
-        if payload.stream {
-            return Err(ServerHttpError::invalid_request(
-                "streaming is not supported by loci-server",
-            ));
-        }
-        let model_id = require_active_model(engine, &payload.model)?;
-        let prompt = payload.prompt.into_prompt();
-        let params = completion_params(payload.max_tokens, payload.temperature, payload.top_p);
-        let output = engine
-            .generate(&prompt, &params)
-            .map_err(map_engine_error)?;
-        let response = OpenAiCompletionResponse {
-            id: generated_id("cmpl"),
-            object: "text_completion",
-            created: unix_timestamp(),
-            model: model_id,
-            choices: vec![OpenAiCompletionChoice {
-                text: output.clone(),
-                index: 0,
-                finish_reason: "stop",
-            }],
-            usage: usage_for(&prompt, &output),
+        return match serde_json::from_str::<CompletionRequest>(body) {
+            Ok(payload) => {
+                let request = SessionRequest {
+                    prompt: payload.prompt,
+                    max_tokens: payload.max_tokens,
+                    temperature: payload.temperature,
+                    target_model: payload.model,
+                    structured_output: false,
+                    tool_calling: false,
+                };
+                match engine.infer(request) {
+                    Ok(response) => serialize_response(&OpenAiCompletionResponse {
+                        id: format!("cmpl-{}", unix_timestamp()),
+                        object: "text_completion",
+                        created: unix_timestamp(),
+                        model: response.model,
+                        choices: vec![OpenAiCompletionChoice {
+                            text: response.text,
+                            index: 0,
+                            finish_reason: "stop",
+                        }],
+                    }),
+                    Err(error) => map_error(error),
+                }
+            }
+            Err(error) => bad_request(&format!("invalid completion payload: {error}")),
         };
-        let json = serde_json::to_string(&response)
-            .map_err(|error| ServerHttpError::internal(error.to_string()))?;
-        return Ok(json_response(&json));
     }
-
     if request_line.starts_with("POST /v1/chat/completions ") {
-        let payload: OpenAiChatCompletionsRequest = serde_json::from_str(body)?;
-        if payload.stream {
-            return Err(ServerHttpError::invalid_request(
-                "streaming is not supported by loci-server",
-            ));
-        }
-        let model_id = require_active_model(engine, &payload.model)?;
-        let prompt = flatten_chat_messages(&payload.messages)?;
-        let params = completion_params(payload.max_tokens, payload.temperature, payload.top_p);
-        let output = engine
-            .generate(&prompt, &params)
-            .map_err(map_engine_error)?;
-        let response = OpenAiChatCompletionResponse {
-            id: generated_id("chatcmpl"),
-            object: "chat.completion",
-            created: unix_timestamp(),
-            model: model_id,
-            choices: vec![OpenAiChatCompletionChoice {
-                index: 0,
-                message: OpenAiChatAssistantMessage {
-                    role: "assistant",
-                    content: output.clone(),
-                },
-                finish_reason: "stop",
-            }],
-            usage: usage_for(&prompt, &output),
+        return match serde_json::from_str::<ChatCompletionsRequest>(body) {
+            Ok(payload) => {
+                let request = SessionRequest {
+                    prompt: flatten_messages(&payload.messages),
+                    max_tokens: payload.max_tokens,
+                    temperature: payload.temperature,
+                    target_model: payload.model,
+                    structured_output: false,
+                    tool_calling: false,
+                };
+                match engine.infer(request) {
+                    Ok(response) => serialize_response(&OpenAiChatCompletionResponse {
+                        id: format!("chatcmpl-{}", unix_timestamp()),
+                        object: "chat.completion",
+                        created: unix_timestamp(),
+                        model: response.model,
+                        choices: vec![OpenAiChatCompletionChoice {
+                            index: 0,
+                            message: OpenAiChatAssistantMessage {
+                                role: "assistant",
+                                content: response.text,
+                            },
+                            finish_reason: "stop",
+                        }],
+                    }),
+                    Err(error) => map_error(error),
+                }
+            }
+            Err(error) => bad_request(&format!("invalid chat completion payload: {error}")),
         };
-        let json = serde_json::to_string(&response)
-            .map_err(|error| ServerHttpError::internal(error.to_string()))?;
-        return Ok(json_response(&json));
     }
 
-    Err(ServerHttpError::not_found("route not found"))
+    not_found("route not found")
+}
+
+fn respond_inference(engine: &mut InferenceEngine, request: SessionRequest) -> String {
+    match engine.infer(request) {
+        Ok(response) => serialize_response(&response),
+        Err(error) => map_error(error),
+    }
+}
+
+fn apply_planner_config(engine: &mut InferenceEngine, payload: UpdatePlannerConfigRequest) {
+    if let Some(keep_alive_secs) = payload.keep_alive_secs {
+        engine.set_model_keep_alive_secs(keep_alive_secs);
+    }
+    if let Some(offload_profile) = payload.offload_profile {
+        engine.set_offload_profile(offload_profile);
+    }
+    if let Some(block_size_tokens) = payload.kv_block_size_tokens {
+        engine.set_kv_block_size_tokens(block_size_tokens);
+    }
+    if let Some(prefix_cache_enabled) = payload.kv_prefix_cache_enabled {
+        engine.set_kv_prefix_cache_enabled(prefix_cache_enabled);
+    }
+    match (payload.kv_type_k, payload.kv_type_v) {
+        (Some(type_k), Some(type_v)) => engine.set_kv_types(type_k, type_v),
+        (Some(type_k), None) => {
+            let existing = engine.runtime_snapshot().config.kv_type_v;
+            engine.set_kv_types(type_k, existing);
+        }
+        (None, Some(type_v)) => {
+            let existing = engine.runtime_snapshot().config.kv_type_k;
+            engine.set_kv_types(existing, type_v);
+        }
+        (None, None) => {}
+    }
+}
+
+fn serialize_response<T: Serialize>(value: &T) -> String {
+    match serde_json::to_string(value) {
+        Ok(body) => http_response("200 OK", &body),
+        Err(error) => bad_request(&format!("serialization failed: {error}")),
+    }
+}
+
+fn map_error(error: LociError) -> String {
+    match error {
+        LociError::NoBackendAvailable => bad_request("no backend available"),
+        LociError::NoModelsRegistered => bad_request("no model registered"),
+        LociError::RequestedModelMissing(name) => {
+            bad_request(&format!("requested model `{name}` is not registered"))
+        }
+        LociError::NoCompatibleBackend { model, format } => bad_request(&format!(
+            "no compatible backend is available for model `{model}` with format `{format}`"
+        )),
+        LociError::Backend(message) | LociError::InvalidRequest(message) => bad_request(&message),
+    }
+}
+
+fn flatten_messages(messages: &[ChatMessage]) -> String {
+    let mut prompt = String::new();
+    for message in messages {
+        prompt.push_str(&message.role);
+        prompt.push_str(": ");
+        prompt.push_str(&message.content);
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str("assistant:");
+    prompt
 }
 
 fn json_response(body: &str) -> String {
-    http_response("200 OK", "application/json", body)
+    http_response("200 OK", body)
 }
 
-fn http_response(status: &str, content_type: &str, body: &str) -> String {
+fn bad_request(message: &str) -> String {
+    http_response("400 Bad Request", &format!(r#"{{"error":"{}"}}"#, message))
+}
+
+fn not_found(message: &str) -> String {
+    http_response("404 Not Found", &format!(r#"{{"error":"{}"}}"#, message))
+}
+
+fn http_response(status: &str, body: &str) -> String {
     format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
     )
 }
 
-fn openai_models_response(
-    engine: &InferenceEngine,
-) -> Result<OpenAiModelListResponse, ServerHttpError> {
-    let data = engine
-        .model_path()
-        .map(|path| OpenAiModel {
-            id: model_identifier(path),
-            object: "model",
-            created: unix_timestamp(),
-            owned_by: "loci",
-        })
-        .into_iter()
-        .collect();
-    Ok(OpenAiModelListResponse {
-        object: "list",
-        data,
+fn parse_request_parts(request: &str) -> (&str, &str) {
+    let (head, body) = request.split_once("\r\n\r\n").unwrap_or((request, ""));
+    let request_line = head.lines().next().unwrap_or_default();
+    (request_line, body)
+}
+
+fn read_request(stream: &mut (impl Read + Write)) -> std::result::Result<String, String> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let mut sent_continue = false;
+    loop {
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|error| bad_request(&format!("read failed: {error}")))?;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if !sent_continue {
+            if let Some(framing) = request_framing(&buffer) {
+                if framing.expect_continue {
+                    stream
+                        .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                        .map_err(|error| {
+                            bad_request(&format!("failed to acknowledge request body: {error}"))
+                        })?;
+                    stream
+                        .flush()
+                        .map_err(|error| bad_request(&format!("flush failed: {error}")))?;
+                    sent_continue = true;
+                }
+            }
+        }
+        if let Some(required_len) = required_request_len(&buffer) {
+            if buffer.len() >= required_len {
+                break;
+            }
+        }
+    }
+
+    let normalized = normalize_request_body(buffer)?;
+    String::from_utf8(normalized).map_err(|_| bad_request("request is not valid utf-8"))
+}
+
+fn required_request_len(buffer: &[u8]) -> Option<usize> {
+    let framing = request_framing(buffer)?;
+    match framing.body {
+        BodyFraming::ContentLength(content_length) => Some(framing.header_end + content_length),
+        BodyFraming::Chunked => {
+            let body = &buffer[framing.header_end..];
+            body.windows(5)
+                .position(|window| window == b"0\r\n\r\n")
+                .map(|offset| framing.header_end + offset + 5)
+        }
+        BodyFraming::Empty => Some(framing.header_end),
+    }
+}
+
+fn normalize_request_body(buffer: Vec<u8>) -> std::result::Result<Vec<u8>, String> {
+    let Some(framing) = request_framing(&buffer) else {
+        return Ok(buffer);
+    };
+
+    match framing.body {
+        BodyFraming::Chunked => {
+            let decoded = decode_chunked_body(&buffer[framing.header_end..])?;
+            let mut normalized = buffer[..framing.header_end].to_vec();
+            normalized.extend_from_slice(&decoded);
+            Ok(normalized)
+        }
+        _ => Ok(buffer),
+    }
+}
+
+fn request_framing(buffer: &[u8]) -> Option<RequestFraming> {
+    let header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n")? + 4;
+    let headers = std::str::from_utf8(&buffer[..header_end]).ok()?;
+    let mut content_length = None;
+    let mut chunked = false;
+    let mut expect_continue = false;
+
+    for line in headers.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            content_length = value.trim().parse::<usize>().ok();
+        }
+        if name.eq_ignore_ascii_case("transfer-encoding")
+            && value.to_ascii_lowercase().contains("chunked")
+        {
+            chunked = true;
+        }
+        if name.eq_ignore_ascii_case("expect")
+            && value.to_ascii_lowercase().contains("100-continue")
+        {
+            expect_continue = true;
+        }
+    }
+
+    let body = if chunked {
+        BodyFraming::Chunked
+    } else if let Some(content_length) = content_length {
+        BodyFraming::ContentLength(content_length)
+    } else {
+        BodyFraming::Empty
+    };
+
+    Some(RequestFraming {
+        header_end,
+        body,
+        expect_continue,
     })
 }
 
-fn completion_params(
-    max_tokens: Option<u32>,
-    temperature: Option<f32>,
-    top_p: Option<f32>,
-) -> InferenceParams {
-    let mut params = InferenceParams::default();
-    if let Some(value) = max_tokens {
-        params.max_tokens = value;
-    }
-    if let Some(value) = temperature {
-        params.temperature = value;
-    }
-    if let Some(value) = top_p {
-        params.top_p = value;
-    }
-    params
-}
+fn decode_chunked_body(body: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    let mut offset = 0usize;
+    let mut decoded = Vec::new();
 
-fn require_active_model(
-    engine: &InferenceEngine,
-    requested_model: &str,
-) -> Result<String, ServerHttpError> {
-    let path = engine
-        .model_path()
-        .ok_or_else(|| ServerHttpError::invalid_request("no active model is loaded"))?;
-    if model_matches(path, requested_model) {
-        return Ok(model_identifier(path));
-    }
+    loop {
+        let size_line_end = find_bytes(&body[offset..], b"\r\n")
+            .ok_or_else(|| bad_request("malformed chunked request body"))?;
+        let size_line = std::str::from_utf8(&body[offset..offset + size_line_end])
+            .map_err(|_| bad_request("chunk size is not valid utf-8"))?;
+        let size_token = size_line.split(';').next().unwrap_or_default().trim();
+        let chunk_size = usize::from_str_radix(size_token, 16)
+            .map_err(|_| bad_request("chunk size is not valid hexadecimal"))?;
+        offset += size_line_end + 2;
 
-    Err(ServerHttpError::invalid_request(format!(
-        "requested model `{requested_model}` does not match the active model `{}`",
-        path.display()
-    )))
-}
-
-fn model_matches(path: &Path, requested_model: &str) -> bool {
-    requested_model == path.display().to_string()
-        || path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .map(|value| value == requested_model)
-            .unwrap_or(false)
-}
-
-fn model_identifier(path: &Path) -> String {
-    path.file_name()
-        .and_then(|value| value.to_str())
-        .map(str::to_owned)
-        .unwrap_or_else(|| path.display().to_string())
-}
-
-fn flatten_chat_messages(messages: &[OpenAiChatMessage]) -> Result<String, ServerHttpError> {
-    if messages.is_empty() {
-        return Err(ServerHttpError::invalid_request(
-            "messages must contain at least one item",
-        ));
-    }
-
-    let mut prompt = String::new();
-    for message in messages {
-        let role = message.role.trim();
-        if role.is_empty() {
-            return Err(ServerHttpError::invalid_request(
-                "message role must not be empty",
-            ));
+        if chunk_size == 0 {
+            return Ok(decoded);
         }
-        let content = message.content.flatten()?;
-        if content.trim().is_empty() {
-            return Err(ServerHttpError::invalid_request(
-                "message content must not be empty",
-            ));
+
+        if body.len() < offset + chunk_size + 2 {
+            return Err(bad_request("chunked request body ended unexpectedly"));
         }
-        prompt.push_str(role);
-        prompt.push_str(": ");
-        prompt.push_str(content.trim());
-        prompt.push_str("\n\n");
-    }
-    prompt.push_str("assistant:");
-    Ok(prompt)
-}
 
-fn usage_for(prompt: &str, output: &str) -> OpenAiUsage {
-    let prompt_tokens = approximate_token_count(prompt);
-    let completion_tokens = approximate_token_count(output);
-    OpenAiUsage {
-        prompt_tokens,
-        completion_tokens,
-        total_tokens: prompt_tokens.saturating_add(completion_tokens),
+        decoded.extend_from_slice(&body[offset..offset + chunk_size]);
+        offset += chunk_size;
+
+        if &body[offset..offset + 2] != b"\r\n" {
+            return Err(bad_request("chunk delimiter is missing"));
+        }
+        offset += 2;
     }
 }
 
-fn approximate_token_count(text: &str) -> u32 {
-    text.split_whitespace().count() as u32
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
-fn generated_id(prefix: &str) -> String {
-    format!("{prefix}-{}", unix_timestamp())
+#[derive(Clone, Copy)]
+struct RequestFraming {
+    header_end: usize,
+    body: BodyFraming,
+    expect_continue: bool,
+}
+
+#[derive(Clone, Copy)]
+enum BodyFraming {
+    Empty,
+    ContentLength(usize),
+    Chunked,
 }
 
 fn unix_timestamp() -> u64 {
@@ -538,206 +646,218 @@ fn unix_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
-fn map_engine_error(error: LociError) -> ServerHttpError {
-    match error {
-        LociError::Other(error) => ServerHttpError::internal(error.to_string()),
-        other => ServerHttpError::invalid_request(other.to_string()),
-    }
-}
-
-impl ModelLoadConfigRequest {
-    fn into_model_config(self) -> ModelConfig {
-        ModelConfig {
-            model_path: self.model_path,
-            n_ctx: self.n_ctx,
-            n_threads: self.n_threads,
-            n_batch: self.n_batch,
-            use_gpu: self.use_gpu,
-            n_gpu_layers: self.n_gpu_layers,
-            use_mmap: self.use_mmap,
-            use_mlock: self.use_mlock,
-            kv_offload: self.kv_offload,
-            op_offload: self.op_offload,
-            split_mode: self.split_mode,
-            main_gpu: self.main_gpu,
-            tensor_split: self.tensor_split,
-            load_strategy: match self
-                .load_strategy
-                .unwrap_or(ModelLoadStrategyRequest::Strict)
-            {
-                ModelLoadStrategyRequest::Strict => ModelLoadStrategy::Strict,
-                ModelLoadStrategyRequest::AutoReduceGpuLayers { step } => {
-                    ModelLoadStrategy::AutoReduceGpuLayers { step }
-                }
-            },
+impl RegisterModelRequest {
+    fn into_model(self) -> ModelDescriptor {
+        ModelDescriptor {
+            name: self.name,
+            path: self.path,
+            architecture: self.architecture,
+            memory_bytes: self.memory_bytes,
+            parameter_count: self.parameter_count,
+            context_length: self.context_length,
+            preferred_backend: self.preferred_backend,
         }
     }
 }
 
-impl PromptInput {
-    fn into_prompt(self) -> String {
-        match self {
-            Self::Single(prompt) => prompt,
-            Self::Many(prompts) => prompts.join("\n"),
+impl InferenceHttpRequest {
+    fn into_request(self) -> SessionRequest {
+        SessionRequest {
+            prompt: self.prompt,
+            max_tokens: self.max_tokens,
+            temperature: self.temperature,
+            target_model: self.target_model,
+            structured_output: self.structured_output,
+            tool_calling: self.tool_calling,
         }
     }
 }
 
-impl OpenAiChatContent {
-    fn flatten(&self) -> Result<String, ServerHttpError> {
-        match self {
-            Self::Text(text) => Ok(text.clone()),
-            Self::Parts(parts) => {
-                let mut text = String::new();
-                for part in parts {
-                    if part.part_type == "text" {
-                        if let Some(value) = &part.text {
-                            text.push_str(value);
-                        }
-                    }
-                }
-                if text.is_empty() {
-                    return Err(ServerHttpError::invalid_request(
-                        "chat message content must contain at least one text part",
-                    ));
-                }
-                Ok(text)
-            }
+impl PlanHttpRequest {
+    fn into_request(self) -> SessionRequest {
+        SessionRequest {
+            prompt: self.prompt,
+            max_tokens: self.max_tokens,
+            temperature: self.temperature,
+            target_model: self.target_model,
+            structured_output: self.structured_output,
+            tool_calling: self.tool_calling,
         }
     }
 }
 
-const fn default_n_ctx() -> u32 {
-    4096
+const fn default_max_tokens() -> u32 {
+    128
 }
 
-const fn default_n_batch() -> u32 {
-    512
+const fn default_temperature() -> f32 {
+    0.2
 }
 
-const fn default_true() -> bool {
-    true
+fn default_architecture() -> String {
+    "llama".to_string()
 }
 
-const fn default_n_gpu_layers() -> i32 {
-    -1
+fn default_prewarm_prompt() -> String {
+    "warmup".to_string()
+}
+
+const fn default_prewarm_tokens() -> u32 {
+    1
+}
+
+impl PrewarmModelRequest {
+    fn into_request(self) -> SessionRequest {
+        SessionRequest {
+            prompt: self.prompt,
+            max_tokens: self.max_tokens,
+            temperature: 0.0,
+            target_model: self.model,
+            structured_output: false,
+            tool_calling: false,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use loci_core::{EngineConfig, InferenceEngine};
 
-    fn temp_model_path(name: &str) -> PathBuf {
-        let mut dir = std::env::temp_dir();
-        dir.push(format!(
-            "loci-server-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).expect("mkdir");
-        let path = dir.join("demo.gguf");
-        fs::write(&path, b"mock-model").expect("write model");
-        path
+    fn engine_with_model() -> InferenceEngine {
+        InferenceEngine::builder()
+            .model(ModelDescriptor {
+                name: "demo".to_string(),
+                path: PathBuf::from("D:/models/demo.gguf"),
+                architecture: "llama".to_string(),
+                memory_bytes: Some(2 * 1024 * 1024 * 1024),
+                parameter_count: Some(1_000_000_000),
+                context_length: Some(8192),
+                preferred_backend: None,
+            })
+            .build()
+            .expect("engine")
     }
 
     #[test]
-    fn server_loads_and_unloads_model_via_http_routes() {
-        let mut engine = InferenceEngine::builder().build().expect("build");
-        let model_path = temp_model_path("load-unload");
-        let request = format!(
-            "POST /v1/model/load HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{{\"backend_name\":\"mock\",\"config\":{{\"model_path\":\"{}\",\"use_gpu\":false,\"n_gpu_layers\":0,\"kv_offload\":false,\"op_offload\":false,\"split_mode\":\"none\"}}}}",
-            model_path.display().to_string().replace('\\', "/")
+    fn plan_route_returns_execution_plan() {
+        let mut engine = engine_with_model();
+        let response = handle_request(
+            &mut engine,
+            "POST /v1/plan HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"prompt\":\"hello\",\"max_tokens\":32,\"target_model\":\"demo\"}",
         );
 
-        let load_response = handle_request(&mut engine, &request).expect("load response");
-        assert!(load_response.contains("\"active_backend\":\"mock\""));
-        assert!(load_response.contains("\"active_model_path\""));
+        assert!(response.contains("\"backend\":\"openvino\""));
+        assert!(response.contains("\"selected_model\":\"demo\""));
+        assert!(response.contains("\"placements\""));
+    }
 
-        let unload_response = handle_request(
+    #[test]
+    fn unregister_route_removes_model() {
+        let mut engine = engine_with_model();
+        let response = handle_request(
             &mut engine,
-            "POST /v1/model/unload HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{}",
-        )
-        .expect("unload response");
-        assert!(unload_response.contains("\"unloaded\":true"));
-        assert!(engine.active_backend().is_none());
+            "POST /v1/models/unregister HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"name\":\"demo\"}",
+        );
+
+        assert!(response.contains("\"removed\":true"));
+        assert!(engine.models().is_empty());
     }
 
     #[test]
-    fn server_lists_active_model_for_openai_models_route() {
-        let model_path = temp_model_path("models-route");
-        let mut engine = InferenceEngine::builder()
-            .backend("mock")
-            .model_path(&model_path)
-            .build()
-            .expect("build");
-
-        let response = handle_request(&mut engine, "GET /v1/models HTTP/1.1\r\n\r\n")
-            .expect("models response");
-        assert!(response.contains("\"object\":\"list\""));
-        assert!(response.contains("\"id\":\"demo.gguf\""));
-    }
-
-    #[test]
-    fn server_supports_openai_completions_route() {
-        let model_path = temp_model_path("openai-completions");
-        let mut engine = InferenceEngine::builder()
-            .backend("mock")
-            .model_path(&model_path)
-            .build()
-            .expect("build");
+    fn evict_route_drops_prepared_state_without_unregistering_model() {
+        let mut engine = engine_with_model();
+        let _ = handle_request(
+            &mut engine,
+            "POST /v1/models/prewarm HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"model\":\"demo\"}",
+        );
 
         let response = handle_request(
             &mut engine,
-            "POST /v1/completions HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"model\":\"demo.gguf\",\"prompt\":\"hello\",\"max_tokens\":32}",
-        )
-        .expect("completion response");
+            "POST /v1/models/evict HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"name\":\"demo\"}",
+        );
 
-        assert!(response.contains("\"object\":\"text_completion\""));
-        assert!(response.contains("\"model\":\"demo.gguf\""));
-        assert!(response.contains("mock:hello"));
+        assert!(response.contains("\"evicted\":true"));
+        assert_eq!(engine.models().len(), 1);
     }
 
     #[test]
-    fn server_supports_openai_chat_completions_route() {
-        let model_path = temp_model_path("openai-chat");
-        let mut engine = InferenceEngine::builder()
-            .backend("mock")
-            .model_path(&model_path)
-            .build()
-            .expect("build");
-
+    fn prewarm_route_prepares_model_session() {
+        let mut engine = engine_with_model();
         let response = handle_request(
             &mut engine,
-            "POST /v1/chat/completions HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"model\":\"demo.gguf\",\"messages\":[{\"role\":\"system\",\"content\":\"be concise\"},{\"role\":\"user\",\"content\":\"hello\"}]}",
-        )
-        .expect("chat completion response");
+            "POST /v1/models/prewarm HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"model\":\"demo\"}",
+        );
 
-        assert!(response.contains("\"object\":\"chat.completion\""));
-        assert!(response.contains("\"role\":\"assistant\""));
-        assert!(response.contains("mock:system: be concise"));
-        assert!(response.contains("user: hello"));
+        assert!(response.contains("\"model_name\":\"demo\""));
+        assert!(response.contains("\"backend\":\"openvino\""));
     }
 
     #[test]
-    fn server_rejects_openai_streaming_requests() {
-        let model_path = temp_model_path("openai-stream");
+    fn config_routes_update_aliases_and_planner_settings() {
         let mut engine = InferenceEngine::builder()
-            .backend("mock")
-            .model_path(&model_path)
+            .config(EngineConfig::default())
+            .model(ModelDescriptor {
+                name: "demo".to_string(),
+                path: PathBuf::from("D:/models/demo.gguf"),
+                architecture: "llama".to_string(),
+                memory_bytes: Some(2 * 1024 * 1024 * 1024),
+                parameter_count: Some(1_000_000_000),
+                context_length: Some(8192),
+                preferred_backend: None,
+            })
             .build()
-            .expect("build");
+            .expect("engine");
 
-        let response = handle_request(
+        let alias_response = handle_request(
             &mut engine,
-            "POST /v1/completions HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"model\":\"demo.gguf\",\"prompt\":\"hello\",\"stream\":true}",
-        )
-        .expect("stream rejection");
+            "POST /v1/config/aliases/register HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"alias\":\"tiny\",\"target\":\"demo\"}",
+        );
+        assert!(alias_response.contains("\"tiny\":\"demo\""));
 
-        assert!(response.contains("400 Bad Request"));
-        assert!(response.contains("streaming is not supported"));
+        let planner_response = handle_request(
+            &mut engine,
+            "POST /v1/config/planner HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"keep_alive_secs\":12,\"offload_profile\":\"gpu_resident\",\"kv_block_size_tokens\":64,\"kv_prefix_cache_enabled\":false,\"kv_type_k\":\"q8_0\",\"kv_type_v\":\"q4_0\"}",
+        );
+        assert!(planner_response.contains("\"model_keep_alive_secs\":12"));
+        assert!(planner_response.contains("\"tiered_offload_profile\":\"gpu_resident\""));
+        assert!(planner_response.contains("\"kv_block_size_tokens\":64"));
+        assert!(planner_response.contains("\"kv_type_k\":\"q8_0\""));
+        assert!(planner_response.contains("\"kv_type_v\":\"q4_0\""));
+
+        let remove_response = handle_request(
+            &mut engine,
+            "POST /v1/config/aliases/remove HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"alias\":\"tiny\"}",
+        );
+        assert!(remove_response.contains("\"removed\":true"));
+    }
+
+    #[test]
+    fn read_request_honors_content_length_for_post_bodies() {
+        let request = b"POST /v1/config/aliases/register HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 32\r\n\r\n{\"alias\":\"tiny\",\"target\":\"demo\"}";
+        let mut cursor = std::io::Cursor::new(request.to_vec());
+        let parsed = read_request(&mut cursor).expect("request");
+
+        assert!(parsed.ends_with("{\"alias\":\"tiny\",\"target\":\"demo\"}"));
+    }
+
+    #[test]
+    fn read_request_decodes_chunked_post_bodies() {
+        let request = b"POST /v1/config/aliases/register HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\n\r\n20\r\n{\"alias\":\"tiny\",\"target\":\"demo\"}\r\n0\r\n\r\n";
+        let mut cursor = std::io::Cursor::new(request.to_vec());
+        let parsed = read_request(&mut cursor).expect("request");
+
+        assert!(parsed.ends_with("{\"alias\":\"tiny\",\"target\":\"demo\"}"));
+    }
+
+    #[test]
+    fn read_request_acknowledges_expect_continue() {
+        let request = b"POST /v1/config/aliases/register HTTP/1.1\r\nExpect: 100-continue\r\nContent-Type: application/json\r\nContent-Length: 32\r\n\r\n{\"alias\":\"tiny\",\"target\":\"demo\"}";
+        let mut cursor = std::io::Cursor::new(request.to_vec());
+        let parsed = read_request(&mut cursor).expect("request");
+
+        assert!(parsed.ends_with("{\"alias\":\"tiny\",\"target\":\"demo\"}"));
+        let written = String::from_utf8(cursor.into_inner()).expect("buffer");
+        assert!(written.contains("100 Continue"));
     }
 }

@@ -2,57 +2,83 @@
 
 ## 定位
 
-Loci 是 `PetCompanion` 之下的推理基础设施层，不承担产品层 UI 或桌宠逻辑。
+Loci 是面向端侧推理基础设施的 Rust 项目，核心关注点是 CPU / GPU / NPU 异构执行、权重分层 offload、Paged KV Cache 规划以及可选的动态模型路由。
 
-## 三层设计
+## Workspace 分层
 
-### 1. 核心层
+### 1. 协议层
 
-`crates/core` 负责：
+`crates/protocol` 定义工作区共享契约，包括：
 
-- 后端注册表
-- 模型加载配置
-- 推理参数归并
-- 插件清单加载与激活
+- 硬件拓扑
+- 模型描述
+- 路由决策
+- 执行计划
+- backend trait
+- 请求 / 响应结构
+
+这是整个 workspace 的共享语言层。
+
+### 2. 核心运行时层
+
+`crates/core` 是编排层，负责：
+
+- 运行时配置
+- 硬件拓扑归并
+- backend 选择
+- 模型路由
+- 异构执行计划生成
 - 运行时快照
 
-### 2. 插件层
+核心层不直接内嵌具体 backend 的执行实现，而是将执行委托给 backend crate，并把规划决策保持为显式结构。
 
-当前稳定主线只识别两类插件：
+### 3. Backend 与专项规划扩展
 
-- `model_loader`
-- `hardware_backend`
+- `crates/backend-openvino`
+- `crates/backend-candle`
+- `crates/tiered-offload`
+- `crates/paged-kv`
 
-当前激活流程也只做狭义的运行时物化：
+这些 crate 提供 backend 能力接入点，以及分层 offload / KV cache 的专项规划逻辑。
 
-- `native` 运行时按动态库加载
-- `wasm` 运行时只做模块校验并保留为运行时工件
+当前架构明确采用 Cargo feature 注入，而不是运行时插件激活。
 
-这保证了宿主契约是实用且可实现的，而不是提前承诺稳定的插件符号 ABI。`kv_cache`、`distributed`、`multimodal`、`agent` 仍然只是路线图方向，暂时不进入当前稳定宿主契约。当前主实现仍以 `llama.cpp` 为主要后端，插件机制负责扩展格式和硬件能力。
+当前 backend crate 应被视为集成边界，而不是已经完成的生产级绑定。
 
-### 3. 接口层
+### 4. 接口层
 
-Loci 对外提供：
+- `crates/cli`
+- `crates/server`
 
-- Rust API
-- C ABI
-- 本地 HTTP sidecar 接口
+它们只是 `loci-core` 之上的轻入口。
 
-其中 C ABI 也刻意保持收敛，只覆盖宿主运行时关心的能力：engine 生命周期、模型加载/卸载、文本生成、结构化推理 JSON、运行时快照、后端能力查询，以及稳定的状态码/错误查询。
+## 执行模型
 
-## 运行流程
+运行时主流程如下：
 
-1. 扫描插件目录中的 `manifest.toml`
-2. 注册或激活插件
-3. 通过后端加载模型
-4. 合并默认推理参数与请求参数
-5. 执行推理并返回运行时信息
+1. 发现可用 backend 能力。
+2. 将 backend 上报的设备信息归并为统一硬件拓扑。
+3. 直接选模型，或者通过可选路由选择模型。
+4. 构建异构执行计划：
+   - 吞吐优先的 prefill
+   - 功耗优先的 decode
+   - KV cache 放置
+   - 可选的冷权重磁盘 spill
+5. 通过选定 backend 执行请求。
 
-本地 HTTP sidecar 也保持最小化，只暴露运行时/模型控制以及单活动模型下的 OpenAI 兼容 `models`、`completions`、`chat/completions` 推理接口。
+## Feature 模型
 
-## 边界约束
+`loci-core` 当前暴露这些 feature：
 
-- 不在 `loci-core` 中引入桌面窗口或 UI host 逻辑
-- 不把 `PetCompanion` 的交互流程抽象塞进插件 API
-- 硬件选择与 offload 策略归属于后端或硬件插件，而不是应用层
-- 不在 server 层引入 tools、assistants、workflow engine 或 agent loop
+- `openvino`
+- `candle`
+- `tiered-offload`
+- `paged-kv`
+- `power-aware`
+- `dynamic-routing`
+
+默认 feature：
+
+```toml
+default = ["openvino", "power-aware", "tiered-offload", "paged-kv"]
+```
