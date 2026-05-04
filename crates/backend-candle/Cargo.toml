@@ -7,3 +7,5 @@ authors.workspace = true
 
 [dependencies]
 loci-protocol = { path = "../protocol" }
+loci-gguf = { path = "../gguf" }
+loci-kernels-llama = { path = "../kernels-llama" }

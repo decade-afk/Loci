@@ -1,84 +1,164 @@
 # Loci Architecture
 
-## Positioning
+Loci is organized as a local inference platform with a small core and explicit execution boundaries.
 
-Loci is an end-side inference infrastructure project focused on heterogeneous CPU / GPU / NPU execution, tiered weight offload, paged KV cache planning, and optional dynamic model routing.
+The architecture is designed for one purpose: let applications run models locally through the same runtime whether they need an embedded SDK, a standalone service, or a backend mix that changes across devices.
 
-## Workspace Layers
+## Architectural Overview
 
-### 1. Protocol Layer
+Loci separates inference into four concerns:
 
-`crates/protocol` defines the shared contracts for:
+- control-plane orchestration
+- model and format understanding
+- execution backends
+- memory and residency helpers
 
-- hardware topology
-- model descriptors
-- routing decisions
-- execution plans
-- backend traits
-- request / response payloads
+This separation keeps the project portable while still allowing specialized acceleration paths where they make sense.
 
-This crate is the shared language of the workspace.
+## 1. Control Plane
 
-### 2. Core Runtime Layer
+The control plane lives in `crates/core`.
 
-`crates/core` is the orchestration layer. It owns:
+It is responsible for:
 
-- runtime configuration
-- hardware topology merge
-- backend selection
-- routing
-- heterogenous execution planning
-- runtime snapshot generation
+- model registration and alias management
+- backend topology discovery
+- readiness inspection
+- heterogeneous plan construction
+- runtime snapshots
+- service and embedded runtime coordination
 
-The core does not embed backend-specific execution logic directly. It delegates execution through backend crates and keeps planning decisions explicit.
+The control plane does not own backend-specific kernels or vendor runtime assumptions. It only reasons about capabilities, readiness, and placement.
 
-### 3. Backend and Planning Extensions
+## 2. Model and Format Layer
 
-- `crates/backend-openvino`
-- `crates/backend-candle`
+The format layer starts with `crates/gguf`.
+
+Its role is to turn model assets into structured runtime information:
+
+- model identity
+- architecture family
+- context length
+- tensor table structure
+- basic readiness metadata for execution backends
+
+This keeps file parsing separate from planning and allows backends to consume normalized model facts instead of raw asset logic.
+
+## 3. Execution Backends
+
+Execution backends are isolated crates that implement the runtime contract in different ways.
+
+### `backend-candle`
+
+`crates/backend-candle` is the default backend direction for Loci.
+
+It exists to provide:
+
+- a pure Rust execution path
+- a portable integration surface across host platforms
+- a natural landing zone for curated operator ports
+- the default composition for applications that want to embed Loci without vendor lock-in
+
+### `backend-openvino`
+
+`crates/backend-openvino` is an optional backend for Intel-oriented acceleration.
+
+It exists to provide:
+
+- optimized execution on supported Intel devices
+- access to Intel heterogeneous placement across accelerator classes
+- a production-oriented optional path without redefining the architecture of the rest of the project
+
+## 4. Kernel Layer
+
+Low-level operator work lives in `crates/kernels-llama`.
+
+This layer is where Loci ports and validates selected high-value kernels inspired by strong upstream projects such as `llama.cpp`.
+
+The point of a separate kernel layer is to make operator work:
+
+- explicit
+- benchmarkable
+- provenance-aware
+- reusable across backend integration work
+
+The kernel layer is not a dumping ground for backend-private code. It is a curated operator boundary.
+
+## 5. Memory and Residency Helpers
+
+Local inference is constrained by memory before it is constrained by API shape.
+
+That is why Loci isolates spill and cache support into dedicated crates:
+
 - `crates/tiered-offload`
 - `crates/paged-kv`
 
-These crates provide the concrete integration points for backend capabilities and specialized planning logic.
+These crates support the planner and backends with:
 
-The architecture is intentionally feature-gated instead of plugin-driven. Backends are injected through Cargo features rather than runtime plugin activation.
+- residency tracking
+- disk spill and prefetch
+- paged KV structures
+- future reuse and prefix-cache policies
 
-The current backend crates should be read as integration boundaries, not as finished production bindings.
+## Planning Model
 
-### 4. Interface Layer
+The planner is the piece that ties the architecture together.
 
-- `crates/cli`
-- `crates/server`
+It uses the model layer, backend layer, and runtime topology to decide:
 
-These crates are thin entry points over `loci-core`.
+- which backend can actually execute the asset
+- which compute targets should be preferred
+- when to fall back
+- when to spill or preserve memory
+- how to describe the decision back to the application
 
-## Execution Model
+The planner should remain inspectable. Applications need to understand why a model ran on a given path, not just that it ran.
 
-The runtime follows this high-level flow:
+## Execution Flow
 
-1. Discover the available backend capabilities.
-2. Merge backend-reported devices into a single hardware topology.
-3. Select a model directly or through optional routing.
-4. Build a heterogeneous execution plan:
-   - throughput-biased prefill
-   - power-biased decode
-   - KV cache placement
-   - optional disk spill for cold weights
-5. Dispatch the request through the chosen backend.
+The normal runtime flow is:
 
-## Feature Model
+1. a model is registered through the SDK or service
+2. the format layer inspects the asset
+3. the control plane merges hardware and backend capabilities
+4. the planner selects a usable execution path
+5. backend state is prepared
+6. inference runs through the selected backend
+7. output is returned through an embedded API or local service surface
 
-`loci-core` currently exposes these feature switches:
+This flow is shared across all integration styles so the runtime behaves consistently.
 
-- `openvino`
-- `candle`
-- `tiered-offload`
-- `paged-kv`
-- `power-aware`
-- `dynamic-routing`
+## Service and SDK Surfaces
 
-Default features:
+Loci is intentionally dual-surface.
 
-```toml
-default = ["openvino", "power-aware", "tiered-offload", "paged-kv"]
-```
+Applications can:
+
+- link `crates/sdk` and call the runtime directly
+- run `crates/server` and consume a local AI service
+
+These are not separate products. They are two interfaces over the same runtime model.
+
+## Extension Model
+
+Loci uses Cargo features instead of runtime plugins.
+
+That keeps the architecture explicit:
+
+- portable defaults stay lightweight
+- vendor features stay opt-in
+- platform-specific backends do not leak into the core
+
+This is especially important for local inference, where binary size, startup behavior, and dependency control matter.
+
+## Architectural Direction
+
+The long-term architectural center of Loci is:
+
+- `GGUF`-first local model ingestion
+- `Candle` as the default portable backend path
+- curated kernel imports and rewrites for important operator hotspots
+- planner-driven heterogeneous execution
+- one runtime that can act as both SDK and service
+
+That is the model the rest of the repository should reinforce.

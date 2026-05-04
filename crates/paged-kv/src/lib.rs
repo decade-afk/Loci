@@ -1,14 +1,19 @@
+//! Planning helpers for paged KV cache sizing and sharing decisions.
+
 use loci_protocol::{HardwareTopology, KvCachePlan, ModelDescriptor, PagedKvConfig};
 
+/// Builds planner-facing paged-KV plans from static runtime configuration.
 pub struct PagedKvPlanner {
     config: PagedKvConfig,
 }
 
 impl PagedKvPlanner {
+    /// Creates a planner from the supplied paged-KV configuration.
     pub fn new(config: PagedKvConfig) -> Self {
         Self { config }
     }
 
+    /// Estimates the KV layout that should be used for a model on this topology.
     pub fn plan(
         &self,
         model: &ModelDescriptor,
@@ -74,6 +79,7 @@ mod tests {
                 id: "cpu:0".to_string(),
                 name: "cpu".to_string(),
                 kind: AcceleratorKind::Cpu,
+                platform: Some(std::env::consts::OS.to_string()),
                 memory_bytes: Some(8 * 1024 * 1024 * 1024),
                 compute_units: Some(8),
                 power_watts: Some(15.0),
@@ -82,6 +88,7 @@ mod tests {
                 id: "gpu:0".to_string(),
                 name: "gpu".to_string(),
                 kind: AcceleratorKind::Gpu,
+                platform: Some(std::env::consts::OS.to_string()),
                 memory_bytes: Some(4 * 1024 * 1024 * 1024),
                 compute_units: Some(64),
                 power_watts: Some(25.0),
@@ -92,6 +99,7 @@ mod tests {
                 id: "disk:0".to_string(),
                 name: "disk".to_string(),
                 kind: AcceleratorKind::Disk,
+                platform: Some(std::env::consts::OS.to_string()),
                 memory_bytes: Some(256 * 1024 * 1024 * 1024),
                 compute_units: None,
                 power_watts: None,

@@ -1,13 +1,21 @@
+//! Heterogeneous placement and backend-profile construction for a single request.
+
 use crate::config::EngineConfig;
 use crate::error::{LociError, Result};
+use crate::model_inspector::inspect_model;
+use crate::snapshot::HostCapabilitySnapshot;
 use loci_protocol::{
-    AcceleratorKind, Backend, BackendDescriptor, BackendExecutionProfile, CandleExecutionProfile,
-    CandleTensorResidency, DeviceDescriptor, ExecutionPlan, GenericExecutionProfile,
-    HardwareTopology, KvCachePlan, ModelDescriptor, OpenVinoExecutionMode,
-    OpenVinoExecutionProfile, PipelineStage, PlacementDecision, PowerState, RouteDecision,
-    SessionRequest, ThermalState, TieredOffloadPlan,
+    AcceleratorKind, Backend, BackendDescriptor, BackendExecutionProfile,
+    BackendLoweringCapabilities, BackendLoweringPlan, BackendRuntimeFamily, CandleExecutionProfile,
+    CandleTensorResidency, ChipOperatorClass, DeviceDescriptor, ExecutionPlan,
+    GenericExecutionProfile, HardwareTopology, KvCachePlan, LoweringAffinityMode,
+    LoweringOperatorPlan, LoweringPartitionPlan, LoweringSubgraphPlan, ModelDescriptor,
+    OpenVinoExecutionMode, OpenVinoExecutionProfile, PipelineStage, PlacementDecision, PowerState,
+    RouteDecision, SessionRequest, ThermalState, TieredOffloadPlan,
 };
+use std::collections::BTreeMap;
 
+/// Merges backend-reported hardware views into a single planner topology.
 pub fn merge_topologies(backends: &[Box<dyn Backend>]) -> HardwareTopology {
     let mut devices = Vec::<DeviceDescriptor>::new();
     let mut thermal_state = ThermalState::Nominal;
@@ -51,32 +59,95 @@ pub fn merge_topologies(backends: &[Box<dyn Backend>]) -> HardwareTopology {
     }
 }
 
+/// Chooses the backend that should execute a model under the current policy.
 pub fn choose_backend<'a>(
     backends: &'a [Box<dyn Backend>],
     model: &ModelDescriptor,
+    request: &SessionRequest,
     preferred_backend: Option<&str>,
 ) -> Result<&'a dyn Backend> {
-    for preferred in [preferred_backend, model.preferred_backend.as_deref()] {
+    let requires_multimodal = !request.images.is_empty();
+    let inspection = inspect_model(model, backends);
+
+    let readiness_for = |backend_name: &str| {
+        inspection
+            .backend_readiness
+            .iter()
+            .find(|readiness| readiness.backend == backend_name)
+    };
+    let matches_candidate = |descriptor: &BackendDescriptor,
+                             require_ready: bool,
+                             require_npu: bool,
+                             name_filter: Option<&str>| {
+        let Some(readiness) = readiness_for(&descriptor.name) else {
+            return false;
+        };
+        if name_filter.is_some_and(|name| descriptor.name != name) {
+            return false;
+        }
+        if require_ready && !readiness.ready {
+            return false;
+        }
+        if !require_ready && !readiness.format_supported {
+            return false;
+        }
+        if require_npu && !descriptor.supports_npu {
+            return false;
+        }
+        if requires_multimodal && !readiness.supports_multimodal {
+            return false;
+        }
+        true
+    };
+
+    let preferred_candidates = [preferred_backend, model.preferred_backend.as_deref()];
+
+    for preferred in preferred_candidates {
         if let Some(name) = preferred {
-            if let Some(backend) = backends.iter().find(|backend| {
-                let descriptor = backend.descriptor();
-                descriptor.name == name && backend.supports_model(model)
-            }) {
+            if let Some(backend) = backends
+                .iter()
+                .find(|backend| matches_candidate(&backend.descriptor(), true, false, Some(name)))
+            {
                 return Ok(backend.as_ref());
             }
         }
     }
 
-    if let Some(backend) = backends.iter().find(|backend| {
-        let descriptor = backend.descriptor();
-        descriptor.supports_npu && backend.supports_model(model)
-    }) {
-        return Ok(backend.as_ref());
+    if preferred_backend.is_none() && model.preferred_backend.is_none() {
+        if let Some(backend) = backends
+            .iter()
+            .find(|backend| matches_candidate(&backend.descriptor(), true, true, None))
+        {
+            return Ok(backend.as_ref());
+        }
+
+        if let Some(backend) = backends
+            .iter()
+            .find(|backend| matches_candidate(&backend.descriptor(), true, false, None))
+        {
+            return Ok(backend.as_ref());
+        }
+    }
+
+    for preferred in preferred_candidates {
+        if let Some(name) = preferred {
+            if let Some(backend) = backends
+                .iter()
+                .find(|backend| matches_candidate(&backend.descriptor(), false, false, Some(name)))
+            {
+                return Ok(backend.as_ref());
+            }
+        }
     }
 
     backends
         .iter()
-        .find(|backend| backend.supports_model(model))
+        .find(|backend| matches_candidate(&backend.descriptor(), false, true, None))
+        .or_else(|| {
+            backends
+                .iter()
+                .find(|backend| matches_candidate(&backend.descriptor(), false, false, None))
+        })
         .map(|backend| backend.as_ref())
         .ok_or_else(|| LociError::NoCompatibleBackend {
             model: model.name.clone(),
@@ -84,10 +155,13 @@ pub fn choose_backend<'a>(
         })
 }
 
+/// Builds the execution plan that the runtime and backend layers consume.
 pub fn build_plan(
     config: &EngineConfig,
     backend: &BackendDescriptor,
+    backend_lowering: &BackendLoweringCapabilities,
     topology: &HardwareTopology,
+    host: &HostCapabilitySnapshot,
     model: &ModelDescriptor,
     request: &SessionRequest,
     route: RouteDecision,
@@ -98,16 +172,19 @@ pub fn build_plan(
     let decode_target = pick_decode_target(topology, backend, prefill_target);
     let kv_target = pick_kv_target(
         topology,
+        host,
+        model,
         backend,
         decode_target,
         &kv_cache,
         tiered_offload.as_ref(),
     );
-    let weights_target = pick_weights_target(topology, backend, tiered_offload.as_ref());
+    let weights_target =
+        pick_weights_target(topology, host, model, backend, tiered_offload.as_ref());
 
     // The planner intentionally separates throughput-biased prefill from
     // power-biased decode so the engine can model heterogeneous execution.
-    let mut placements = vec![
+    let placements = vec![
         PlacementDecision {
             stage: PipelineStage::Load,
             target: AcceleratorKind::Cpu,
@@ -144,17 +221,22 @@ pub fn build_plan(
             rationale: "sampling and response assembly stay on the CPU orchestration path"
                 .to_string(),
         },
-    ];
-
-    if tiered_offload.is_some() {
-        placements.push(PlacementDecision {
+        PlacementDecision {
             stage: PipelineStage::Weights,
             target: weights_target,
             device_id: weight_device_id(topology, tiered_offload.as_ref(), weights_target),
-            memory_bytes: tiered_offload.as_ref().map(|plan| plan.spill_bytes),
-            rationale: weights_reason(weights_target, tiered_offload.as_ref()),
-        });
-    }
+            memory_bytes: weights_memory_bytes(model, tiered_offload.as_ref(), weights_target),
+            rationale: weights_reason(topology, weights_target, tiered_offload.as_ref()),
+        },
+    ];
+    let lowering_plan = build_lowering_plan(
+        backend,
+        backend_lowering,
+        model,
+        &placements,
+        &kv_cache,
+        tiered_offload.as_ref(),
+    );
 
     let backend_profile = build_backend_profile(backend, topology, &placements);
 
@@ -162,29 +244,282 @@ pub fn build_plan(
         backend: backend.name.clone(),
         route,
         placements,
+        lowering_plan: Some(lowering_plan),
         kv_cache,
         tiered_offload,
         backend_profile,
     }
 }
 
+/// Converts planner placements into backend-facing subgraph affinity guidance.
+fn build_lowering_plan(
+    backend: &BackendDescriptor,
+    backend_lowering: &BackendLoweringCapabilities,
+    model: &ModelDescriptor,
+    placements: &[PlacementDecision],
+    kv_cache: &KvCachePlan,
+    tiered_offload: Option<&TieredOffloadPlan>,
+) -> BackendLoweringPlan {
+    let prefill_target =
+        stage_target(placements, PipelineStage::Prefill).unwrap_or(AcceleratorKind::Cpu);
+    let decode_target = stage_target(placements, PipelineStage::Decode).unwrap_or(prefill_target);
+    let kv_target = stage_target(placements, PipelineStage::KvCache).unwrap_or(decode_target);
+    let weights_target =
+        stage_target(placements, PipelineStage::Weights).unwrap_or(AcceleratorKind::Cpu);
+
+    let mut subgraphs = Vec::new();
+    if model.is_multimodal_architecture() {
+        subgraphs.push(LoweringSubgraphPlan {
+            id: "vision_encoder".to_string(),
+            stage: PipelineStage::Prefill,
+            operator_class: ChipOperatorClass::VisionEncoder,
+            target: prefill_target,
+            device_id: placement_device_id(placements, PipelineStage::Prefill),
+            affinity_tag: affinity_tag(prefill_target),
+            estimated_bytes: model.memory_bytes.map(|bytes| bytes / 5),
+            spillable: false,
+            rationale: "multimodal models front-load image encoding into the prefill path"
+                .to_string(),
+        });
+    }
+
+    subgraphs.extend([
+        LoweringSubgraphPlan {
+            id: "embedding_lookup".to_string(),
+            stage: PipelineStage::Prefill,
+            operator_class: ChipOperatorClass::Embedding,
+            target: prefill_target,
+            device_id: placement_device_id(placements, PipelineStage::Prefill),
+            affinity_tag: affinity_tag(prefill_target),
+            estimated_bytes: model.memory_bytes.map(|bytes| bytes / 20),
+            spillable: false,
+            rationale: "token embedding lookup should stay close to the prefill compute path".to_string(),
+        },
+        LoweringSubgraphPlan {
+            id: "prefill_attention_block".to_string(),
+            stage: PipelineStage::Prefill,
+            operator_class: ChipOperatorClass::Attention,
+            target: prefill_target,
+            device_id: placement_device_id(placements, PipelineStage::Prefill),
+            affinity_tag: affinity_tag(prefill_target),
+            estimated_bytes: model.memory_bytes.map(|bytes| bytes / 3),
+            spillable: false,
+            rationale: "prompt-side attention is throughput-sensitive and follows the prefill placement".to_string(),
+        },
+        LoweringSubgraphPlan {
+            id: "prefill_mlp_block".to_string(),
+            stage: PipelineStage::Prefill,
+            operator_class: ChipOperatorClass::Mlp,
+            target: prefill_target,
+            device_id: placement_device_id(placements, PipelineStage::Prefill),
+            affinity_tag: affinity_tag(prefill_target),
+            estimated_bytes: model.memory_bytes.map(|bytes| bytes / 4),
+            spillable: false,
+            rationale: "prefill MLP kernels should remain colocated with prompt-side attention".to_string(),
+        },
+        LoweringSubgraphPlan {
+            id: "decode_attention_block".to_string(),
+            stage: PipelineStage::Decode,
+            operator_class: ChipOperatorClass::Attention,
+            target: decode_target,
+            device_id: placement_device_id(placements, PipelineStage::Decode),
+            affinity_tag: affinity_tag(decode_target),
+            estimated_bytes: model.memory_bytes.map(|bytes| bytes / 4),
+            spillable: false,
+            rationale: "token-step attention is latency-sensitive and follows the decode placement".to_string(),
+        },
+        LoweringSubgraphPlan {
+            id: "decode_mlp_block".to_string(),
+            stage: PipelineStage::Decode,
+            operator_class: ChipOperatorClass::Mlp,
+            target: decode_target,
+            device_id: placement_device_id(placements, PipelineStage::Decode),
+            affinity_tag: affinity_tag(decode_target),
+            estimated_bytes: model.memory_bytes.map(|bytes| bytes / 5),
+            spillable: false,
+            rationale: "decode-side MLP should remain in the same hot path as token generation".to_string(),
+        },
+        LoweringSubgraphPlan {
+            id: "kv_state_region".to_string(),
+            stage: PipelineStage::KvCache,
+            operator_class: ChipOperatorClass::KvCache,
+            target: kv_target,
+            device_id: placement_device_id(placements, PipelineStage::KvCache),
+            affinity_tag: affinity_tag(kv_target),
+            estimated_bytes: kv_cache.max_cache_bytes,
+            spillable: kv_target == AcceleratorKind::Disk || kv_cache.tiered,
+            rationale: "kv cache placement is modeled as a stateful region that may spill independently".to_string(),
+        },
+        LoweringSubgraphPlan {
+            id: "weights_residency_region".to_string(),
+            stage: PipelineStage::Weights,
+            operator_class: ChipOperatorClass::Matmul,
+            target: weights_target,
+            device_id: placement_device_id(placements, PipelineStage::Weights),
+            affinity_tag: affinity_tag(weights_target),
+            estimated_bytes: model.memory_bytes,
+            spillable: weights_target == AcceleratorKind::Disk || tiered_offload.is_some(),
+            rationale: "weight residency guidance constrains where backend-local matmul-heavy subgraphs should source parameters".to_string(),
+        },
+        LoweringSubgraphPlan {
+            id: "sampling_head".to_string(),
+            stage: PipelineStage::Sampling,
+            operator_class: ChipOperatorClass::Sampling,
+            target: AcceleratorKind::Cpu,
+            device_id: placement_device_id(placements, PipelineStage::Sampling),
+            affinity_tag: affinity_tag(AcceleratorKind::Cpu),
+            estimated_bytes: Some(8 * 1024 * 1024),
+            spillable: false,
+            rationale: "sampling remains on the CPU orchestration path for response assembly".to_string(),
+        },
+    ]);
+    let partitions = build_lowering_partitions(&subgraphs);
+    let operators = build_lowering_operators(&subgraphs, &partitions);
+
+    BackendLoweringPlan {
+        backend: backend.name.clone(),
+        granularity: backend_lowering.granularity,
+        affinity_mode: if backend_lowering.supports_layer_affinity {
+            LoweringAffinityMode::Explicit
+        } else if backend_lowering.supports_graph_partitioning {
+            LoweringAffinityMode::Planned
+        } else {
+            LoweringAffinityMode::Automatic
+        },
+        subgraphs,
+        partitions,
+        operators,
+        notes: lowering_notes(backend, backend_lowering, tiered_offload),
+    }
+}
+
+/// Normalizes subgraph guidance into execution partitions grouped by target affinity.
+fn build_lowering_partitions(subgraphs: &[LoweringSubgraphPlan]) -> Vec<LoweringPartitionPlan> {
+    let mut grouped = BTreeMap::<String, Vec<&LoweringSubgraphPlan>>::new();
+    for subgraph in subgraphs {
+        grouped
+            .entry(partition_group_key(subgraph))
+            .or_default()
+            .push(subgraph);
+    }
+
+    grouped
+        .into_values()
+        .enumerate()
+        .map(|(index, grouped_subgraphs)| {
+            let first = grouped_subgraphs[0];
+            let mut operator_classes = Vec::new();
+            let mut subgraph_ids = Vec::new();
+            let mut estimated_bytes = 0u64;
+            let mut has_estimate = false;
+            let mut spillable = false;
+
+            for subgraph in grouped_subgraphs {
+                if !operator_classes.contains(&subgraph.operator_class) {
+                    operator_classes.push(subgraph.operator_class);
+                }
+                subgraph_ids.push(subgraph.id.clone());
+                if let Some(bytes) = subgraph.estimated_bytes {
+                    estimated_bytes = estimated_bytes.saturating_add(bytes);
+                    has_estimate = true;
+                }
+                spillable |= subgraph.spillable;
+            }
+
+            let affinity_label = first
+                .affinity_tag
+                .as_deref()
+                .map(str::to_ascii_lowercase)
+                .unwrap_or_else(|| accelerator_partition_label(first.target).to_string());
+            LoweringPartitionPlan {
+                id: format!("partition-{}-{affinity_label}", index + 1),
+                target: first.target,
+                device_id: first.device_id.clone(),
+                affinity_tag: first.affinity_tag.clone(),
+                operator_classes,
+                subgraphs: subgraph_ids.clone(),
+                estimated_bytes: has_estimate.then_some(estimated_bytes),
+                spillable,
+                rationale: format!(
+                    "{} lowering regions share the {} execution partition",
+                    subgraph_ids.len(),
+                    first
+                        .affinity_tag
+                        .as_deref()
+                        .unwrap_or_else(|| accelerator_partition_label(first.target))
+                ),
+            }
+        })
+        .collect()
+}
+
+/// Normalizes each subgraph into an operator-facing record tied to a concrete partition.
+fn build_lowering_operators(
+    subgraphs: &[LoweringSubgraphPlan],
+    partitions: &[LoweringPartitionPlan],
+) -> Vec<LoweringOperatorPlan> {
+    subgraphs
+        .iter()
+        .map(|subgraph| LoweringOperatorPlan {
+            id: format!("operator-{}", subgraph.id),
+            partition: partitions
+                .iter()
+                .find(|partition| partition.subgraphs.contains(&subgraph.id))
+                .map(|partition| partition.id.clone())
+                .unwrap_or_else(|| "unassigned-partition".to_string()),
+            subgraph: subgraph.id.clone(),
+            stage: subgraph.stage,
+            operator_class: subgraph.operator_class,
+            target: subgraph.target,
+            device_id: subgraph.device_id.clone(),
+            affinity_tag: subgraph.affinity_tag.clone(),
+            estimated_bytes: subgraph.estimated_bytes,
+            spillable: subgraph.spillable,
+            rationale: subgraph.rationale.clone(),
+        })
+        .collect()
+}
+
+fn partition_group_key(subgraph: &LoweringSubgraphPlan) -> String {
+    format!(
+        "{:?}|{}|{}|{}",
+        subgraph.target,
+        subgraph.device_id.as_deref().unwrap_or("none"),
+        subgraph.affinity_tag.as_deref().unwrap_or("none"),
+        subgraph.spillable
+    )
+}
+
+fn accelerator_partition_label(kind: AcceleratorKind) -> &'static str {
+    match kind {
+        AcceleratorKind::Cpu => "cpu",
+        AcceleratorKind::Gpu => "gpu",
+        AcceleratorKind::Npu => "npu",
+        AcceleratorKind::Disk => "disk",
+    }
+}
+
+/// Converts generic placements into a backend-specific execution profile.
 fn build_backend_profile(
     backend: &BackendDescriptor,
     topology: &HardwareTopology,
     placements: &[PlacementDecision],
 ) -> BackendExecutionProfile {
-    match backend.name.as_str() {
-        "openvino" => {
+    match backend.runtime_family {
+        BackendRuntimeFamily::OpenVino => {
             BackendExecutionProfile::OpenVino(build_openvino_profile(topology, placements))
         }
-        "candle" => BackendExecutionProfile::Candle(build_candle_profile(topology, placements)),
-        name => BackendExecutionProfile::Generic(GenericExecutionProfile {
-            session_key: format!("{name}-session"),
-            summary: format!("generic execution profile for backend `{name}`"),
+        BackendRuntimeFamily::Candle => {
+            BackendExecutionProfile::Candle(build_candle_profile(topology, placements))
+        }
+        _ => BackendExecutionProfile::Generic(GenericExecutionProfile {
+            session_key: format!("{}-session", backend.name),
+            summary: format!("generic execution profile for backend `{}`", backend.name),
         }),
     }
 }
 
+/// Constructs the OpenVINO execution profile from the generic plan.
 fn build_openvino_profile(
     topology: &HardwareTopology,
     placements: &[PlacementDecision],
@@ -215,10 +550,11 @@ fn build_openvino_profile(
         decode_device,
         kv_cache_device,
         weights_device,
-        dynamic_reoffload: topology.power.thermal_state >= ThermalState::Hot,
+        dynamic_reoffload: should_dynamic_reoffload(topology, placements),
     }
 }
 
+/// Constructs the Candle execution profile from the generic plan.
 fn build_candle_profile(
     _topology: &HardwareTopology,
     placements: &[PlacementDecision],
@@ -249,21 +585,21 @@ fn build_candle_profile(
     }
 }
 
+/// Chooses the preferred prefill target under throughput and power constraints.
 fn pick_prefill_target(
     topology: &HardwareTopology,
     backend: &BackendDescriptor,
 ) -> AcceleratorKind {
-    let hot = matches!(
-        topology.power.thermal_state,
-        ThermalState::Hot | ThermalState::Critical
-    );
-    let low_battery = topology
-        .power
-        .battery_percent
-        .map(|value| value < 20)
-        .unwrap_or(false);
+    let hot = has_thermal_pressure(topology);
+    let low_battery = has_low_battery(topology);
+    let tight_budget = has_tight_power_budget(topology);
 
-    if !hot && !low_battery && backend.supports_gpu && has_kind(topology, AcceleratorKind::Gpu) {
+    if !hot
+        && !low_battery
+        && !tight_budget
+        && backend.supports_gpu
+        && has_kind(topology, AcceleratorKind::Gpu)
+    {
         AcceleratorKind::Gpu
     } else if backend.supports_cpu && has_kind(topology, AcceleratorKind::Cpu) {
         AcceleratorKind::Cpu
@@ -274,6 +610,7 @@ fn pick_prefill_target(
     }
 }
 
+/// Chooses the decode target, preferring NPU token generation when available.
 fn pick_decode_target(
     topology: &HardwareTopology,
     backend: &BackendDescriptor,
@@ -291,8 +628,11 @@ fn pick_decode_target(
     }
 }
 
+/// Chooses the KV-cache target based on the spill policy and power pressure.
 fn pick_kv_target(
     topology: &HardwareTopology,
+    host: &HostCapabilitySnapshot,
+    model: &ModelDescriptor,
     backend: &BackendDescriptor,
     decode_target: AcceleratorKind,
     kv_cache: &KvCachePlan,
@@ -306,8 +646,18 @@ fn pick_kv_target(
     }
 
     let policy = plan.policy.kv_cache;
-    if policy.disk_percent >= 40 && has_kind(topology, AcceleratorKind::Disk) {
+    if host_prefers_disk_for_cold_state(host, model)
+        && has_kind(topology, AcceleratorKind::Disk)
+        && policy.disk_percent > 0
+    {
         AcceleratorKind::Disk
+    } else if policy.disk_percent >= 40 && has_kind(topology, AcceleratorKind::Disk) {
+        AcceleratorKind::Disk
+    } else if should_rebalance_to_cpu(topology)
+        && backend.supports_cpu
+        && has_kind(topology, AcceleratorKind::Cpu)
+    {
+        AcceleratorKind::Cpu
     } else if policy.cpu_percent >= policy.gpu_percent
         && backend.supports_cpu
         && has_kind(topology, AcceleratorKind::Cpu)
@@ -318,21 +668,35 @@ fn pick_kv_target(
     }
 }
 
+/// Chooses the primary weight residency target for the request.
 fn pick_weights_target(
     topology: &HardwareTopology,
+    host: &HostCapabilitySnapshot,
+    model: &ModelDescriptor,
     backend: &BackendDescriptor,
     tiered_offload: Option<&TieredOffloadPlan>,
 ) -> AcceleratorKind {
+    let prefer_cpu = should_rebalance_to_cpu(topology);
     let Some(plan) = tiered_offload else {
+        if !prefer_cpu && backend.supports_gpu && has_kind(topology, AcceleratorKind::Gpu) {
+            return AcceleratorKind::Gpu;
+        }
         return AcceleratorKind::Cpu;
     };
 
     let policy = plan.policy.weights;
-    if policy.disk_percent >= policy.cpu_percent
+    if host_prefers_disk_for_cold_state(host, model)
+        && has_kind(topology, AcceleratorKind::Disk)
+        && plan.spill_bytes > 0
+    {
+        AcceleratorKind::Disk
+    } else if policy.disk_percent >= policy.cpu_percent
         && policy.disk_percent >= policy.gpu_percent
         && has_kind(topology, AcceleratorKind::Disk)
     {
         AcceleratorKind::Disk
+    } else if prefer_cpu && backend.supports_cpu && has_kind(topology, AcceleratorKind::Cpu) {
+        AcceleratorKind::Cpu
     } else if policy.gpu_percent >= policy.cpu_percent
         && backend.supports_gpu
         && has_kind(topology, AcceleratorKind::Gpu)
@@ -343,10 +707,12 @@ fn pick_weights_target(
     }
 }
 
+/// Returns whether the merged topology contains a device of the requested kind.
 fn has_kind(topology: &HardwareTopology, kind: AcceleratorKind) -> bool {
     topology.devices.iter().any(|device| device.kind == kind)
 }
 
+/// Returns the preferred device identifier for a logical accelerator kind.
 fn preferred_device_id(topology: &HardwareTopology, kind: AcceleratorKind) -> Option<String> {
     topology
         .devices
@@ -355,6 +721,7 @@ fn preferred_device_id(topology: &HardwareTopology, kind: AcceleratorKind) -> Op
         .map(|device| device.id.clone())
 }
 
+/// Resolves the device identifier that should own the weights placement.
 fn weight_device_id(
     topology: &HardwareTopology,
     tiered_offload: Option<&TieredOffloadPlan>,
@@ -367,6 +734,25 @@ fn weight_device_id(
     }
 }
 
+/// Estimates how many bytes of model weights remain on the selected target.
+fn weights_memory_bytes(
+    model: &ModelDescriptor,
+    tiered_offload: Option<&TieredOffloadPlan>,
+    target: AcceleratorKind,
+) -> Option<u64> {
+    let model_bytes = model.memory_bytes?;
+    let spill_bytes = tiered_offload
+        .map(|plan| plan.spill_bytes.min(model_bytes))
+        .unwrap_or(0);
+
+    if target == AcceleratorKind::Disk {
+        Some(spill_bytes)
+    } else {
+        Some(model_bytes.saturating_sub(spill_bytes))
+    }
+}
+
+/// Finds the device identifier attached to a specific pipeline stage.
 fn placement_device_id(placements: &[PlacementDecision], stage: PipelineStage) -> Option<String> {
     placements
         .iter()
@@ -374,6 +760,25 @@ fn placement_device_id(placements: &[PlacementDecision], stage: PipelineStage) -
         .and_then(|placement| placement.device_id.clone())
 }
 
+/// Finds the logical accelerator target attached to a specific pipeline stage.
+fn stage_target(placements: &[PlacementDecision], stage: PipelineStage) -> Option<AcceleratorKind> {
+    placements
+        .iter()
+        .find(|placement| placement.stage == stage)
+        .map(|placement| placement.target)
+}
+
+/// Converts a logical accelerator target into the affinity token expected by hetero runtimes.
+fn affinity_tag(target: AcceleratorKind) -> Option<String> {
+    match target {
+        AcceleratorKind::Cpu => Some("CPU".to_string()),
+        AcceleratorKind::Gpu => Some("GPU".to_string()),
+        AcceleratorKind::Npu => Some("NPU".to_string()),
+        AcceleratorKind::Disk => None,
+    }
+}
+
+/// Returns the ordered list of non-disk devices participating in the plan.
 fn hetero_device_names(
     topology: &HardwareTopology,
     placements: &[PlacementDecision],
@@ -406,6 +811,7 @@ fn hetero_device_names(
     devices
 }
 
+/// Produces a human-readable explanation for the chosen prefill placement.
 fn prefill_reason(
     config: &EngineConfig,
     topology: &HardwareTopology,
@@ -435,6 +841,7 @@ fn prefill_reason(
     }
 }
 
+/// Produces a human-readable explanation for the chosen decode placement.
 fn decode_reason(topology: &HardwareTopology, target: AcceleratorKind) -> String {
     match target {
         AcceleratorKind::Npu => {
@@ -454,6 +861,7 @@ fn decode_reason(topology: &HardwareTopology, target: AcceleratorKind) -> String
     }
 }
 
+/// Produces a human-readable explanation for the chosen KV-cache placement.
 fn kv_reason(
     target: AcceleratorKind,
     decode_target: AcceleratorKind,
@@ -485,9 +893,30 @@ fn kv_reason(
     }
 }
 
-fn weights_reason(target: AcceleratorKind, tiered_offload: Option<&TieredOffloadPlan>) -> String {
+/// Produces a human-readable explanation for the chosen weight placement.
+fn weights_reason(
+    topology: &HardwareTopology,
+    target: AcceleratorKind,
+    tiered_offload: Option<&TieredOffloadPlan>,
+) -> String {
     let Some(plan) = tiered_offload else {
-        return "weights remain resident in memory".to_string();
+        return match target {
+            AcceleratorKind::Gpu => {
+                "weights stay resident on the GPU to maximize prefill throughput".to_string()
+            }
+            AcceleratorKind::Cpu => {
+                if should_rebalance_to_cpu(topology) {
+                    "weights stay in CPU memory because the planner reduced accelerator pressure"
+                        .to_string()
+                } else {
+                    "weights remain resident in CPU memory".to_string()
+                }
+            }
+            AcceleratorKind::Disk => {
+                "weights are disk-backed even without an explicit tiering policy".to_string()
+            }
+            AcceleratorKind::Npu => "weights are not directly anchored on the NPU".to_string(),
+        };
     };
 
     match target {
@@ -506,6 +935,61 @@ fn weights_reason(target: AcceleratorKind, tiered_offload: Option<&TieredOffload
     }
 }
 
+/// Returns whether the topology is already in a thermally constrained state.
+fn has_thermal_pressure(topology: &HardwareTopology) -> bool {
+    matches!(
+        topology.power.thermal_state,
+        ThermalState::Hot | ThermalState::Critical
+    )
+}
+
+/// Returns whether the host is running on a low battery reserve.
+fn has_low_battery(topology: &HardwareTopology) -> bool {
+    topology
+        .power
+        .battery_percent
+        .map(|value| value < 20)
+        .unwrap_or(false)
+}
+
+/// Returns whether the exposed power budget is low enough to change placement.
+fn has_tight_power_budget(topology: &HardwareTopology) -> bool {
+    topology
+        .power
+        .power_budget_watts
+        .map(|budget| budget <= 18)
+        .unwrap_or(false)
+}
+
+/// Determines whether the planner should shift hot state back toward CPU memory.
+fn should_rebalance_to_cpu(topology: &HardwareTopology) -> bool {
+    has_thermal_pressure(topology) || has_low_battery(topology) || has_tight_power_budget(topology)
+}
+
+/// Signals that runtime re-offload may be needed as conditions worsen.
+fn should_dynamic_reoffload(topology: &HardwareTopology, placements: &[PlacementDecision]) -> bool {
+    should_rebalance_to_cpu(topology)
+        && placements.iter().any(|placement| {
+            matches!(
+                placement.stage,
+                PipelineStage::KvCache | PipelineStage::Weights
+            )
+        })
+}
+
+fn host_prefers_disk_for_cold_state(
+    host: &HostCapabilitySnapshot,
+    model: &ModelDescriptor,
+) -> bool {
+    let Some(model_bytes) = model.memory_bytes else {
+        return false;
+    };
+    host.available_memory_bytes > 0
+        && (host.available_memory_bytes < model_bytes / 2
+            || host.available_memory_bytes < 2 * 1024 * 1024 * 1024)
+}
+
+/// Returns the stable string label used in planner rationale messages.
 fn offload_profile_label(plan: &TieredOffloadPlan) -> &'static str {
     match plan.profile {
         loci_protocol::TieredOffloadProfile::Auto => "auto",
@@ -515,6 +999,35 @@ fn offload_profile_label(plan: &TieredOffloadPlan) -> &'static str {
     }
 }
 
+/// Explains how the planner expects the backend to consume the lowering plan.
+fn lowering_notes(
+    backend: &BackendDescriptor,
+    backend_lowering: &BackendLoweringCapabilities,
+    tiered_offload: Option<&TieredOffloadPlan>,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    if backend_lowering.supports_graph_partitioning {
+        notes.push(format!(
+            "planner emitted subgraph guidance for backend `{}` at {:?} granularity",
+            backend.name, backend_lowering.granularity
+        ));
+    } else {
+        notes.push(format!(
+            "backend `{}` does not report graph partitioning support, so subgraph guidance is advisory",
+            backend.name
+        ));
+    }
+    if let Some(plan) = tiered_offload {
+        notes.push(format!(
+            "tiered residency is active with profile `{}` and spill budget {} bytes",
+            offload_profile_label(plan),
+            plan.spill_bytes
+        ));
+    }
+    notes
+}
+
+/// Helper trait for producing display labels in planner rationale strings.
 trait AcceleratorKindLabel {
     fn kind_label(&self) -> String;
 }
@@ -540,20 +1053,160 @@ impl AcceleratorKindLabel for DeviceDescriptor {
 mod tests {
     use super::*;
     use crate::config::EngineConfig;
+    use crate::snapshot::{HostCapabilitySnapshot, HostDiskSnapshot, HostProbeSnapshot};
     use loci_protocol::{
-        BackendDescriptor, KvCachePlan, RouteDecision, TieredOffloadPolicy, TieredOffloadProfile,
-        TieredPlacementPercentages,
+        Backend, BackendAssetCapabilities, BackendDescriptor, BackendError,
+        BackendLoweringCapabilities, BackendOutput, BackendResult, ExecutionArtifactKind,
+        ExecutionPlan, KvCachePlan, ModelAssetLayout, PreparedModel, RouteDecision,
+        TieredOffloadPolicy, TieredOffloadProfile, TieredPlacementPercentages,
     };
-    use std::path::PathBuf;
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[derive(Clone)]
+    struct MockBackend {
+        descriptor: BackendDescriptor,
+        supports_model: bool,
+    }
+
+    impl Backend for MockBackend {
+        fn descriptor(&self) -> BackendDescriptor {
+            self.descriptor.clone()
+        }
+
+        fn asset_capabilities(&self) -> BackendAssetCapabilities {
+            match self.descriptor.runtime_family {
+                loci_protocol::BackendRuntimeFamily::OpenVino => BackendAssetCapabilities {
+                    backend: self.descriptor.name.clone(),
+                    runtime_family: self.descriptor.runtime_family,
+                    directly_supported_layouts: vec![
+                        ModelAssetLayout::OpenVinoGenAiExport,
+                        ModelAssetLayout::OpenVinoIr,
+                        ModelAssetLayout::OpenVinoBlob,
+                    ],
+                    ingestible_layouts: vec![
+                        ModelAssetLayout::OnnxModel,
+                        ModelAssetLayout::GgufFile,
+                        ModelAssetLayout::GgufDirectory,
+                        ModelAssetLayout::SafeTensorsFile,
+                        ModelAssetLayout::SafeTensorsDirectory,
+                        ModelAssetLayout::PytorchBinFile,
+                        ModelAssetLayout::PytorchCheckpointDirectory,
+                        ModelAssetLayout::TransformersCheckpoint,
+                        ModelAssetLayout::UnknownDirectory,
+                        ModelAssetLayout::UnknownFile,
+                    ],
+                    preferred_artifact: ExecutionArtifactKind::OpenVinoIr,
+                    requires_lowering_for_execution: true,
+                    notes: Vec::new(),
+                },
+                loci_protocol::BackendRuntimeFamily::Candle => BackendAssetCapabilities {
+                    backend: self.descriptor.name.clone(),
+                    runtime_family: self.descriptor.runtime_family,
+                    directly_supported_layouts: vec![
+                        ModelAssetLayout::GgufFile,
+                        ModelAssetLayout::GgufDirectory,
+                        ModelAssetLayout::SafeTensorsFile,
+                        ModelAssetLayout::SafeTensorsDirectory,
+                        ModelAssetLayout::PytorchBinFile,
+                        ModelAssetLayout::PytorchCheckpointDirectory,
+                        ModelAssetLayout::TransformersCheckpoint,
+                    ],
+                    ingestible_layouts: vec![
+                        ModelAssetLayout::UnknownDirectory,
+                        ModelAssetLayout::UnknownFile,
+                    ],
+                    preferred_artifact: ExecutionArtifactKind::NativeCheckpoint,
+                    requires_lowering_for_execution: false,
+                    notes: Vec::new(),
+                },
+                _ => BackendAssetCapabilities {
+                    backend: self.descriptor.name.clone(),
+                    runtime_family: self.descriptor.runtime_family,
+                    directly_supported_layouts: Vec::new(),
+                    ingestible_layouts: Vec::new(),
+                    preferred_artifact: ExecutionArtifactKind::RuntimeDefined,
+                    requires_lowering_for_execution: false,
+                    notes: Vec::new(),
+                },
+            }
+        }
+
+        fn discover_topology(&self) -> HardwareTopology {
+            HardwareTopology::default()
+        }
+
+        fn supports_model(&self, _model: &ModelDescriptor) -> bool {
+            self.supports_model
+        }
+
+        fn prepare(
+            &self,
+            _model: &ModelDescriptor,
+            _plan: &ExecutionPlan,
+        ) -> BackendResult<PreparedModel> {
+            Err(BackendError {
+                message: "unused in planner tests".to_string(),
+            })
+        }
+
+        fn execute(
+            &self,
+            _prepared: &PreparedModel,
+            _model: &ModelDescriptor,
+            _request: &SessionRequest,
+            _plan: &ExecutionPlan,
+        ) -> BackendResult<BackendOutput> {
+            Err(BackendError {
+                message: "unused in planner tests".to_string(),
+            })
+        }
+    }
 
     fn backend(name: &str, supports_npu: bool) -> BackendDescriptor {
         BackendDescriptor {
             name: name.to_string(),
+            runtime_family: match name {
+                "openvino" => loci_protocol::BackendRuntimeFamily::OpenVino,
+                "candle" => loci_protocol::BackendRuntimeFamily::Candle,
+                _ => loci_protocol::BackendRuntimeFamily::Generic,
+            },
             supports_cpu: true,
             supports_gpu: true,
             supports_npu,
             supports_disk_tiering: true,
             supports_paged_kv: true,
+            supports_multimodal: name == "openvino",
+        }
+    }
+
+    fn lowering(name: &str, supports_npu: bool) -> BackendLoweringCapabilities {
+        BackendLoweringCapabilities {
+            backend: name.to_string(),
+            runtime_family: match name {
+                "openvino" => loci_protocol::BackendRuntimeFamily::OpenVino,
+                "candle" => loci_protocol::BackendRuntimeFamily::Candle,
+                _ => loci_protocol::BackendRuntimeFamily::Generic,
+            },
+            granularity: if supports_npu {
+                loci_protocol::LoweringGranularity::Subgraph
+            } else {
+                loci_protocol::LoweringGranularity::Graph
+            },
+            supports_real_execution: name == "openvino",
+            supports_graph_partitioning: supports_npu,
+            supports_layer_affinity: false,
+            supports_dynamic_reoffload: supports_npu,
+            supports_custom_operators: false,
+            operator_classes: vec![
+                loci_protocol::ChipOperatorClass::Attention,
+                loci_protocol::ChipOperatorClass::Mlp,
+                loci_protocol::ChipOperatorClass::KvCache,
+            ],
+            notes: Vec::new(),
         }
     }
 
@@ -564,6 +1217,7 @@ mod tests {
                     id: "cpu:0".to_string(),
                     name: "cpu".to_string(),
                     kind: AcceleratorKind::Cpu,
+                    platform: Some(std::env::consts::OS.to_string()),
                     memory_bytes: Some(16 * 1024 * 1024 * 1024),
                     compute_units: Some(16),
                     power_watts: Some(20.0),
@@ -572,6 +1226,7 @@ mod tests {
                     id: "gpu:0".to_string(),
                     name: "gpu".to_string(),
                     kind: AcceleratorKind::Gpu,
+                    platform: Some(std::env::consts::OS.to_string()),
                     memory_bytes: Some(8 * 1024 * 1024 * 1024),
                     compute_units: Some(128),
                     power_watts: Some(30.0),
@@ -580,6 +1235,7 @@ mod tests {
                     id: "npu:0".to_string(),
                     name: "npu".to_string(),
                     kind: AcceleratorKind::Npu,
+                    platform: Some(std::env::consts::OS.to_string()),
                     memory_bytes: Some(2 * 1024 * 1024 * 1024),
                     compute_units: Some(1),
                     power_watts: Some(5.0),
@@ -588,6 +1244,7 @@ mod tests {
                     id: "disk:0".to_string(),
                     name: "disk".to_string(),
                     kind: AcceleratorKind::Disk,
+                    platform: Some(std::env::consts::OS.to_string()),
                     memory_bytes: Some(256 * 1024 * 1024 * 1024),
                     compute_units: None,
                     power_watts: None,
@@ -620,9 +1277,18 @@ mod tests {
             max_tokens: 128,
             temperature: 0.2,
             target_model: Some("demo".to_string()),
+            images: Vec::new(),
             structured_output: false,
             tool_calling: false,
         }
+    }
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("loci-planner-{label}-{suffix}"))
     }
 
     fn route() -> RouteDecision {
@@ -633,12 +1299,56 @@ mod tests {
         }
     }
 
+    fn host() -> HostCapabilitySnapshot {
+        HostCapabilitySnapshot {
+            target_family: std::env::consts::FAMILY.to_string(),
+            target_os: std::env::consts::OS.to_string(),
+            target_arch: std::env::consts::ARCH.to_string(),
+            mobile_class: false,
+            host_name: Some("test-host".to_string()),
+            os_name: Some("test-os".to_string()),
+            os_version: Some("1".to_string()),
+            kernel_version: Some("1".to_string()),
+            cpu_brand: Some("cpu".to_string()),
+            cpu_vendor: Some("vendor".to_string()),
+            cpu_frequency_mhz: Some(1000),
+            physical_cores: Some(4),
+            logical_cores: 8,
+            total_memory_bytes: 16 * 1024 * 1024 * 1024,
+            available_memory_bytes: 8 * 1024 * 1024 * 1024,
+            total_swap_bytes: 0,
+            free_swap_bytes: 0,
+            uptime_secs: 1,
+            load_average_one: 0.0,
+            load_average_five: 0.0,
+            load_average_fifteen: 0.0,
+            disks: vec![HostDiskSnapshot {
+                name: "disk".to_string(),
+                mount_point: "D:\\".to_string(),
+                file_system: "NTFS".to_string(),
+                total_bytes: 256 * 1024 * 1024 * 1024,
+                available_bytes: 128 * 1024 * 1024 * 1024,
+                is_removable: false,
+            }],
+            probe: HostProbeSnapshot {
+                cpu_scalar_gops: 1.0,
+                memory_bandwidth_gbps: 10.0,
+                disk_read_mbps: 2000.0,
+                disk_write_mbps: 1500.0,
+                probe_bytes: 16 * 1024 * 1024,
+                probe_duration_ms: 10,
+            },
+        }
+    }
+
     #[test]
     fn build_plan_uses_disk_for_kv_when_disk_heavy_policy_demands_it() {
         let plan = build_plan(
             &EngineConfig::default(),
             &backend("openvino", true),
+            &lowering("openvino", true),
             &topology(),
+            &host(),
             &model(),
             &request(),
             route(),
@@ -695,7 +1405,9 @@ mod tests {
         let plan = build_plan(
             &EngineConfig::default(),
             &backend("candle", false),
+            &lowering("candle", false),
             &topology(),
+            &host(),
             &model(),
             &request(),
             route(),
@@ -751,5 +1463,418 @@ mod tests {
             plan.backend_profile,
             BackendExecutionProfile::Candle(_)
         ));
+    }
+
+    #[test]
+    fn build_plan_assigns_weight_placement_without_disk_tiering() {
+        let plan = build_plan(
+            &EngineConfig::default(),
+            &backend("openvino", true),
+            &lowering("openvino", true),
+            &topology(),
+            &host(),
+            &model(),
+            &request(),
+            route(),
+            KvCachePlan {
+                strategy: "paged-prefix-cache".to_string(),
+                shared_across_models: true,
+                page_size_bytes: Some(1 << 20),
+                block_size_tokens: Some(16),
+                max_cache_bytes: Some(512 << 20),
+                type_k: Some("q8_0".to_string()),
+                type_v: Some("q8_0".to_string()),
+                tiered: false,
+            },
+            None,
+        );
+
+        assert!(plan.placements.iter().any(|placement| {
+            placement.stage == PipelineStage::Weights
+                && placement.target == AcceleratorKind::Gpu
+                && placement.device_id.as_deref() == Some("gpu:0")
+                && placement.memory_bytes == model().memory_bytes
+        }));
+    }
+
+    #[test]
+    fn build_plan_rebalances_kv_and_weights_under_power_pressure() {
+        let mut constrained_topology = topology();
+        constrained_topology.power = PowerState {
+            battery_powered: true,
+            battery_percent: Some(10),
+            thermal_state: ThermalState::Hot,
+            power_budget_watts: Some(15),
+        };
+
+        let plan = build_plan(
+            &EngineConfig::default(),
+            &backend("openvino", true),
+            &lowering("openvino", true),
+            &constrained_topology,
+            &host(),
+            &model(),
+            &request(),
+            route(),
+            KvCachePlan {
+                strategy: "paged-prefix-cache".to_string(),
+                shared_across_models: true,
+                page_size_bytes: Some(1 << 20),
+                block_size_tokens: Some(16),
+                max_cache_bytes: Some(512 << 20),
+                type_k: Some("q8_0".to_string()),
+                type_v: Some("q8_0".to_string()),
+                tiered: true,
+            },
+            Some(TieredOffloadPlan {
+                spill_bytes: 4 << 30,
+                prefetch_window_bytes: 128 << 20,
+                target_device: "disk:0".to_string(),
+                profile: TieredOffloadProfile::Balanced,
+                policy: TieredOffloadPolicy {
+                    weights: TieredPlacementPercentages {
+                        gpu_percent: 45,
+                        cpu_percent: 35,
+                        disk_percent: 20,
+                    },
+                    kv_cache: TieredPlacementPercentages {
+                        gpu_percent: 60,
+                        cpu_percent: 30,
+                        disk_percent: 10,
+                    },
+                    activations: TieredPlacementPercentages {
+                        gpu_percent: 50,
+                        cpu_percent: 50,
+                        disk_percent: 0,
+                    },
+                    cpu_cache_compute: false,
+                    compress_weights: false,
+                    compress_kv_cache: false,
+                },
+            }),
+        );
+
+        assert!(plan.placements.iter().any(|placement| {
+            placement.stage == PipelineStage::KvCache
+                && placement.target == AcceleratorKind::Cpu
+                && placement.device_id.as_deref() == Some("cpu:0")
+        }));
+        assert!(plan.placements.iter().any(|placement| {
+            placement.stage == PipelineStage::Weights
+                && placement.target == AcceleratorKind::Cpu
+                && placement.device_id.as_deref() == Some("cpu:0")
+        }));
+        assert!(matches!(
+            plan.backend_profile,
+            BackendExecutionProfile::OpenVino(OpenVinoExecutionProfile {
+                dynamic_reoffload: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn build_plan_prefers_disk_for_cold_state_when_host_memory_is_tight() {
+        let mut tight_host = host();
+        tight_host.available_memory_bytes = 1024 * 1024 * 1024;
+
+        let plan = build_plan(
+            &EngineConfig::default(),
+            &backend("openvino", true),
+            &lowering("openvino", true),
+            &topology(),
+            &tight_host,
+            &model(),
+            &request(),
+            route(),
+            KvCachePlan {
+                strategy: "paged-prefix-cache".to_string(),
+                shared_across_models: true,
+                page_size_bytes: Some(1 << 20),
+                block_size_tokens: Some(16),
+                max_cache_bytes: Some(512 << 20),
+                type_k: Some("q8_0".to_string()),
+                type_v: Some("q8_0".to_string()),
+                tiered: true,
+            },
+            Some(TieredOffloadPlan {
+                spill_bytes: 8 << 30,
+                prefetch_window_bytes: 128 << 20,
+                target_device: "disk:0".to_string(),
+                profile: TieredOffloadProfile::Balanced,
+                policy: TieredOffloadPolicy {
+                    weights: TieredPlacementPercentages {
+                        gpu_percent: 35,
+                        cpu_percent: 35,
+                        disk_percent: 30,
+                    },
+                    kv_cache: TieredPlacementPercentages {
+                        gpu_percent: 20,
+                        cpu_percent: 50,
+                        disk_percent: 30,
+                    },
+                    activations: TieredPlacementPercentages {
+                        gpu_percent: 60,
+                        cpu_percent: 40,
+                        disk_percent: 0,
+                    },
+                    cpu_cache_compute: true,
+                    compress_weights: true,
+                    compress_kv_cache: true,
+                },
+            }),
+        );
+
+        assert!(plan.placements.iter().any(|placement| {
+            placement.stage == PipelineStage::Weights && placement.target == AcceleratorKind::Disk
+        }));
+    }
+
+    #[test]
+    fn build_plan_emits_backend_lowering_guidance() {
+        let plan = build_plan(
+            &EngineConfig::default(),
+            &backend("openvino", true),
+            &lowering("openvino", true),
+            &topology(),
+            &host(),
+            &model(),
+            &request(),
+            route(),
+            KvCachePlan {
+                strategy: "paged-prefix-cache".to_string(),
+                shared_across_models: true,
+                page_size_bytes: Some(1 << 20),
+                block_size_tokens: Some(16),
+                max_cache_bytes: Some(512 << 20),
+                type_k: Some("q8_0".to_string()),
+                type_v: Some("q8_0".to_string()),
+                tiered: true,
+            },
+            None,
+        );
+
+        let lowering = plan.lowering_plan.expect("lowering plan");
+        assert_eq!(lowering.backend, "openvino");
+        assert!(lowering.subgraphs.iter().any(|subgraph| {
+            subgraph.id == "decode_attention_block"
+                && subgraph.affinity_tag.as_deref() == Some("NPU")
+        }));
+        assert!(!lowering.partitions.is_empty());
+        assert!(!lowering.operators.is_empty());
+        assert!(lowering.partitions.iter().any(|partition| {
+            partition.affinity_tag.as_deref() == Some("NPU")
+                && partition
+                    .operator_classes
+                    .contains(&ChipOperatorClass::Attention)
+        }));
+        assert!(lowering.operators.iter().any(|operator| {
+            operator.subgraph == "decode_attention_block"
+                && operator.partition.starts_with("partition-")
+        }));
+        assert!(lowering.subgraphs.iter().any(|subgraph| {
+            subgraph.id == "kv_state_region"
+                && subgraph.operator_class == ChipOperatorClass::KvCache
+        }));
+    }
+
+    #[test]
+    fn build_plan_dispatches_backend_profile_by_runtime_family() {
+        let plan = build_plan(
+            &EngineConfig::default(),
+            &BackendDescriptor {
+                name: "intel-openvino-main".to_string(),
+                runtime_family: loci_protocol::BackendRuntimeFamily::OpenVino,
+                supports_cpu: true,
+                supports_gpu: true,
+                supports_npu: true,
+                supports_disk_tiering: true,
+                supports_paged_kv: true,
+                supports_multimodal: true,
+            },
+            &BackendLoweringCapabilities {
+                backend: "intel-openvino-main".to_string(),
+                runtime_family: loci_protocol::BackendRuntimeFamily::OpenVino,
+                granularity: loci_protocol::LoweringGranularity::Subgraph,
+                supports_real_execution: true,
+                supports_graph_partitioning: true,
+                supports_layer_affinity: false,
+                supports_dynamic_reoffload: true,
+                supports_custom_operators: false,
+                operator_classes: vec![
+                    loci_protocol::ChipOperatorClass::Attention,
+                    loci_protocol::ChipOperatorClass::Mlp,
+                ],
+                notes: Vec::new(),
+            },
+            &topology(),
+            &host(),
+            &model(),
+            &request(),
+            route(),
+            KvCachePlan {
+                strategy: "paged-prefix-cache".to_string(),
+                shared_across_models: true,
+                page_size_bytes: Some(1 << 20),
+                block_size_tokens: Some(16),
+                max_cache_bytes: Some(512 << 20),
+                type_k: Some("q8_0".to_string()),
+                type_v: Some("q8_0".to_string()),
+                tiered: true,
+            },
+            None,
+        );
+
+        assert!(matches!(
+            plan.backend_profile,
+            BackendExecutionProfile::OpenVino(_)
+        ));
+    }
+
+    #[test]
+    fn choose_backend_skips_non_multimodal_backends_for_image_requests() {
+        let backends: Vec<Box<dyn Backend>> = vec![
+            Box::new(MockBackend {
+                descriptor: BackendDescriptor {
+                    name: "candle".to_string(),
+                    runtime_family: loci_protocol::BackendRuntimeFamily::Candle,
+                    supports_cpu: true,
+                    supports_gpu: true,
+                    supports_npu: false,
+                    supports_disk_tiering: true,
+                    supports_paged_kv: true,
+                    supports_multimodal: false,
+                },
+                supports_model: true,
+            }),
+            Box::new(MockBackend {
+                descriptor: BackendDescriptor {
+                    name: "openvino".to_string(),
+                    runtime_family: loci_protocol::BackendRuntimeFamily::OpenVino,
+                    supports_cpu: true,
+                    supports_gpu: true,
+                    supports_npu: true,
+                    supports_disk_tiering: true,
+                    supports_paged_kv: true,
+                    supports_multimodal: true,
+                },
+                supports_model: true,
+            }),
+        ];
+
+        let mut multimodal_request = request();
+        multimodal_request
+            .images
+            .push(loci_protocol::ImageInput::Path {
+                path: PathBuf::from("D:/images/demo.png"),
+            });
+
+        let selected = choose_backend(&backends, &model(), &multimodal_request, Some("candle"))
+            .expect("backend");
+
+        assert_eq!(selected.descriptor().name, "openvino");
+    }
+
+    #[test]
+    fn choose_backend_prefers_ready_backend_over_partial_fallbacks() {
+        let dir = unique_temp_dir("openvino-ready");
+        fs::create_dir_all(&dir).expect("dir");
+        fs::write(dir.join("openvino_model.xml"), "<xml/>").expect("xml");
+
+        let model = ModelDescriptor {
+            name: "demo".to_string(),
+            path: dir.clone(),
+            architecture: "llama".to_string(),
+            memory_bytes: Some(1),
+            parameter_count: Some(1),
+            context_length: Some(128),
+            preferred_backend: Some("candle".to_string()),
+        };
+
+        let backends: Vec<Box<dyn Backend>> = vec![
+            Box::new(MockBackend {
+                descriptor: BackendDescriptor {
+                    name: "candle".to_string(),
+                    runtime_family: loci_protocol::BackendRuntimeFamily::Candle,
+                    supports_cpu: true,
+                    supports_gpu: true,
+                    supports_npu: false,
+                    supports_disk_tiering: true,
+                    supports_paged_kv: true,
+                    supports_multimodal: false,
+                },
+                supports_model: true,
+            }),
+            Box::new(MockBackend {
+                descriptor: BackendDescriptor {
+                    name: "openvino".to_string(),
+                    runtime_family: loci_protocol::BackendRuntimeFamily::OpenVino,
+                    supports_cpu: true,
+                    supports_gpu: true,
+                    supports_npu: true,
+                    supports_disk_tiering: true,
+                    supports_paged_kv: true,
+                    supports_multimodal: true,
+                },
+                supports_model: true,
+            }),
+        ];
+
+        let selected =
+            choose_backend(&backends, &model, &request(), Some("candle")).expect("backend");
+
+        assert_eq!(selected.descriptor().name, "openvino");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn choose_backend_uses_readiness_instead_of_supports_model_heuristics() {
+        let dir = unique_temp_dir("readiness-over-supports-model");
+        fs::create_dir_all(&dir).expect("dir");
+        fs::write(dir.join("openvino_model.xml"), "<xml/>").expect("xml");
+
+        let model = ModelDescriptor {
+            name: "demo".to_string(),
+            path: dir.clone(),
+            architecture: "llama".to_string(),
+            memory_bytes: Some(1),
+            parameter_count: Some(1),
+            context_length: Some(128),
+            preferred_backend: None,
+        };
+
+        let backends: Vec<Box<dyn Backend>> = vec![
+            Box::new(MockBackend {
+                descriptor: BackendDescriptor {
+                    name: "openvino".to_string(),
+                    runtime_family: loci_protocol::BackendRuntimeFamily::OpenVino,
+                    supports_cpu: true,
+                    supports_gpu: true,
+                    supports_npu: true,
+                    supports_disk_tiering: true,
+                    supports_paged_kv: true,
+                    supports_multimodal: true,
+                },
+                supports_model: false,
+            }),
+            Box::new(MockBackend {
+                descriptor: BackendDescriptor {
+                    name: "candle".to_string(),
+                    runtime_family: loci_protocol::BackendRuntimeFamily::Candle,
+                    supports_cpu: true,
+                    supports_gpu: true,
+                    supports_npu: false,
+                    supports_disk_tiering: true,
+                    supports_paged_kv: true,
+                    supports_multimodal: false,
+                },
+                supports_model: true,
+            }),
+        ];
+
+        let selected = choose_backend(&backends, &model, &request(), None).expect("backend");
+        assert_eq!(selected.descriptor().name, "openvino");
+
+        fs::remove_dir_all(dir).expect("cleanup");
     }
 }

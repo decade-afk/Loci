@@ -7,3 +7,9 @@ authors.workspace = true
 
 [dependencies]
 loci-protocol = { path = "../protocol" }
+libloading = "0.8"
+openvino = { version = "0.10.0", features = ["runtime-linking"] }
+openvino-genai = { version = "0.10.0", features = ["runtime-linking"] }
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
+serde_json.workspace = true

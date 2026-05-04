@@ -1,0 +1,23 @@
+[package]
+name = "loci-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+default = ["candle", "gguf", "kernels-llama"]
+candle = ["loci-core/candle", "loci-server/candle"]
+gguf = ["loci-core/gguf", "loci-server/gguf"]
+kernels-llama = ["loci-core/kernels-llama", "loci-server/kernels-llama"]
+openvino = ["loci-core/openvino", "loci-server/openvino"]
+dynamic-routing = ["loci-core/dynamic-routing", "loci-server/dynamic-routing"]
+mobile = ["loci-core/mobile", "loci-server/mobile"]
+neon = ["loci-core/neon", "loci-server/neon"]
+coreml = ["loci-core/coreml", "loci-server/coreml"]
+qnn = ["loci-core/qnn", "loci-server/qnn"]
+
+[dependencies]
+loci-core = { path = "../core" }
+loci-server = { path = "../server" }
+anyhow.workspace = true

@@ -1,3 +1,5 @@
+//! Optional model-selection heuristics layered on top of the core planner.
+
 use crate::error::{LociError, Result};
 use loci_protocol::{
     HardwareTopology, ModelDescriptor, RouteDecision, RoutingConfig, SessionRequest,
@@ -5,6 +7,7 @@ use loci_protocol::{
 #[cfg(feature = "dynamic-routing")]
 use loci_protocol::{RoutingStrategy, ThermalState};
 
+/// Selects the model that should satisfy a request and returns an explanation.
 pub fn select_model<'a>(
     models: &'a [ModelDescriptor],
     request: &SessionRequest,
@@ -99,8 +102,10 @@ pub fn select_model<'a>(
 }
 
 #[cfg(feature = "dynamic-routing")]
+/// Estimates prompt complexity using prompt size, output mode, and token budget.
 fn prompt_complexity_score(request: &SessionRequest) -> usize {
     let mut score = request.prompt.split_whitespace().count();
+    score += request.images.len() * 64;
     if request.structured_output {
         score += 32;
     }
@@ -111,6 +116,7 @@ fn prompt_complexity_score(request: &SessionRequest) -> usize {
 }
 
 #[cfg(feature = "dynamic-routing")]
+/// Chooses the smallest viable model when power or thermal constraints tighten.
 fn select_power_aware_model<'a>(
     models: &'a [ModelDescriptor],
     topology: &HardwareTopology,

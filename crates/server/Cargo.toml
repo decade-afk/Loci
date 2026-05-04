@@ -5,6 +5,18 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+default = ["candle", "gguf", "kernels-llama"]
+candle = ["loci-core/candle"]
+gguf = ["loci-core/gguf"]
+kernels-llama = ["loci-core/kernels-llama"]
+openvino = ["loci-core/openvino"]
+dynamic-routing = ["loci-core/dynamic-routing"]
+mobile = ["loci-core/mobile"]
+neon = ["loci-core/neon"]
+coreml = ["loci-core/coreml"]
+qnn = ["loci-core/qnn"]
+
 [lib]
 doctest = false
 

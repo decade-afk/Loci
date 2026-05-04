@@ -1,20 +1,31 @@
+//! Main runtime entry point for planning, preparation, and inference.
+
 use crate::config::EngineConfig;
+use crate::embedded::{infer_model_descriptor_from_path, EmbeddedModelRegistration};
 use crate::error::{LociError, Result};
+use crate::host_profiler::profile_host_capabilities;
+use crate::kernel_registry::KernelRegistry;
+use crate::model_inspector::{inspect_model, inspect_models};
 use crate::model_registry::ModelRegistry;
 use crate::planner::{build_plan, choose_backend, merge_topologies};
 use crate::router::select_model;
 use crate::snapshot::{
-    EngineFeatureSnapshot, ModelPoolSnapshot, RoutingSnapshot, RuntimeConfigSnapshot,
-    RuntimeSnapshot,
+    EngineFeatureSnapshot, HostCapabilitySnapshot, ModelPoolSnapshot, RoutingSnapshot,
+    RuntimeConfigSnapshot, RuntimeSnapshot, TieredOffloadRuntimeSnapshot,
+    TieredOffloadSessionSnapshot,
 };
 use loci_protocol::{
     Backend, BackendExecutionProfile, BackendOutput, ExecutionPlan, HardwareTopology, KvCachePlan,
-    ModelDescriptor, PreparedModel, SessionRequest, SessionResponse, TieredOffloadPlan,
-    TieredOffloadProfile,
+    ModelDescriptor, ModelReadinessReport, PreparedModel, SessionRequest, SessionResponse,
+    TieredOffloadPlan, TieredOffloadProfile,
 };
+#[cfg(feature = "tiered-offload")]
+use loci_tiered_offload::{HostTieringHints, SpillTensorKind, TieredOffloadRuntime};
+use std::collections::HashMap;
 #[cfg(test)]
 use std::time::{Duration, Instant};
 
+/// Builder for constructing an [`InferenceEngine`] with static backends.
 pub struct InferenceEngineBuilder {
     config: EngineConfig,
     preferred_backend: Option<String>,
@@ -22,6 +33,7 @@ pub struct InferenceEngineBuilder {
 }
 
 impl InferenceEngineBuilder {
+    /// Starts a builder with default runtime configuration.
     pub fn new() -> Self {
         Self {
             config: EngineConfig::default(),
@@ -30,37 +42,53 @@ impl InferenceEngineBuilder {
         }
     }
 
+    /// Replaces the default runtime configuration.
     pub fn config(mut self, config: EngineConfig) -> Self {
         self.config = config;
         self
     }
 
+    /// Requests that planning prefer a specific backend when possible.
     pub fn preferred_backend(mut self, backend: impl Into<String>) -> Self {
         self.preferred_backend = Some(backend.into());
         self
     }
 
+    /// Registers a model that should be available when the engine starts.
     pub fn model(mut self, model: ModelDescriptor) -> Self {
         self.models.push(model);
         self
     }
 
+    /// Registers a local model path and infers missing descriptor fields.
+    pub fn local_model(
+        mut self,
+        path: impl Into<std::path::PathBuf>,
+        options: EmbeddedModelRegistration,
+    ) -> Result<Self> {
+        let model = infer_model_descriptor_from_path(path, options)?;
+        self.models.push(model);
+        Ok(self)
+    }
+
+    /// Finalizes the engine and discovers the merged backend topology.
     pub fn build(self) -> Result<InferenceEngine> {
         let config = self.config;
+        if config.routing.enabled && !cfg!(feature = "dynamic-routing") {
+            return Err(LociError::InvalidRequest(
+                "dynamic routing was requested, but the `dynamic-routing` feature is not enabled"
+                    .to_string(),
+            ));
+        }
         let backends = builtin_backends();
         if backends.is_empty() {
             return Err(LociError::NoBackendAvailable);
         }
 
+        let kernel_registry = KernelRegistry::from_backends(&backends);
         let topology = merge_topologies(&backends);
-        let features = EngineFeatureSnapshot {
-            openvino: cfg!(feature = "openvino"),
-            candle: cfg!(feature = "candle"),
-            tiered_offload: cfg!(feature = "tiered-offload") && config.tiered_offload.enabled,
-            paged_kv: cfg!(feature = "paged-kv") && config.paged_kv.enabled,
-            power_aware: cfg!(feature = "power-aware"),
-            dynamic_routing: cfg!(feature = "dynamic-routing") && config.routing.enabled,
-        };
+        let host = profile_host_capabilities();
+        let features = feature_snapshot(&config);
 
         Ok(InferenceEngine {
             config: config.clone(),
@@ -72,28 +100,39 @@ impl InferenceEngineBuilder {
                 config.model_aliases.clone(),
             ),
             backends,
+            kernel_registry,
+            host,
             topology,
             features,
+            #[cfg(feature = "tiered-offload")]
+            tiered_offload_runtime: TieredOffloadRuntime::default(),
             last_routed_model: None,
         })
     }
 }
 
+/// Owns the Loci control plane for model management and heterogeneous planning.
 pub struct InferenceEngine {
     config: EngineConfig,
     preferred_backend: Option<String>,
     registry: ModelRegistry,
     backends: Vec<Box<dyn Backend>>,
+    kernel_registry: KernelRegistry,
+    host: HostCapabilitySnapshot,
     topology: HardwareTopology,
     features: EngineFeatureSnapshot,
+    #[cfg(feature = "tiered-offload")]
+    tiered_offload_runtime: TieredOffloadRuntime,
     last_routed_model: Option<String>,
 }
 
 impl InferenceEngine {
+    /// Creates a builder for a new inference engine.
     pub fn builder() -> InferenceEngineBuilder {
         InferenceEngineBuilder::new()
     }
 
+    /// Registers a model and marks it as recently used.
     pub fn register_model(&mut self, model: ModelDescriptor) {
         self.evict_expired_models();
         let model_name = model.name.clone();
@@ -101,33 +140,53 @@ impl InferenceEngine {
         self.touch_model_pool(&model_name);
     }
 
+    /// Registers a local model path and infers missing descriptor fields.
+    pub fn register_local_model(
+        &mut self,
+        path: impl Into<std::path::PathBuf>,
+        options: EmbeddedModelRegistration,
+    ) -> Result<ModelDescriptor> {
+        let model = infer_model_descriptor_from_path(path, options)?;
+        self.register_model(model.clone());
+        Ok(model)
+    }
+
+    /// Removes a model registration, accepting aliases and fuzzy names.
     pub fn unregister_model(&mut self, name: &str) -> bool {
         let resolved_name = self
             .resolve_registered_name(name)
             .unwrap_or_else(|| name.to_string());
+        self.drop_tiered_sessions_for_model(&resolved_name);
         let removed = self.registry.unregister(&resolved_name);
-        self.evict_model(&resolved_name);
         if self.last_routed_model.as_deref() == Some(resolved_name.as_str()) {
             self.last_routed_model = None;
         }
         removed
     }
 
+    /// Evicts runtime state for a model while keeping its registration.
     pub fn evict_model(&mut self, name: &str) -> bool {
         let resolved_name = self
             .resolve_registered_name(name)
             .unwrap_or_else(|| name.to_string());
+        self.drop_tiered_sessions_for_model(&resolved_name);
         self.registry.evict(&resolved_name)
     }
 
+    /// Evicts resident models that exceeded the configured keep-alive window.
     pub fn evict_expired_models(&mut self) -> Vec<String> {
-        self.registry.evict_expired()
+        let prepared_sessions = self.prepared_sessions_by_model();
+        let evicted = self.registry.evict_expired();
+        self.drop_tiered_sessions(&prepared_sessions, &evicted);
+        evicted
     }
 
+    /// Returns the registered model descriptors.
     pub fn models(&self) -> Vec<ModelDescriptor> {
         self.registry.descriptors()
     }
 
+    /// Registers a case-insensitive alias for a model name.
     pub fn register_alias(&mut self, alias: impl Into<String>, target: impl Into<String>) {
         let alias = alias.into();
         let target = target.into();
@@ -137,41 +196,95 @@ impl InferenceEngine {
         self.registry.register_alias(alias, target);
     }
 
+    /// Removes an alias from both the config snapshot and the registry index.
     pub fn remove_alias(&mut self, alias: &str) -> bool {
         self.config.model_aliases.remove(alias).is_some() || self.registry.remove_alias(alias)
     }
 
+    /// Updates the model residency keep-alive timeout.
     pub fn set_model_keep_alive_secs(&mut self, keep_alive_secs: u64) {
         self.config.model_keep_alive_secs = keep_alive_secs;
         self.registry.set_keep_alive_secs(keep_alive_secs);
     }
 
+    /// Updates the active tiered-offload profile.
     pub fn set_offload_profile(&mut self, profile: TieredOffloadProfile) {
         self.config.tiered_offload.profile = profile;
     }
 
+    /// Updates the planner-facing KV block size.
     pub fn set_kv_block_size_tokens(&mut self, block_size_tokens: u32) {
         self.config.paged_kv.block_size_tokens = block_size_tokens;
     }
 
+    /// Enables or disables prefix-cache sharing in the paged KV planner.
     pub fn set_kv_prefix_cache_enabled(&mut self, enabled: bool) {
         self.config.paged_kv.prefix_cache_enabled = enabled;
     }
 
+    /// Updates the planner-facing KV tensor formats.
     pub fn set_kv_types(&mut self, type_k: String, type_v: String) {
         self.config.paged_kv.type_k = type_k;
         self.config.paged_kv.type_v = type_v;
     }
 
+    /// Enables or disables dynamic routing when the feature is compiled in.
+    pub fn set_routing_enabled(&mut self, enabled: bool) -> Result<()> {
+        if enabled && !cfg!(feature = "dynamic-routing") {
+            return Err(LociError::InvalidRequest(
+                "dynamic routing is unavailable because the `dynamic-routing` feature is not enabled"
+                    .to_string(),
+            ));
+        }
+        self.config.routing.enabled = enabled;
+        self.refresh_feature_snapshot();
+        Ok(())
+    }
+
+    /// Updates the routing strategy used when dynamic routing is enabled.
+    pub fn set_routing_strategy(&mut self, strategy: loci_protocol::RoutingStrategy) -> Result<()> {
+        if self.config.routing.enabled && !cfg!(feature = "dynamic-routing") {
+            return Err(LociError::InvalidRequest(
+                "routing strategy cannot be changed because the `dynamic-routing` feature is not enabled"
+                    .to_string(),
+            ));
+        }
+        self.config.routing.strategy = strategy;
+        self.refresh_feature_snapshot();
+        Ok(())
+    }
+
+    /// Updates the maximum number of resident models the registry may keep loaded.
+    pub fn set_max_loaded_models(&mut self, max_loaded_models: Option<usize>) {
+        self.config.routing.max_loaded_models = max_loaded_models;
+        self.registry.set_max_loaded_models(max_loaded_models);
+        self.enforce_resident_memory_budget();
+    }
+
+    /// Produces a serializable snapshot of the current runtime state.
     pub fn runtime_snapshot(&self) -> RuntimeSnapshot {
+        let models = self.registry.descriptors();
         RuntimeSnapshot {
             backends: self
                 .backends
                 .iter()
                 .map(|backend| backend.descriptor())
                 .collect(),
+            backend_assets: self
+                .backends
+                .iter()
+                .map(|backend| backend.asset_capabilities())
+                .collect(),
+            backend_lowering: self
+                .backends
+                .iter()
+                .map(|backend| backend.lowering_capabilities())
+                .collect(),
+            backend_kernels: self.kernel_registry.catalogs().to_vec(),
+            host: self.host.clone(),
             topology: self.topology.clone(),
-            models: self.registry.descriptors(),
+            model_diagnostics: inspect_models(&models, &self.backends),
+            models,
             preferred_backend: self.preferred_backend.clone(),
             config: RuntimeConfigSnapshot {
                 model_keep_alive_secs: self.config.model_keep_alive_secs,
@@ -202,10 +315,29 @@ impl InferenceEngine {
                 max_loaded_models: self.config.routing.max_loaded_models,
                 last_routed_model: self.last_routed_model.clone(),
             },
+            tiered_offload_runtime: self.tiered_offload_runtime_snapshot(),
             features: self.features.clone(),
         }
     }
 
+    /// Produces readiness diagnostics for every registered model.
+    pub fn inspect_models(&self) -> Vec<ModelReadinessReport> {
+        inspect_models(&self.registry.descriptors(), &self.backends)
+    }
+
+    /// Produces readiness diagnostics for one registered model.
+    pub fn inspect_model(&self, name: &str) -> Result<ModelReadinessReport> {
+        let resolved_name = self
+            .resolve_registered_name(name)
+            .ok_or_else(|| LociError::RequestedModelMissing(name.to_string()))?;
+        let model = self
+            .registry
+            .find(&resolved_name)
+            .ok_or_else(|| LociError::RequestedModelMissing(resolved_name.clone()))?;
+        Ok(inspect_model(model, &self.backends))
+    }
+
+    /// Computes an execution plan without preparing backend state or running inference.
     pub fn plan(&self, request: &SessionRequest) -> Result<ExecutionPlan> {
         let resolved_request = self.resolve_request_model(request)?;
         let models = self.registry.descriptors();
@@ -215,14 +347,21 @@ impl InferenceEngine {
             &self.config.routing,
             &self.topology,
         )?;
-        let backend = choose_backend(&self.backends, model, self.preferred_backend.as_deref())?;
+        let backend = choose_backend(
+            &self.backends,
+            model,
+            &resolved_request,
+            self.preferred_backend.as_deref(),
+        )?;
         let kv_cache = self.build_kv_cache_plan(model);
         let tiered_offload = self.build_tiered_offload_plan(model);
 
         Ok(build_plan(
             &self.config,
             &backend.descriptor(),
+            &backend.lowering_capabilities(),
             &self.topology,
+            &self.host,
             model,
             &resolved_request,
             route,
@@ -231,6 +370,7 @@ impl InferenceEngine {
         ))
     }
 
+    /// Plans and executes one inference request.
     pub fn infer(&mut self, request: SessionRequest) -> Result<SessionResponse> {
         self.evict_expired_models();
         let (plan, model, backend_index, prepared) = self.prepare_request(&request)?;
@@ -250,12 +390,14 @@ impl InferenceEngine {
         })
     }
 
+    /// Plans and prepares backend state without running generation.
     pub fn prepare(&mut self, request: SessionRequest) -> Result<PreparedModel> {
         self.evict_expired_models();
         let (_plan, _model, _backend_index, prepared) = self.prepare_request(&request)?;
         Ok(prepared)
     }
 
+    /// Builds the tiered-offload policy layer when the feature is active.
     fn build_tiered_offload_plan(&self, model: &ModelDescriptor) -> Option<TieredOffloadPlan> {
         #[cfg(feature = "tiered-offload")]
         {
@@ -263,7 +405,7 @@ impl InferenceEngine {
                 let manager = loci_tiered_offload::TieredOffloadManager::new(
                     self.config.tiered_offload.clone(),
                 );
-                return manager.plan(model, &self.topology);
+                return manager.plan(model, &self.topology, Some(&self.tiering_hints()));
             }
         }
 
@@ -271,6 +413,7 @@ impl InferenceEngine {
         None
     }
 
+    /// Builds the planner-facing KV layout description for a model.
     fn build_kv_cache_plan(&self, model: &ModelDescriptor) -> KvCachePlan {
         #[cfg(feature = "paged-kv")]
         {
@@ -292,11 +435,13 @@ impl InferenceEngine {
         }
     }
 
+    /// Marks the model as resident and enforces global residency limits.
     fn touch_model_pool(&mut self, model_name: &str) {
         self.registry.touch(model_name);
         self.enforce_resident_memory_budget();
     }
 
+    /// Reuses an existing prepared backend session or prepares a new one.
     fn ensure_prepared_model(
         &mut self,
         backend_index: usize,
@@ -313,6 +458,7 @@ impl InferenceEngine {
             return Ok(existing);
         }
 
+        self.prepare_tiered_offload_session(model, plan)?;
         let prepared = self.backends[backend_index]
             .prepare(model, plan)
             .map_err(|error| LociError::Backend(error.message))?;
@@ -320,6 +466,7 @@ impl InferenceEngine {
         Ok(prepared)
     }
 
+    /// Resolves the request into a concrete plan, model, backend, and prepared state.
     fn prepare_request(
         &mut self,
         request: &SessionRequest,
@@ -342,6 +489,7 @@ impl InferenceEngine {
         Ok((plan, model, backend_index, prepared))
     }
 
+    /// Normalizes an explicit target model through the registry alias layer.
     fn resolve_request_model(&self, request: &SessionRequest) -> Result<SessionRequest> {
         let Some(target) = &request.target_model else {
             return Ok(request.clone());
@@ -356,44 +504,209 @@ impl InferenceEngine {
         Ok(normalized)
     }
 
+    /// Resolves a user-facing model identifier into a registered name.
     fn resolve_registered_name(&self, name: &str) -> Option<String> {
         self.registry.resolve_name(name)
     }
 
+    /// Estimates the total non-disk residency budget available to the runtime.
     fn resident_budget_bytes(&self) -> u64 {
-        self.topology
+        let topology_budget = self
+            .topology
             .devices
             .iter()
             .filter(|device| device.kind != loci_protocol::AcceleratorKind::Disk)
             .filter_map(|device| device.memory_bytes)
             .sum::<u64>()
             .saturating_mul(3)
-            / 4
+            / 4;
+        let host_budget = self.host.available_memory_bytes.saturating_mul(3) / 4;
+        if host_budget > 0 {
+            topology_budget.min(host_budget)
+        } else {
+            topology_budget
+        }
     }
 
+    /// Applies the resident-memory budget by evicting old model state as needed.
     fn enforce_resident_memory_budget(&mut self) {
-        let _ = self.registry.enforce_limits(self.resident_budget_bytes());
+        let prepared_sessions = self.prepared_sessions_by_model();
+        let evicted = self.registry.enforce_limits(self.resident_budget_bytes());
+        self.drop_tiered_sessions(&prepared_sessions, &evicted);
+    }
+
+    /// Recomputes feature activation flags after runtime configuration changes.
+    fn refresh_feature_snapshot(&mut self) {
+        self.features = feature_snapshot(&self.config);
+    }
+
+    /// Converts the current host snapshot into tiered-offload planning hints.
+    #[cfg(feature = "tiered-offload")]
+    fn tiering_hints(&self) -> HostTieringHints {
+        HostTieringHints {
+            total_memory_bytes: self.host.total_memory_bytes,
+            available_memory_bytes: self.host.available_memory_bytes,
+            free_disk_bytes: self
+                .host
+                .disks
+                .iter()
+                .find(|disk| disk.mount_point.to_ascii_lowercase().starts_with('d'))
+                .or_else(|| self.host.disks.first())
+                .map(|disk| disk.available_bytes),
+            disk_read_mbps: self.host.probe.disk_read_mbps,
+            disk_write_mbps: self.host.probe.disk_write_mbps,
+        }
+    }
+
+    /// Materializes the spill session for a prepared model when disk tiering is active.
+    fn prepare_tiered_offload_session(
+        &self,
+        model: &ModelDescriptor,
+        plan: &ExecutionPlan,
+    ) -> Result<()> {
+        #[cfg(feature = "tiered-offload")]
+        {
+            if let Some(tiered_plan) = &plan.tiered_offload {
+                let assets = inspect_model(model, &self.backends).asset_inventory;
+                self.tiered_offload_runtime
+                    .prepare_session(session_key(plan), model, &assets, tiered_plan)
+                    .map_err(|error| {
+                        LociError::Backend(format!("tiered offload prepare failed: {error}"))
+                    })?;
+            }
+        }
+
+        let _ = (model, plan);
+        Ok(())
+    }
+
+    /// Builds a snapshot of the active spill runtime when the feature is compiled in.
+    fn tiered_offload_runtime_snapshot(&self) -> Option<TieredOffloadRuntimeSnapshot> {
+        #[cfg(feature = "tiered-offload")]
+        {
+            let snapshot = self.tiered_offload_runtime.snapshot().ok()?;
+            return Some(TieredOffloadRuntimeSnapshot {
+                root_dir: snapshot.root_dir.display().to_string(),
+                total_spill_bytes: snapshot.total_spill_bytes,
+                total_prefetched_bytes: snapshot.total_prefetched_bytes,
+                sessions: snapshot
+                    .active_sessions
+                    .into_iter()
+                    .map(|session| {
+                        let weights_bytes = segment_bytes(&session, SpillTensorKind::Weights);
+                        let kv_cache_bytes = segment_bytes(&session, SpillTensorKind::KvCache);
+                        let activations_bytes =
+                            segment_bytes(&session, SpillTensorKind::Activations);
+
+                        TieredOffloadSessionSnapshot {
+                            session_key: session.session_key,
+                            model_name: session.model_name,
+                            spill_path: session.spill_path.display().to_string(),
+                            mapped_bytes: session.mapped_bytes,
+                            prefetched_bytes: session.prefetched_bytes,
+                            scheduled_prefetch_requests: session.scheduled_prefetch_requests,
+                            completed_prefetch_requests: session.completed_prefetch_requests,
+                            weights_bytes,
+                            kv_cache_bytes,
+                            activations_bytes,
+                        }
+                    })
+                    .collect(),
+            });
+        }
+
+        #[cfg(not(feature = "tiered-offload"))]
+        None
+    }
+
+    /// Captures the currently prepared session keys by model before registry eviction occurs.
+    fn prepared_sessions_by_model(&self) -> HashMap<String, Vec<String>> {
+        let mut sessions = HashMap::<String, Vec<String>>::new();
+        for prepared in self.registry.prepared_models() {
+            sessions
+                .entry(prepared.model_name.clone())
+                .or_default()
+                .push(prepared.session_key);
+        }
+        sessions
+    }
+
+    /// Removes spill sessions for models that the registry just evicted.
+    fn drop_tiered_sessions(
+        &self,
+        prepared_sessions: &HashMap<String, Vec<String>>,
+        model_names: &[String],
+    ) {
+        #[cfg(feature = "tiered-offload")]
+        {
+            for model_name in model_names {
+                if let Some(session_keys) = prepared_sessions.get(model_name) {
+                    for session_key in session_keys {
+                        let _ = self.tiered_offload_runtime.evict_session(session_key);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Removes spill sessions for a single model before explicit eviction or unregister.
+    fn drop_tiered_sessions_for_model(&self, model_name: &str) {
+        let prepared_sessions = self.prepared_sessions_by_model();
+        self.drop_tiered_sessions(&prepared_sessions, &[model_name.to_string()]);
     }
 }
 
+/// Instantiates the statically compiled backend set for this build.
 fn builtin_backends() -> Vec<Box<dyn Backend>> {
     let mut backends: Vec<Box<dyn Backend>> = Vec::new();
-
-    #[cfg(feature = "openvino")]
-    backends.push(loci_backend_openvino::boxed_backend());
 
     #[cfg(feature = "candle")]
     backends.push(loci_backend_candle::boxed_backend());
 
+    #[cfg(feature = "openvino")]
+    backends.push(loci_backend_openvino::boxed_backend());
+
     backends
 }
 
+/// Extracts the backend-specific session key from an execution plan.
 fn session_key(plan: &ExecutionPlan) -> &str {
     match &plan.backend_profile {
         BackendExecutionProfile::OpenVino(profile) => &profile.session_key,
         BackendExecutionProfile::Candle(profile) => &profile.session_key,
         BackendExecutionProfile::Generic(profile) => &profile.session_key,
     }
+}
+
+/// Computes the feature snapshot for the current configuration.
+fn feature_snapshot(config: &EngineConfig) -> EngineFeatureSnapshot {
+    EngineFeatureSnapshot {
+        openvino: cfg!(feature = "openvino"),
+        candle: cfg!(feature = "candle"),
+        gguf: cfg!(feature = "gguf"),
+        kernels_llama: cfg!(feature = "kernels-llama"),
+        tiered_offload: cfg!(feature = "tiered-offload") && config.tiered_offload.enabled,
+        paged_kv: cfg!(feature = "paged-kv") && config.paged_kv.enabled,
+        power_aware: cfg!(feature = "power-aware"),
+        dynamic_routing: cfg!(feature = "dynamic-routing") && config.routing.enabled,
+        mobile: cfg!(feature = "mobile"),
+        neon: cfg!(feature = "neon"),
+        coreml: cfg!(feature = "coreml"),
+        qnn: cfg!(feature = "qnn"),
+    }
+}
+
+#[cfg(feature = "tiered-offload")]
+fn segment_bytes(
+    session: &loci_tiered_offload::TieredSessionSnapshot,
+    tensor: SpillTensorKind,
+) -> u64 {
+    session
+        .segments
+        .iter()
+        .filter(|segment| segment.tensor == tensor)
+        .map(|segment| segment.length_bytes)
+        .sum()
 }
 
 #[cfg(test)]
@@ -417,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_prefers_npu_decode_when_openvino_is_available() {
+    fn engine_prefers_best_available_decode_device_for_available_backend() {
         let engine = InferenceEngine::builder()
             .model(demo_model("tiny", 2 * 1024 * 1024 * 1024, 1_000_000_000))
             .build()
@@ -429,15 +742,34 @@ mod tests {
                 max_tokens: 64,
                 temperature: 0.2,
                 target_model: None,
+                images: Vec::new(),
                 structured_output: false,
                 tool_calling: false,
             })
             .expect("plan");
 
-        assert_eq!(plan.backend, "openvino");
+        assert_eq!(
+            plan.backend,
+            if cfg!(feature = "openvino") {
+                "openvino"
+            } else {
+                "candle"
+            }
+        );
+        let expected_target = if engine
+            .runtime_snapshot()
+            .topology
+            .devices
+            .iter()
+            .any(|device| device.kind == loci_protocol::AcceleratorKind::Npu)
+        {
+            loci_protocol::AcceleratorKind::Npu
+        } else {
+            loci_protocol::AcceleratorKind::Gpu
+        };
         assert!(plan.placements.iter().any(|placement| {
             placement.stage == loci_protocol::PipelineStage::Decode
-                && placement.target == loci_protocol::AcceleratorKind::Npu
+                && placement.target == expected_target
         }));
         assert_eq!(
             engine.runtime_snapshot().topology.power.thermal_state,
@@ -489,7 +821,12 @@ mod tests {
             .expect("engine");
 
         let snapshot = engine.runtime_snapshot();
+        assert!(!snapshot.backend_assets.is_empty());
+        assert!(!snapshot.backend_lowering.is_empty());
+        assert!(snapshot.host.logical_cores >= 1);
+        assert!(snapshot.host.total_memory_bytes >= snapshot.host.available_memory_bytes);
         assert_eq!(snapshot.config.model_keep_alive_secs, 42);
+        assert_eq!(snapshot.model_diagnostics.len(), 1);
         assert_eq!(
             snapshot
                 .config
@@ -520,6 +857,7 @@ mod tests {
         engine.set_kv_block_size_tokens(64);
         engine.set_kv_prefix_cache_enabled(false);
         engine.set_kv_types("q8_0".to_string(), "q4_0".to_string());
+        engine.set_max_loaded_models(Some(2));
 
         let snapshot = engine.runtime_snapshot();
         assert_eq!(snapshot.config.model_keep_alive_secs, 77);
@@ -539,6 +877,7 @@ mod tests {
         assert!(!snapshot.config.kv_prefix_cache_enabled);
         assert_eq!(snapshot.config.kv_type_k, "q8_0");
         assert_eq!(snapshot.config.kv_type_v, "q4_0");
+        assert_eq!(snapshot.routing.max_loaded_models, Some(2));
     }
 
     #[test]
@@ -572,6 +911,7 @@ mod tests {
                 max_tokens: 1,
                 temperature: 0.0,
                 target_model: Some("tiny".to_string()),
+                images: Vec::new(),
                 structured_output: false,
                 tool_calling: false,
             })
@@ -602,6 +942,44 @@ mod tests {
     }
 
     #[test]
+    fn max_loaded_models_can_be_reduced_after_build() {
+        let mut config = EngineConfig::default();
+        config.routing.max_loaded_models = Some(3);
+
+        let mut engine = InferenceEngine::builder()
+            .config(config)
+            .model(demo_model("a", 1, 1))
+            .model(demo_model("b", 1, 1))
+            .model(demo_model("c", 1, 1))
+            .build()
+            .expect("engine");
+
+        engine.set_max_loaded_models(Some(1));
+
+        let snapshot = engine.runtime_snapshot();
+        assert_eq!(snapshot.routing.max_loaded_models, Some(1));
+        assert_eq!(snapshot.model_pool.resident_models.len(), 1);
+    }
+
+    #[cfg(not(feature = "dynamic-routing"))]
+    #[test]
+    fn build_rejects_enabled_routing_without_feature() {
+        let mut config = EngineConfig::default();
+        config.routing.enabled = true;
+
+        let error = match InferenceEngine::builder()
+            .config(config)
+            .model(demo_model("demo", 1, 1))
+            .build()
+        {
+            Ok(_) => panic!("routing should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, LociError::InvalidRequest(_)));
+    }
+
+    #[test]
     fn infer_prepares_and_tracks_backend_session() {
         let mut engine = InferenceEngine::builder()
             .model(demo_model("demo", 1, 1))
@@ -614,16 +992,24 @@ mod tests {
                 max_tokens: 32,
                 temperature: 0.2,
                 target_model: Some("demo".to_string()),
+                images: Vec::new(),
                 structured_output: false,
                 tool_calling: false,
             })
             .expect("response");
 
-        assert_eq!(response.backend, "openvino");
+        assert_eq!(
+            response.backend,
+            if cfg!(feature = "openvino") {
+                "openvino"
+            } else {
+                "candle"
+            }
+        );
         let prepared = &engine.runtime_snapshot().model_pool.prepared_models;
         assert_eq!(prepared.len(), 1);
         assert_eq!(prepared[0].model_name, "demo");
-        assert_eq!(prepared[0].backend, "openvino");
+        assert_eq!(prepared[0].backend, response.backend);
         assert!(engine.runtime_snapshot().model_pool.resident_memory_bytes > 0);
     }
 
@@ -640,6 +1026,7 @@ mod tests {
                 max_tokens: 1,
                 temperature: 0.0,
                 target_model: Some("demo".to_string()),
+                images: Vec::new(),
                 structured_output: false,
                 tool_calling: false,
             })
@@ -650,6 +1037,45 @@ mod tests {
             engine.runtime_snapshot().model_pool.prepared_models.len(),
             1
         );
+    }
+
+    #[test]
+    fn prepare_materializes_tiered_offload_runtime_for_disk_backed_models() {
+        let mut config = EngineConfig::default();
+        config.tiered_offload.spill_threshold_bytes = Some(1);
+        config.tiered_offload.max_disk_bytes = Some(16 * 1024 * 1024);
+        config.tiered_offload.prefetch_window_bytes = Some(512 * 1024);
+
+        let mut engine = InferenceEngine::builder()
+            .config(config)
+            .model(demo_model(
+                "oversized",
+                40 * 1024 * 1024 * 1024,
+                20_000_000_000,
+            ))
+            .build()
+            .expect("engine");
+
+        engine
+            .prepare(SessionRequest {
+                prompt: "warmup".to_string(),
+                max_tokens: 1,
+                temperature: 0.0,
+                target_model: Some("oversized".to_string()),
+                images: Vec::new(),
+                structured_output: false,
+                tool_calling: false,
+            })
+            .expect("prepared");
+
+        let snapshot = engine.runtime_snapshot();
+        let runtime = snapshot
+            .tiered_offload_runtime
+            .expect("tiered offload runtime snapshot");
+        assert_eq!(runtime.sessions.len(), 1);
+        assert_eq!(runtime.sessions[0].model_name, "oversized");
+        assert!(runtime.sessions[0].mapped_bytes > 0);
+        assert!(runtime.sessions[0].weights_bytes > 0);
     }
 
     #[test]
@@ -665,6 +1091,7 @@ mod tests {
                 max_tokens: 1,
                 temperature: 0.0,
                 target_model: Some("demo".to_string()),
+                images: Vec::new(),
                 structured_output: false,
                 tool_calling: false,
             })
@@ -732,6 +1159,7 @@ mod tests {
                 max_tokens: 8,
                 temperature: 0.2,
                 target_model: None,
+                images: Vec::new(),
                 structured_output: false,
                 tool_calling: false,
             })
@@ -759,6 +1187,7 @@ mod tests {
                 max_tokens: 8,
                 temperature: 0.2,
                 target_model: Some("tiny".to_string()),
+                images: Vec::new(),
                 structured_output: false,
                 tool_calling: false,
             })
@@ -797,6 +1226,7 @@ mod tests {
                 max_tokens: 256,
                 temperature: 0.2,
                 target_model: None,
+                images: Vec::new(),
                 structured_output: false,
                 tool_calling: false,
             })

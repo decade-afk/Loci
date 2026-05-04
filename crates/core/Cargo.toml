@@ -6,19 +6,28 @@ license.workspace = true
 authors.workspace = true
 
 [features]
-default = ["openvino", "power-aware", "tiered-offload", "paged-kv"]
+default = ["candle", "gguf", "kernels-llama", "power-aware", "tiered-offload", "paged-kv"]
 openvino = ["dep:loci-backend-openvino"]
 candle = ["dep:loci-backend-candle"]
+gguf = ["dep:loci-gguf"]
+kernels-llama = ["dep:loci-kernels-llama", "candle"]
 tiered-offload = ["dep:loci-tiered-offload"]
 paged-kv = ["dep:loci-paged-kv"]
 power-aware = []
 dynamic-routing = []
+mobile = []
+neon = []
+coreml = []
+qnn = []
 
 [dependencies]
 loci-protocol = { path = "../protocol" }
 loci-backend-openvino = { path = "../backend-openvino", optional = true }
 loci-backend-candle = { path = "../backend-candle", optional = true }
+loci-gguf = { path = "../gguf", optional = true }
+loci-kernels-llama = { path = "../kernels-llama", optional = true }
 loci-tiered-offload = { path = "../tiered-offload", optional = true }
 loci-paged-kv = { path = "../paged-kv", optional = true }
 serde.workspace = true
+sysinfo = "0.33"
 thiserror.workspace = true

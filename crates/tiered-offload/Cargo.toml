@@ -7,3 +7,5 @@ authors.workspace = true
 
 [dependencies]
 loci-protocol = { path = "../protocol" }
+memmap2 = "0.9"
+thiserror.workspace = true

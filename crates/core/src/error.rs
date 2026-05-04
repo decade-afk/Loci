@@ -1,5 +1,8 @@
+//! Error types used by the Loci core runtime.
+
 use thiserror::Error;
 
+/// Enumerates the user-visible orchestration failures returned by `loci-core`.
 #[derive(Debug, Error)]
 pub enum LociError {
     #[error("no backend is available for the current build")]
@@ -16,4 +19,5 @@ pub enum LociError {
     InvalidRequest(String),
 }
 
+/// Standard result alias used throughout the core crate.
 pub type Result<T> = std::result::Result<T, LociError>;

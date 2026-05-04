@@ -1,3 +1,5 @@
+//! Internal registry for models, aliases, prepared sessions, and residency state.
+
 use loci_protocol::{ModelDescriptor, PreparedModel};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -22,6 +24,7 @@ impl ModelEntry {
     }
 }
 
+/// Maintains registered models together with residency and prepared-session metadata.
 #[derive(Debug, Clone)]
 pub struct ModelRegistry {
     entries: Vec<ModelEntry>,
@@ -31,6 +34,7 @@ pub struct ModelRegistry {
 }
 
 impl ModelRegistry {
+    /// Creates a registry and marks the first `max_loaded_models` as resident.
     pub fn new(
         models: Vec<ModelDescriptor>,
         max_loaded_models: Option<usize>,
@@ -54,6 +58,7 @@ impl ModelRegistry {
         }
     }
 
+    /// Returns the registered model descriptors in insertion order.
     pub fn descriptors(&self) -> Vec<ModelDescriptor> {
         self.entries
             .iter()
@@ -61,10 +66,12 @@ impl ModelRegistry {
             .collect()
     }
 
+    /// Returns the number of registered models.
     pub fn model_count(&self) -> usize {
         self.entries.len()
     }
 
+    /// Finds a model by its exact registered name.
     pub fn find(&self, name: &str) -> Option<&ModelDescriptor> {
         self.entries
             .iter()
@@ -72,6 +79,7 @@ impl ModelRegistry {
             .map(|entry| &entry.descriptor)
     }
 
+    /// Resolves a user-supplied name through aliases and fuzzy matching.
     pub fn resolve_name(&self, name: &str) -> Option<String> {
         let alias_key = name.to_ascii_lowercase();
         let resolved = self
@@ -85,6 +93,7 @@ impl ModelRegistry {
             .or_else(|| self.find_contains_name(resolved))
     }
 
+    /// Registers or replaces a model descriptor.
     pub fn register(&mut self, model: ModelDescriptor) {
         if let Some(existing) = self
             .entries
@@ -99,29 +108,40 @@ impl ModelRegistry {
         self.entries.push(ModelEntry::new(model, false));
     }
 
+    /// Returns the configured alias map.
     pub fn aliases(&self) -> HashMap<String, String> {
         self.aliases.clone()
     }
 
+    /// Registers an alias using case-insensitive lookup semantics.
     pub fn register_alias(&mut self, alias: impl Into<String>, target: impl Into<String>) {
         self.aliases
             .insert(alias.into().to_ascii_lowercase(), target.into());
     }
 
+    /// Removes an alias if present.
     pub fn remove_alias(&mut self, alias: &str) -> bool {
         self.aliases.remove(&alias.to_ascii_lowercase()).is_some()
     }
 
+    /// Updates the model keep-alive timeout used for eviction.
     pub fn set_keep_alive_secs(&mut self, keep_alive_secs: u64) {
         self.keep_alive_secs = keep_alive_secs;
     }
 
+    /// Updates the maximum number of resident models allowed at once.
+    pub fn set_max_loaded_models(&mut self, max_loaded_models: Option<usize>) {
+        self.max_loaded_models = max_loaded_models;
+    }
+
+    /// Unregisters a model by exact name.
     pub fn unregister(&mut self, name: &str) -> bool {
         let previous_len = self.entries.len();
         self.entries.retain(|entry| entry.descriptor.name != name);
         self.entries.len() != previous_len
     }
 
+    /// Drops the resident and prepared state for a model without unregistering it.
     pub fn evict(&mut self, name: &str) -> bool {
         let Some(entry) = self
             .entries
@@ -138,6 +158,7 @@ impl ModelRegistry {
         changed
     }
 
+    /// Evicts resident models whose keep-alive deadline has elapsed.
     pub fn evict_expired(&mut self) -> Vec<String> {
         if self.keep_alive_secs == 0 {
             return Vec::new();
@@ -165,6 +186,7 @@ impl ModelRegistry {
         expired
     }
 
+    /// Marks a model as resident and refreshes its last-used timestamp.
     pub fn touch(&mut self, name: &str) -> bool {
         let Some(entry) = self
             .entries
@@ -179,6 +201,7 @@ impl ModelRegistry {
         true
     }
 
+    /// Returns a prepared session that matches the model, backend, and session key.
     pub fn prepared(&self, name: &str, backend: &str, session_key: &str) -> Option<PreparedModel> {
         self.entries
             .iter()
@@ -195,6 +218,7 @@ impl ModelRegistry {
             .and_then(|entry| entry.prepared.clone())
     }
 
+    /// Stores prepared backend state for a model and marks it resident.
     pub fn set_prepared(&mut self, prepared: PreparedModel) {
         if let Some(entry) = self
             .entries
@@ -207,6 +231,7 @@ impl ModelRegistry {
         }
     }
 
+    /// Lists resident models in registry order.
     pub fn resident_models(&self) -> Vec<String> {
         self.entries
             .iter()
@@ -215,6 +240,7 @@ impl ModelRegistry {
             .collect()
     }
 
+    /// Lists all prepared backend sessions currently cached by the registry.
     pub fn prepared_models(&self) -> Vec<PreparedModel> {
         self.entries
             .iter()

@@ -1,7 +1,10 @@
+//! Runtime configuration for the core orchestration layer.
+
 use loci_protocol::{PagedKvConfig, RoutingConfig, TieredOffloadConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Collects the configuration knobs that shape routing, planning, and residency.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineConfig {
     pub routing: RoutingConfig,
@@ -12,6 +15,7 @@ pub struct EngineConfig {
 }
 
 impl Default for EngineConfig {
+    /// Builds a configuration suitable for the default single-node demo runtime.
     fn default() -> Self {
         Self {
             routing: RoutingConfig::default(),

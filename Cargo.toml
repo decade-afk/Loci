@@ -2,17 +2,24 @@
 members = [
     "crates/protocol",
     "crates/core",
+    "crates/sdk",
+    "crates/gguf",
+    "crates/kernels-llama",
     "crates/backend-openvino",
+    "crates/backend-openvino-bridge",
     "crates/backend-candle",
     "crates/tiered-offload",
     "crates/paged-kv",
     "crates/cli",
     "crates/server",
+    "examples/embedded-pet",
+    "examples/sdk-local",
+    "examples/sdk-service",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 authors = ["o-dream"]

@@ -1,0 +1,17 @@
+[package]
+name = "embedded-local"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+default = ["candle", "gguf", "kernels-llama"]
+candle = ["loci-core/candle"]
+gguf = ["loci-core/gguf"]
+kernels-llama = ["loci-core/kernels-llama"]
+openvino = ["loci-core/openvino"]
+
+[dependencies]
+loci-core = { path = "../../crates/core" }
+anyhow.workspace = true

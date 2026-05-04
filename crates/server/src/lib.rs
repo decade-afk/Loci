@@ -1,6 +1,10 @@
 use anyhow::Context;
+#[cfg(feature = "gguf")]
+use loci_core::{read_gguf_metadata_summary, resolve_gguf_architecture};
 use loci_core::{InferenceEngine, LociError};
-use loci_protocol::{ModelDescriptor, SessionRequest, TieredOffloadProfile};
+use loci_protocol::{
+    ImageInput, ModelDescriptor, RoutingStrategy, SessionRequest, TieredOffloadProfile,
+};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -49,6 +53,23 @@ struct PrewarmModelRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct InspectModelRequest {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HttpImageInput {
+    #[serde(default)]
+    path: Option<PathBuf>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    data_base64: Option<String>,
+    #[serde(default)]
+    media_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RegisterAliasRequest {
     alias: String,
     target: String,
@@ -76,6 +97,16 @@ struct UpdatePlannerConfigRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct UpdateRoutingConfigRequest {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    strategy: Option<RoutingStrategy>,
+    #[serde(default)]
+    max_loaded_models: Option<Option<usize>>,
+}
+
+#[derive(Debug, Deserialize)]
 struct InferenceHttpRequest {
     prompt: String,
     #[serde(default = "default_max_tokens")]
@@ -85,9 +116,13 @@ struct InferenceHttpRequest {
     #[serde(default)]
     target_model: Option<String>,
     #[serde(default)]
+    images: Vec<HttpImageInput>,
+    #[serde(default)]
     structured_output: bool,
     #[serde(default)]
     tool_calling: bool,
+    #[serde(default)]
+    stream: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,6 +134,8 @@ struct PlanHttpRequest {
     temperature: f32,
     #[serde(default)]
     target_model: Option<String>,
+    #[serde(default)]
+    images: Vec<HttpImageInput>,
     #[serde(default)]
     structured_output: bool,
     #[serde(default)]
@@ -113,6 +150,8 @@ struct CompletionRequest {
     max_tokens: u32,
     #[serde(default = "default_temperature")]
     temperature: f32,
+    #[serde(default)]
+    stream: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,12 +162,42 @@ struct ChatCompletionsRequest {
     max_tokens: u32,
     #[serde(default = "default_temperature")]
     temperature: f32,
+    #[serde(default)]
+    stream: bool,
 }
 
 #[derive(Debug, Deserialize)]
 struct ChatMessage {
     role: String,
-    content: String,
+    content: ChatMessageContent,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ChatMessageContent {
+    Text(String),
+    Parts(Vec<ChatContentPart>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ChatContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ChatImageReference },
+    InputText { text: String },
+    InputImage { image_url: ChatImageReference },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ChatImageReference {
+    String(String),
+    Object {
+        url: String,
+        #[serde(default)]
+        #[serde(rename = "detail")]
+        _detail: Option<String>,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -241,6 +310,18 @@ fn handle_request(engine: &mut InferenceEngine, request: &str) -> String {
                 .collect(),
         });
     }
+    if request_line.starts_with("GET /v1/models/inspect ") {
+        return serialize_response(&engine.inspect_models());
+    }
+    if request_line.starts_with("POST /v1/models/inspect ") {
+        return match serde_json::from_str::<InspectModelRequest>(body) {
+            Ok(payload) => match engine.inspect_model(&payload.name) {
+                Ok(report) => serialize_response(&report),
+                Err(error) => map_error(error),
+            },
+            Err(error) => bad_request(&format!("invalid model inspection payload: {error}")),
+        };
+    }
     if request_line.starts_with("POST /v1/models/register ") {
         return match serde_json::from_str::<RegisterModelRequest>(body) {
             Ok(payload) => {
@@ -305,18 +386,51 @@ fn handle_request(engine: &mut InferenceEngine, request: &str) -> String {
             Err(error) => bad_request(&format!("invalid planner config payload: {error}")),
         };
     }
+    if request_line.starts_with("POST /v1/config/routing ") {
+        return match serde_json::from_str::<UpdateRoutingConfigRequest>(body) {
+            Ok(payload) => match apply_routing_config(engine, payload) {
+                Ok(()) => serialize_response(&engine.runtime_snapshot().routing),
+                Err(error) => map_error(error),
+            },
+            Err(error) => bad_request(&format!("invalid routing config payload: {error}")),
+        };
+    }
     if request_line.starts_with("POST /v1/plan ") {
         return match serde_json::from_str::<PlanHttpRequest>(body) {
-            Ok(payload) => match engine.plan(&payload.into_request()) {
-                Ok(plan) => serialize_response(&plan),
-                Err(error) => map_error(error),
+            Ok(payload) => match payload.into_request() {
+                Ok(request) => match engine.plan(&request) {
+                    Ok(plan) => serialize_response(&plan),
+                    Err(error) => map_error(error),
+                },
+                Err(error) => bad_request(&error),
             },
             Err(error) => bad_request(&format!("invalid plan payload: {error}")),
         };
     }
     if request_line.starts_with("POST /v1/inference ") {
         return match serde_json::from_str::<InferenceHttpRequest>(body) {
-            Ok(payload) => respond_inference(engine, payload.into_request()),
+            Ok(payload) => {
+                let stream = payload.stream;
+                match payload.into_request() {
+                    Ok(request) => {
+                        if stream {
+                            respond_inference_stream(engine, request)
+                        } else {
+                            respond_inference(engine, request)
+                        }
+                    }
+                    Err(error) => bad_request(&error),
+                }
+            }
+            Err(error) => bad_request(&format!("invalid inference payload: {error}")),
+        };
+    }
+    if request_line.starts_with("POST /v1/inference/stream ") {
+        return match serde_json::from_str::<InferenceHttpRequest>(body) {
+            Ok(payload) => match payload.into_request() {
+                Ok(request) => respond_inference_stream(engine, request),
+                Err(error) => bad_request(&error),
+            },
             Err(error) => bad_request(&format!("invalid inference payload: {error}")),
         };
     }
@@ -328,21 +442,35 @@ fn handle_request(engine: &mut InferenceEngine, request: &str) -> String {
                     max_tokens: payload.max_tokens,
                     temperature: payload.temperature,
                     target_model: payload.model,
+                    images: Vec::new(),
                     structured_output: false,
                     tool_calling: false,
                 };
                 match engine.infer(request) {
-                    Ok(response) => serialize_response(&OpenAiCompletionResponse {
-                        id: format!("cmpl-{}", unix_timestamp()),
-                        object: "text_completion",
-                        created: unix_timestamp(),
-                        model: response.model,
-                        choices: vec![OpenAiCompletionChoice {
-                            text: response.text,
-                            index: 0,
-                            finish_reason: "stop",
-                        }],
-                    }),
+                    Ok(response) => {
+                        let response_id = format!("cmpl-{}", unix_timestamp());
+                        let created = unix_timestamp();
+                        if payload.stream {
+                            completion_stream_response(
+                                &response_id,
+                                created,
+                                &response.model,
+                                &response.text,
+                            )
+                        } else {
+                            serialize_response(&OpenAiCompletionResponse {
+                                id: response_id,
+                                object: "text_completion",
+                                created,
+                                model: response.model,
+                                choices: vec![OpenAiCompletionChoice {
+                                    text: response.text,
+                                    index: 0,
+                                    finish_reason: "stop",
+                                }],
+                            })
+                        }
+                    }
                     Err(error) => map_error(error),
                 }
             }
@@ -352,30 +480,39 @@ fn handle_request(engine: &mut InferenceEngine, request: &str) -> String {
     if request_line.starts_with("POST /v1/chat/completions ") {
         return match serde_json::from_str::<ChatCompletionsRequest>(body) {
             Ok(payload) => {
-                let request = SessionRequest {
-                    prompt: flatten_messages(&payload.messages),
-                    max_tokens: payload.max_tokens,
-                    temperature: payload.temperature,
-                    target_model: payload.model,
-                    structured_output: false,
-                    tool_calling: false,
-                };
-                match engine.infer(request) {
-                    Ok(response) => serialize_response(&OpenAiChatCompletionResponse {
-                        id: format!("chatcmpl-{}", unix_timestamp()),
-                        object: "chat.completion",
-                        created: unix_timestamp(),
-                        model: response.model,
-                        choices: vec![OpenAiChatCompletionChoice {
-                            index: 0,
-                            message: OpenAiChatAssistantMessage {
-                                role: "assistant",
-                                content: response.text,
-                            },
-                            finish_reason: "stop",
-                        }],
-                    }),
-                    Err(error) => map_error(error),
+                let stream = payload.stream;
+                match chat_request_from_payload(payload) {
+                    Ok(request) => match engine.infer(request) {
+                        Ok(response) => {
+                            let response_id = format!("chatcmpl-{}", unix_timestamp());
+                            let created = unix_timestamp();
+                            if stream {
+                                chat_completion_stream_response(
+                                    &response_id,
+                                    created,
+                                    &response.model,
+                                    &response.text,
+                                )
+                            } else {
+                                serialize_response(&OpenAiChatCompletionResponse {
+                                    id: response_id,
+                                    object: "chat.completion",
+                                    created,
+                                    model: response.model,
+                                    choices: vec![OpenAiChatCompletionChoice {
+                                        index: 0,
+                                        message: OpenAiChatAssistantMessage {
+                                            role: "assistant",
+                                            content: response.text,
+                                        },
+                                        finish_reason: "stop",
+                                    }],
+                                })
+                            }
+                        }
+                        Err(error) => map_error(error),
+                    },
+                    Err(error) => bad_request(&error),
                 }
             }
             Err(error) => bad_request(&format!("invalid chat completion payload: {error}")),
@@ -388,6 +525,27 @@ fn handle_request(engine: &mut InferenceEngine, request: &str) -> String {
 fn respond_inference(engine: &mut InferenceEngine, request: SessionRequest) -> String {
     match engine.infer(request) {
         Ok(response) => serialize_response(&response),
+        Err(error) => map_error(error),
+    }
+}
+
+fn respond_inference_stream(engine: &mut InferenceEngine, request: SessionRequest) -> String {
+    match engine.infer(request) {
+        Ok(response) => {
+            let mut events = Vec::new();
+            for fragment in stream_fragments(&response.text) {
+                events.push(sse_event(&serde_json::json!({
+                    "type": "response.delta",
+                    "delta": fragment,
+                })));
+            }
+            events.push(sse_event(&serde_json::json!({
+                "type": "response.completed",
+                "response": response,
+            })));
+            events.push("data: [DONE]\n\n".to_string());
+            sse_response(&events.concat())
+        }
         Err(error) => map_error(error),
     }
 }
@@ -419,11 +577,101 @@ fn apply_planner_config(engine: &mut InferenceEngine, payload: UpdatePlannerConf
     }
 }
 
+fn apply_routing_config(
+    engine: &mut InferenceEngine,
+    payload: UpdateRoutingConfigRequest,
+) -> Result<(), LociError> {
+    if let Some(enabled) = payload.enabled {
+        engine.set_routing_enabled(enabled)?;
+    }
+    if let Some(strategy) = payload.strategy {
+        engine.set_routing_strategy(strategy)?;
+    }
+    if let Some(max_loaded_models) = payload.max_loaded_models {
+        engine.set_max_loaded_models(max_loaded_models);
+    }
+    Ok(())
+}
+
 fn serialize_response<T: Serialize>(value: &T) -> String {
     match serde_json::to_string(value) {
         Ok(body) => http_response("200 OK", &body),
         Err(error) => bad_request(&format!("serialization failed: {error}")),
     }
+}
+
+fn completion_stream_response(id: &str, created: u64, model: &str, text: &str) -> String {
+    let mut events = Vec::new();
+    for fragment in stream_fragments(text) {
+        events.push(sse_event(&serde_json::json!({
+            "id": id,
+            "object": "text_completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{
+                "text": fragment,
+                "index": 0,
+                "finish_reason": serde_json::Value::Null,
+            }],
+        })));
+    }
+    events.push(sse_event(&serde_json::json!({
+        "id": id,
+        "object": "text_completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{
+            "text": "",
+            "index": 0,
+            "finish_reason": "stop",
+        }],
+    })));
+    events.push("data: [DONE]\n\n".to_string());
+    sse_response(&events.concat())
+}
+
+fn chat_completion_stream_response(id: &str, created: u64, model: &str, text: &str) -> String {
+    let mut events = vec![sse_event(&serde_json::json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "role": "assistant",
+            },
+            "finish_reason": serde_json::Value::Null,
+        }],
+    }))];
+    for fragment in stream_fragments(text) {
+        events.push(sse_event(&serde_json::json!({
+            "id": id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "content": fragment,
+                },
+                "finish_reason": serde_json::Value::Null,
+            }],
+        })));
+    }
+    events.push(sse_event(&serde_json::json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {},
+            "finish_reason": "stop",
+        }],
+    })));
+    events.push("data: [DONE]\n\n".to_string());
+    sse_response(&events.concat())
 }
 
 fn map_error(error: LociError) -> String {
@@ -440,16 +688,53 @@ fn map_error(error: LociError) -> String {
     }
 }
 
-fn flatten_messages(messages: &[ChatMessage]) -> String {
+fn flatten_messages(messages: &[ChatMessage]) -> Result<(String, Vec<ImageInput>), String> {
     let mut prompt = String::new();
+    let mut images = Vec::new();
     for message in messages {
         prompt.push_str(&message.role);
         prompt.push_str(": ");
-        prompt.push_str(&message.content);
+        match &message.content {
+            ChatMessageContent::Text(text) => prompt.push_str(text),
+            ChatMessageContent::Parts(parts) => {
+                let mut first = true;
+                for part in parts {
+                    if !first {
+                        prompt.push(' ');
+                    }
+                    first = false;
+                    match part {
+                        ChatContentPart::Text { text } | ChatContentPart::InputText { text } => {
+                            prompt.push_str(text)
+                        }
+                        ChatContentPart::ImageUrl { image_url }
+                        | ChatContentPart::InputImage { image_url } => {
+                            prompt.push_str("<image>");
+                            images.push(ImageInput::Url {
+                                url: image_url.url().to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
         prompt.push_str("\n\n");
     }
     prompt.push_str("assistant:");
-    prompt
+    Ok((prompt, images))
+}
+
+fn chat_request_from_payload(payload: ChatCompletionsRequest) -> Result<SessionRequest, String> {
+    let (prompt, images) = flatten_messages(&payload.messages)?;
+    Ok(SessionRequest {
+        prompt,
+        max_tokens: payload.max_tokens,
+        temperature: payload.temperature,
+        target_model: payload.model,
+        images,
+        structured_output: false,
+        tool_calling: false,
+    })
 }
 
 fn json_response(body: &str) -> String {
@@ -465,11 +750,45 @@ fn not_found(message: &str) -> String {
 }
 
 fn http_response(status: &str, body: &str) -> String {
+    http_response_with_content_type(status, "application/json", body)
+}
+
+fn sse_response(body: &str) -> String {
+    http_response_with_content_type(status_ok(), "text/event-stream", body)
+}
+
+fn http_response_with_content_type(status: &str, content_type: &str, body: &str) -> String {
     format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
     )
+}
+
+fn status_ok() -> &'static str {
+    "200 OK"
+}
+
+fn sse_event<T: Serialize>(value: &T) -> String {
+    match serde_json::to_string(value) {
+        Ok(body) => format!("data: {body}\n\n"),
+        Err(error) => format!(
+            "data: {{\"type\":\"serialization_error\",\"message\":{}}}\n\n",
+            serde_json::to_string(&error.to_string()).unwrap_or_else(|_| "\"unknown\"".to_string())
+        ),
+    }
+}
+
+fn stream_fragments(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return vec![String::new()];
+    }
+
+    chars
+        .chunks(24)
+        .map(|chunk| chunk.iter().collect::<String>())
+        .collect()
 }
 
 fn parse_request_parts(request: &str) -> (&str, &str) {
@@ -648,41 +967,84 @@ fn unix_timestamp() -> u64 {
 
 impl RegisterModelRequest {
     fn into_model(self) -> ModelDescriptor {
+        #[cfg(feature = "gguf")]
+        let gguf_summary = if self
+            .path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.eq_ignore_ascii_case("gguf"))
+            .unwrap_or(false)
+        {
+            read_gguf_metadata_summary(&self.path).ok()
+        } else {
+            None
+        };
+
+        #[cfg(not(feature = "gguf"))]
+        let gguf_summary: Option<()> = None;
+
+        #[cfg(feature = "gguf")]
+        let inferred_architecture = gguf_summary
+            .as_ref()
+            .and_then(|summary| summary.architecture.clone())
+            .unwrap_or_else(|| self.architecture.clone());
+
+        #[cfg(not(feature = "gguf"))]
+        let inferred_architecture = self.architecture.clone();
+
+        #[cfg(feature = "gguf")]
+        let normalized_architecture = resolve_gguf_architecture(&inferred_architecture)
+            .map(|spec| spec.canonical_name.to_string())
+            .unwrap_or(inferred_architecture);
+
+        #[cfg(not(feature = "gguf"))]
+        let normalized_architecture = inferred_architecture;
+
+        #[cfg(feature = "gguf")]
+        let inferred_context_length = gguf_summary
+            .as_ref()
+            .and_then(|summary| summary.context_length);
+
+        #[cfg(not(feature = "gguf"))]
+        let inferred_context_length: Option<u32> = None;
+
         ModelDescriptor {
             name: self.name,
             path: self.path,
-            architecture: self.architecture,
+            architecture: normalized_architecture,
             memory_bytes: self.memory_bytes,
             parameter_count: self.parameter_count,
-            context_length: self.context_length,
+            context_length: self.context_length.or(inferred_context_length),
             preferred_backend: self.preferred_backend,
         }
     }
 }
 
 impl InferenceHttpRequest {
-    fn into_request(self) -> SessionRequest {
-        SessionRequest {
+    fn into_request(self) -> Result<SessionRequest, String> {
+        Ok(SessionRequest {
             prompt: self.prompt,
             max_tokens: self.max_tokens,
             temperature: self.temperature,
             target_model: self.target_model,
+            images: collect_http_images(self.images)?,
             structured_output: self.structured_output,
             tool_calling: self.tool_calling,
-        }
+        })
     }
 }
 
 impl PlanHttpRequest {
-    fn into_request(self) -> SessionRequest {
-        SessionRequest {
+    fn into_request(self) -> Result<SessionRequest, String> {
+        Ok(SessionRequest {
             prompt: self.prompt,
             max_tokens: self.max_tokens,
             temperature: self.temperature,
             target_model: self.target_model,
+            images: collect_http_images(self.images)?,
             structured_output: self.structured_output,
             tool_calling: self.tool_calling,
-        }
+        })
     }
 }
 
@@ -713,10 +1075,45 @@ impl PrewarmModelRequest {
             max_tokens: self.max_tokens,
             temperature: 0.0,
             target_model: self.model,
+            images: Vec::new(),
             structured_output: false,
             tool_calling: false,
         }
     }
+}
+
+impl HttpImageInput {
+    fn into_protocol(self) -> Result<ImageInput, String> {
+        if let Some(path) = self.path {
+            return Ok(ImageInput::Path { path });
+        }
+        if let Some(url) = self.url {
+            return Ok(ImageInput::Url { url });
+        }
+        if let Some(data_base64) = self.data_base64 {
+            return Ok(ImageInput::Base64 {
+                data_base64,
+                media_type: self.media_type,
+            });
+        }
+        Err("image input must provide one of: path, url, data_base64".to_string())
+    }
+}
+
+impl ChatImageReference {
+    fn url(&self) -> &str {
+        match self {
+            ChatImageReference::String(url) => url,
+            ChatImageReference::Object { url, _detail: _ } => url,
+        }
+    }
+}
+
+fn collect_http_images(images: Vec<HttpImageInput>) -> Result<Vec<ImageInput>, String> {
+    images
+        .into_iter()
+        .map(HttpImageInput::into_protocol)
+        .collect()
 }
 
 #[cfg(test)]
@@ -747,7 +1144,11 @@ mod tests {
             "POST /v1/plan HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"prompt\":\"hello\",\"max_tokens\":32,\"target_model\":\"demo\"}",
         );
 
-        assert!(response.contains("\"backend\":\"openvino\""));
+        assert!(response.contains(if cfg!(feature = "openvino") {
+            "\"backend\":\"openvino\""
+        } else {
+            "\"backend\":\"candle\""
+        }));
         assert!(response.contains("\"selected_model\":\"demo\""));
         assert!(response.contains("\"placements\""));
     }
@@ -790,7 +1191,27 @@ mod tests {
         );
 
         assert!(response.contains("\"model_name\":\"demo\""));
-        assert!(response.contains("\"backend\":\"openvino\""));
+        assert!(response.contains(if cfg!(feature = "openvino") {
+            "\"backend\":\"openvino\""
+        } else {
+            "\"backend\":\"candle\""
+        }));
+    }
+
+    #[test]
+    fn inspect_routes_return_model_readiness_reports() {
+        let mut engine = engine_with_model();
+
+        let list_response = handle_request(&mut engine, "GET /v1/models/inspect HTTP/1.1\r\n\r\n");
+        assert!(list_response.contains("\"model_name\":\"demo\""));
+        assert!(list_response.contains("\"backend_readiness\""));
+
+        let single_response = handle_request(
+            &mut engine,
+            "POST /v1/models/inspect HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"name\":\"demo\"}",
+        );
+        assert!(single_response.contains("\"model_name\":\"demo\""));
+        assert!(single_response.contains("\"ready_for_inference\""));
     }
 
     #[test]
@@ -830,6 +1251,194 @@ mod tests {
             "POST /v1/config/aliases/remove HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"alias\":\"tiny\"}",
         );
         assert!(remove_response.contains("\"removed\":true"));
+    }
+
+    #[test]
+    fn routing_config_route_updates_model_pool_limits() {
+        let mut engine = InferenceEngine::builder()
+            .config(EngineConfig::default())
+            .model(ModelDescriptor {
+                name: "demo".to_string(),
+                path: PathBuf::from("D:/models/demo.gguf"),
+                architecture: "llama".to_string(),
+                memory_bytes: Some(2 * 1024 * 1024 * 1024),
+                parameter_count: Some(1_000_000_000),
+                context_length: Some(8192),
+                preferred_backend: None,
+            })
+            .model(ModelDescriptor {
+                name: "demo-2".to_string(),
+                path: PathBuf::from("D:/models/demo-2.gguf"),
+                architecture: "llama".to_string(),
+                memory_bytes: Some(2 * 1024 * 1024 * 1024),
+                parameter_count: Some(2_000_000_000),
+                context_length: Some(8192),
+                preferred_backend: None,
+            })
+            .build()
+            .expect("engine");
+
+        let routing_response = handle_request(
+            &mut engine,
+            "POST /v1/config/routing HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"max_loaded_models\":1}",
+        );
+
+        assert!(routing_response.contains("\"max_loaded_models\":1"));
+        assert_eq!(
+            engine.runtime_snapshot().model_pool.resident_models.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn inference_stream_route_returns_sse_events() {
+        let mut engine = engine_with_model();
+        let response = handle_request(
+            &mut engine,
+            "POST /v1/inference/stream HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"prompt\":\"hello stream\",\"max_tokens\":16,\"target_model\":\"demo\"}",
+        );
+
+        assert!(response.contains("Content-Type: text/event-stream"));
+        assert!(response.contains("\"type\":\"response.delta\""));
+        assert!(response.contains("\"type\":\"response.completed\""));
+        assert!(response.contains("data: [DONE]"));
+    }
+
+    #[test]
+    fn completion_route_supports_sse_streaming() {
+        let mut engine = engine_with_model();
+        let response = handle_request(
+            &mut engine,
+            "POST /v1/completions HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"model\":\"demo\",\"prompt\":\"hello completion stream\",\"stream\":true}",
+        );
+
+        assert!(response.contains("Content-Type: text/event-stream"));
+        assert!(response.contains("\"object\":\"text_completion.chunk\""));
+        assert!(response.contains("\"finish_reason\":\"stop\""));
+        assert!(response.contains("data: [DONE]"));
+    }
+
+    #[test]
+    fn chat_completion_route_supports_sse_streaming() {
+        let mut engine = engine_with_model();
+        let response = handle_request(
+            &mut engine,
+            "POST /v1/chat/completions HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"model\":\"demo\",\"messages\":[{\"role\":\"user\",\"content\":\"hello chat stream\"}],\"stream\":true}",
+        );
+
+        assert!(response.contains("Content-Type: text/event-stream"));
+        assert!(response.contains("\"object\":\"chat.completion.chunk\""));
+        assert!(response.contains("\"role\":\"assistant\""));
+        assert!(response.contains("data: [DONE]"));
+    }
+
+    #[test]
+    fn inference_request_collects_explicit_image_inputs() {
+        let request = InferenceHttpRequest {
+            prompt: "describe".to_string(),
+            max_tokens: 32,
+            temperature: 0.2,
+            target_model: Some("demo".to_string()),
+            images: vec![
+                HttpImageInput {
+                    path: Some(PathBuf::from("D:/images/a.png")),
+                    url: None,
+                    data_base64: None,
+                    media_type: None,
+                },
+                HttpImageInput {
+                    path: None,
+                    url: Some("file:///D:/images/b.png".to_string()),
+                    data_base64: None,
+                    media_type: None,
+                },
+            ],
+            structured_output: false,
+            tool_calling: false,
+            stream: false,
+        }
+        .into_request()
+        .expect("request");
+
+        assert_eq!(request.images.len(), 2);
+        assert!(matches!(request.images[0], ImageInput::Path { .. }));
+        assert!(matches!(request.images[1], ImageInput::Url { .. }));
+    }
+
+    #[test]
+    fn chat_request_extracts_images_from_openai_style_content_parts() {
+        let request = chat_request_from_payload(ChatCompletionsRequest {
+            model: Some("demo".to_string()),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: ChatMessageContent::Parts(vec![
+                    ChatContentPart::Text {
+                        text: "describe".to_string(),
+                    },
+                    ChatContentPart::ImageUrl {
+                        image_url: ChatImageReference::String(
+                            "file:///D:/images/example.png".to_string(),
+                        ),
+                    },
+                ]),
+            }],
+            max_tokens: 48,
+            temperature: 0.1,
+            stream: false,
+        })
+        .expect("request");
+
+        assert!(request.prompt.contains("user: describe <image>"));
+        assert_eq!(request.images.len(), 1);
+        assert!(matches!(request.images[0], ImageInput::Url { .. }));
+    }
+
+    #[cfg(feature = "dynamic-routing")]
+    #[test]
+    fn routing_config_route_updates_dynamic_routing_settings() {
+        let mut engine = InferenceEngine::builder()
+            .config(EngineConfig::default())
+            .model(ModelDescriptor {
+                name: "small".to_string(),
+                path: PathBuf::from("D:/models/small.gguf"),
+                architecture: "llama".to_string(),
+                memory_bytes: Some(2 * 1024 * 1024 * 1024),
+                parameter_count: Some(1_000_000_000),
+                context_length: Some(8192),
+                preferred_backend: None,
+            })
+            .model(ModelDescriptor {
+                name: "large".to_string(),
+                path: PathBuf::from("D:/models/large.gguf"),
+                architecture: "llama".to_string(),
+                memory_bytes: Some(8 * 1024 * 1024 * 1024),
+                parameter_count: Some(8_000_000_000),
+                context_length: Some(8192),
+                preferred_backend: None,
+            })
+            .build()
+            .expect("engine");
+
+        let routing_response = handle_request(
+            &mut engine,
+            "POST /v1/config/routing HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"enabled\":true,\"strategy\":\"power_aware\",\"max_loaded_models\":2}",
+        );
+
+        assert!(routing_response.contains("\"enabled\":true"));
+        assert!(routing_response.contains("\"strategy\":\"power_aware\""));
+        assert!(engine.runtime_snapshot().features.dynamic_routing);
+    }
+
+    #[cfg(not(feature = "dynamic-routing"))]
+    #[test]
+    fn routing_config_route_rejects_enabling_dynamic_routing_without_feature() {
+        let mut engine = engine_with_model();
+        let response = handle_request(
+            &mut engine,
+            "POST /v1/config/routing HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"enabled\":true}",
+        );
+
+        assert!(response.contains("dynamic routing is unavailable"));
     }
 
     #[test]
