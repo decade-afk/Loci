@@ -4,6 +4,11 @@ use loci_sdk::{
 };
 use loci_sdk::loci_core::TieredOffloadProfile;
 
+const SPILL_THRESHOLD_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_DISK_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const PREFETCH_WINDOW_BYTES: u64 = 128 * 1024 * 1024;
+const KV_BLOCK_SIZE_TOKENS: u32 = 32;
+
 fn main() -> anyhow::Result<()> {
     let model_path = std::env::args()
         .nth(1)
@@ -11,10 +16,10 @@ fn main() -> anyhow::Result<()> {
 
     let mut loci = Loci::builder()
         .tiered_offload_profile(TieredOffloadProfile::DiskHeavy)
-        .spill_threshold_bytes(512 * 1024 * 1024)
-        .max_disk_bytes(64 * 1024 * 1024 * 1024)
-        .prefetch_window_bytes(128 * 1024 * 1024)
-        .kv_block_size_tokens(32)
+        .spill_threshold_bytes(SPILL_THRESHOLD_BYTES)
+        .max_disk_bytes(MAX_DISK_BYTES)
+        .prefetch_window_bytes(PREFETCH_WINDOW_BYTES)
+        .kv_block_size_tokens(KV_BLOCK_SIZE_TOKENS)
         .kv_types("q8_0", "q4_0")
         .build()?;
     let registered =
@@ -33,6 +38,13 @@ fn main() -> anyhow::Result<()> {
         "inspection: ready={} recommended_backend={:?}",
         inspection.ready_for_inference, inspection.recommended_backend
     );
+    println!(
+        "planner: profile=disk_heavy spill_threshold_bytes={} max_disk_bytes={} prefetch_window_bytes={} kv_block_size_tokens={} kv_types=q8_0/q4_0",
+        SPILL_THRESHOLD_BYTES,
+        MAX_DISK_BYTES,
+        PREFETCH_WINDOW_BYTES,
+        KV_BLOCK_SIZE_TOKENS
+    );
     println!("prepared session: {}", prepared.session_key);
     println!("prepared residency: {:?}", prepared.residency);
     println!(
@@ -42,8 +54,17 @@ fn main() -> anyhow::Result<()> {
     println!("backend: {}", response.backend);
     println!("model: {}", response.model);
     println!("text: {}", response.text);
-    let snapshot = loci.runtime_snapshot();
-    if let Some(tiered) = snapshot.tiered_offload_runtime {
+    let runtime_config = loci.runtime_config();
+    println!(
+        "runtime config: profile={:?} spill_threshold_bytes={:?} max_disk_bytes={:?} kv_block_size_tokens={} kv_type_k={} kv_type_v={}",
+        runtime_config.tiered_offload_profile,
+        runtime_config.spill_threshold_bytes,
+        runtime_config.max_disk_bytes,
+        runtime_config.kv_block_size_tokens,
+        runtime_config.kv_type_k,
+        runtime_config.kv_type_v
+    );
+    if let Some(tiered) = loci.tiered_offload_runtime() {
         println!("spill root: {}", tiered.root_dir);
         println!("total spill bytes: {}", tiered.total_spill_bytes);
         println!("total prefetched bytes: {}", tiered.total_prefetched_bytes);

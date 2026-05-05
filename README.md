@@ -1,83 +1,91 @@
 # Loci
 
-Loci is a Rust inference infrastructure for on-device and edge AI.
+Loci is a Rust heterogeneous inference runtime for teams that need one runtime model across edge devices, local hosts, and server deployments.
 
-It is built for applications that need to run models locally, choose between heterogeneous compute targets such as `CPU`, `GPU`, `NPU`, and `Disk`, and expose the same runtime either as an embedded SDK or as a standalone local service.
+It is designed to be used in two ways from the same runtime core:
 
-Loci is not tied to a single app category. A desktop companion, a native productivity tool, an offline assistant, a robotics controller, or a vertical edge product can all use the same runtime core.
+- as an embeddable Rust SDK for in-process inference
+- as a standalone service for process-isolated local or server-side integration
+
+The runtime plans heterogeneous execution across `CPU`, `GPU`, `NPU`, and `Disk`, prepares model assets, and exposes the same model/runtime surface through SDK, CLI, and HTTP entrypoints.
 
 ## Why Loci
 
-Modern local AI applications face the same set of problems:
+AI runtime teams usually have to solve the same problems repeatedly:
 
-- model files come from different ecosystems
-- hardware capabilities differ across Intel, Apple Silicon, ARM, and mobile devices
-- memory is limited, especially on laptops and phones
-- one application may need an SDK, while another needs a local service boundary
+- model assets come from different ecosystems and packaging styles
+- hardware availability changes across desktops, laptops, mobile-class devices, edge hosts, and servers
+- memory pressure forces weights, KV cache, or activations to spill or stage from disk
+- some products want direct embedding while others need a service boundary
 
-Loci addresses that by separating the control plane from execution backends.
+Loci keeps that logic in one runtime instead of pushing it into each application.
 
-The core runtime plans placement, prepares model assets, manages readiness, and exposes a stable integration surface. Backends execute the plan using the best available path for the host device.
+## Current Runtime Shape
 
-## Built For Local Integration
+Today the repository is organized around:
 
-Loci supports two product shapes from the same runtime:
+- `loci-sdk` for embeddable in-process use
+- `loci-server` and `loci-cli` for standalone service and command-line use
+- `loci-core` for planning, readiness, model preparation, and runtime snapshots
+- `loci-backend-candle` as the default portable Rust backend shape
+- optional `loci-backend-openvino` acceleration for Intel-oriented deployments
 
-- an embeddable Rust SDK for direct in-process inference
-- a standalone local AI service for applications that prefer process isolation
-
-That keeps integration flexible without forcing every application into an HTTP-only model.
-
-## Architecture At A Glance
-
-Loci is organized around three ideas:
-
-- `GGUF`-first model ingestion for practical edge deployment
-- `Candle` as the default portable Rust execution path
-- optional vendor backends such as `OpenVINO` for platform-specific acceleration
-
-On top of that, Loci adds the part most local inference stacks leave to each application: a planner that can reason about heterogeneous execution and tiered offload across `CPU`, `GPU`, `NPU`, and `Disk`.
-
-## What You Can Build
-
-- desktop and native applications that embed local inference directly
-- local AI services that expose OpenAI-style APIs without depending on the cloud
-- edge products that need hardware-aware execution under tight memory limits
-- products that want one runtime model across SDK and service deployment styles
-
-## Core Capabilities
-
-- `GGUF`-first local model support for practical edge deployment
-- `Candle` as the default portable Rust execution path
-- optional `OpenVINO` acceleration for Intel platforms
-- model registration, inspection, and readiness checks
-- planner-driven heterogeneous execution across `CPU`, `GPU`, `NPU`, and `Disk`
-- one runtime that can be embedded directly or exposed as a local service
+The current examples and docs use the planner's disk-oriented path explicitly: `TieredOffloadProfile::DiskHeavy` with tuned spill and prefetch settings for memory-constrained heterogeneous execution.
 
 ## Quick Start
 
-Use Loci from the command line:
+Run a one-shot inference request from the CLI:
 
 ```bash
 cargo run -p loci-cli -- \
   --model-path D:/models/demo.gguf \
   --model-name demo \
+  --offload-profile disk_heavy \
+  --spill-threshold-bytes 536870912 \
+  --max-disk-bytes 68719476736 \
+  --prefetch-window-bytes 134217728 \
+  --block-size-tokens 32 \
+  --type-kv q4_0 \
   --prompt "Explain the current execution plan."
+```
+
+Run the same runtime as a standalone local or server-facing service:
+
+```bash
+cargo run -p loci-cli -- \
+  --model-path D:/models/demo.gguf \
+  --model-name demo \
+  --offload-profile disk_heavy \
+  --spill-threshold-bytes 536870912 \
+  --max-disk-bytes 68719476736 \
+  --prefetch-window-bytes 134217728 \
+  --block-size-tokens 32 \
+  --type-kv q4_0 \
+  --server-bind 127.0.0.1:8080
 ```
 
 Embed Loci directly in a Rust application:
 
 ```rust
-use loci_sdk::{Loci, LocalModelRegistrationRequest, TextGenerationRequest};
+use loci_sdk::loci_core::TieredOffloadProfile;
+use loci_sdk::{
+    LocalModelRegistrationRequest, Loci, ModelPreparationRequest, TextGenerationRequest,
+};
 
-let mut loci = Loci::builder().build()?;
+let mut loci = Loci::builder()
+    .tiered_offload_profile(TieredOffloadProfile::DiskHeavy)
+    .spill_threshold_bytes(512 * 1024 * 1024)
+    .max_disk_bytes(64 * 1024 * 1024 * 1024)
+    .prefetch_window_bytes(128 * 1024 * 1024)
+    .kv_block_size_tokens(32)
+    .kv_types("q8_0", "q4_0")
+    .build()?;
 
 loci.register_model(
-    LocalModelRegistrationRequest::new(
-        "D:/Code/Loci/tmp/models/qwen2.5-0.5b-instruct-gguf-ms/qwen2.5-0.5b-instruct-q4_0.gguf",
-    )
-    .name("embedded-demo"),
+    LocalModelRegistrationRequest::new("D:/models/demo.gguf").name("embedded-demo"),
 )?;
+
+loci.prepare_model(ModelPreparationRequest::new().model("embedded-demo"))?;
 
 let response = loci.generate_text(
     TextGenerationRequest::new("Reply in one short friendly sentence.")
@@ -87,55 +95,40 @@ let response = loci.generate_text(
 )?;
 ```
 
-Run the SDK-local example:
+## Examples
 
-```bash
-cargo run -p sdk-local --features openvino -- \
-  D:/Code/Loci/tmp/models/qwen2.5-0.5b-instruct-gguf-ms/qwen2.5-0.5b-instruct-q4_0.gguf
-```
+Use the current example crates when you want the exact repo-supported shapes:
 
-Run Loci as a service from the same SDK facade:
+- `cargo run -p sdk-local --features openvino -- <model-path>` embeds `loci-sdk` directly and prints the tiered-offload runtime snapshot.
+- `cargo run -p sdk-service --features openvino -- <model-path> 127.0.0.1:18081` starts the standalone local service from the SDK facade.
+- `cargo run -p embedded-local --features openvino -- <model-path>` uses `loci-core` directly from [`examples/embedded-pet`](./examples/embedded-pet).
 
-```rust
-use loci_sdk::{LocalModelRegistrationRequest, Loci, LociServiceConfig};
+The two in-process examples are intentionally configured with:
 
-let mut loci = Loci::builder().build()?;
-
-loci.register_model(
-    LocalModelRegistrationRequest::new(
-        "D:/Code/Loci/tmp/models/qwen2.5-0.5b-instruct-gguf-ms/qwen2.5-0.5b-instruct-q4_0.gguf",
-    )
-    .name("service-demo"),
-)?;
-
-loci.run_service(LociServiceConfig::with_host_port("127.0.0.1", 8080))?;
-```
-
-Or start the local service from the CLI:
-
-```bash
-cargo run -p loci-cli -- \
-  --model-path D:/models/demo.gguf \
-  --model-name demo \
-  --server-bind 127.0.0.1:8080
-```
+- `TieredOffloadProfile::DiskHeavy`
+- `spill_threshold_bytes = 512 MiB`
+- `max_disk_bytes = 64 GiB`
+- `prefetch_window_bytes = 128 MiB`
+- `kv_block_size_tokens = 32`
+- `kv_types = q8_0/q4_0`
 
 ## Design Direction
 
-Loci is designed around a portable default path and explicit extensions:
+Loci keeps the control plane backend-agnostic:
 
-- `Candle` is the default pure Rust backend path
-- `OpenVINO` is an optional acceleration path for Intel platforms
-- `GGUF` is the primary edge model format
-- `llama.cpp`-inspired kernels are ported through curated, explicit crates
-- heterogeneous planning remains backend-agnostic at the core layer
+- `GGUF` is the practical deployment-first model format for the current runtime
+- `Candle` is the default portable Rust execution path
+- `OpenVINO` is an optional acceleration path when that backend is enabled
+- tiered offload and paged-KV configuration stay visible in runtime snapshots and service APIs
 
-The result is a runtime that can be embedded as a library, shipped as a local service, and extended toward more devices without changing the application-facing model.
+The intent is one runtime model that can be embedded as a library or deployed as a local or server-side service without changing how applications reason about models, readiness, or planner state.
 
 ## Learn More
 
 - [Design](./design.md)
 - [Architecture](./docs/ARCHITECTURE.md)
+- [Repository Layout](./docs/LAYOUT.md)
+- [MVP Plan](./docs/MVP_PLAN.md)
 - [Backend Authoring](./docs/BACKEND_AUTHORING.md)
 - [Intel OpenVINO Path](./docs/backends/INTEL_OPENVINO.md)
 - [Contributing](./CONTRIBUTING.md)

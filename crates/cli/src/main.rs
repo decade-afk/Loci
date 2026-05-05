@@ -4,7 +4,8 @@ use loci_protocol::{
     ImageInput, ModelDescriptor, RoutingConfig, RoutingStrategy, SessionRequest,
     TieredOffloadProfile,
 };
-use loci_server::{run_server, ServerConfig};
+use loci_server::{run_server_with_runtime_control, RuntimeControlConfig, ServerConfig};
+use serde_json::json;
 use std::env;
 use std::path::PathBuf;
 
@@ -27,16 +28,22 @@ struct CliArgs {
     keep_alive_secs: Option<u64>,
     kv_type: Option<String>,
     block_size_tokens: Option<u32>,
+    tiered_offload_enabled: Option<bool>,
     offload_profile: Option<TieredOffloadProfile>,
+    large_model_mode: Option<TieredOffloadProfile>,
     spill_threshold_bytes: Option<u64>,
+    clear_spill_threshold_bytes: bool,
     max_disk_bytes: Option<u64>,
+    clear_max_disk_bytes: bool,
     prefetch_window_bytes: Option<u64>,
+    clear_prefetch_window_bytes: bool,
     model_aliases: Vec<(String, String)>,
     structured_output: bool,
     tool_calling: bool,
     max_tokens: u32,
     inspect_models: bool,
     runtime_snapshot: bool,
+    runtime_config: bool,
 }
 
 impl CliArgs {
@@ -113,23 +120,44 @@ impl CliArgs {
                     parsed.block_size_tokens =
                         Some(next_arg(&mut args, "--block-size-tokens")?.parse()?);
                 }
+                "--tiered-offload" => {
+                    parsed.tiered_offload_enabled = Some(true);
+                }
+                "--no-tiered-offload" => {
+                    parsed.tiered_offload_enabled = Some(false);
+                }
                 "--offload-profile" => {
                     parsed.offload_profile = Some(parse_offload_profile(&next_arg(
                         &mut args,
                         "--offload-profile",
                     )?)?);
                 }
+                "--large-model-mode" => {
+                    parsed.large_model_mode = Some(parse_offload_profile(&next_arg(
+                        &mut args,
+                        "--large-model-mode",
+                    )?)?);
+                }
                 "--spill-threshold-bytes" => {
                     parsed.spill_threshold_bytes =
                         Some(next_arg(&mut args, "--spill-threshold-bytes")?.parse()?);
+                }
+                "--clear-spill-threshold-bytes" => {
+                    parsed.clear_spill_threshold_bytes = true;
                 }
                 "--max-disk-bytes" => {
                     parsed.max_disk_bytes =
                         Some(next_arg(&mut args, "--max-disk-bytes")?.parse()?);
                 }
+                "--clear-max-disk-bytes" => {
+                    parsed.clear_max_disk_bytes = true;
+                }
                 "--prefetch-window-bytes" => {
                     parsed.prefetch_window_bytes =
                         Some(next_arg(&mut args, "--prefetch-window-bytes")?.parse()?);
+                }
+                "--clear-prefetch-window-bytes" => {
+                    parsed.clear_prefetch_window_bytes = true;
                 }
                 "--model-alias" => {
                     parsed
@@ -150,6 +178,9 @@ impl CliArgs {
                 }
                 "--runtime-snapshot" => {
                     parsed.runtime_snapshot = true;
+                }
+                "--runtime-config" => {
+                    parsed.runtime_config = true;
                 }
                 other => anyhow::bail!("unknown argument: {other}"),
             }
@@ -184,22 +215,32 @@ fn main() -> anyhow::Result<()> {
     if let Some(block_size_tokens) = args.block_size_tokens {
         config.paged_kv.block_size_tokens = block_size_tokens;
     }
-    if let Some(offload_profile) = args.offload_profile {
+    if let Some(tiered_offload_enabled) = args.tiered_offload_enabled {
+        config.tiered_offload.enabled = tiered_offload_enabled;
+    }
+    if let Some(offload_profile) = args.large_model_mode.or(args.offload_profile) {
         config.tiered_offload.profile = offload_profile;
     }
-    if let Some(spill_threshold_bytes) = args.spill_threshold_bytes {
+    if args.clear_spill_threshold_bytes {
+        config.tiered_offload.spill_threshold_bytes = None;
+    } else if let Some(spill_threshold_bytes) = args.spill_threshold_bytes {
         config.tiered_offload.spill_threshold_bytes = Some(spill_threshold_bytes);
     }
-    if let Some(max_disk_bytes) = args.max_disk_bytes {
+    if args.clear_max_disk_bytes {
+        config.tiered_offload.max_disk_bytes = None;
+    } else if let Some(max_disk_bytes) = args.max_disk_bytes {
         config.tiered_offload.max_disk_bytes = Some(max_disk_bytes);
     }
-    if let Some(prefetch_window_bytes) = args.prefetch_window_bytes {
+    if args.clear_prefetch_window_bytes {
+        config.tiered_offload.prefetch_window_bytes = None;
+    } else if let Some(prefetch_window_bytes) = args.prefetch_window_bytes {
         config.tiered_offload.prefetch_window_bytes = Some(prefetch_window_bytes);
     }
     for (alias, target) in &args.model_aliases {
         config.model_aliases.insert(alias.clone(), target.clone());
     }
 
+    let runtime_control = runtime_control_config_from_config(&config);
     let mut builder = InferenceEngine::builder().config(config);
     if let Some(backend) = &args.preferred_backend {
         builder = builder.preferred_backend(backend.clone());
@@ -211,7 +252,7 @@ fn main() -> anyhow::Result<()> {
     let mut engine = builder.build()?;
 
     if let Some(bind) = args.server_bind {
-        return run_server(ServerConfig { bind, engine });
+        return run_server_with_runtime_control(ServerConfig { bind, engine }, runtime_control);
     }
 
     if args.evict {
@@ -271,6 +312,11 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if args.runtime_config {
+        println!("{}", serde_json::to_string_pretty(&runtime_control)?);
+        return Ok(());
+    }
+
     if let Some(prompt) = args.prompt.clone() {
         let response = engine.infer(SessionRequest {
             prompt,
@@ -287,7 +333,10 @@ fn main() -> anyhow::Result<()> {
 
     println!(
         "{}",
-        serde_json::to_string_pretty(&engine.runtime_snapshot())?
+        serde_json::to_string_pretty(&json!({
+            "runtime": engine.runtime_snapshot(),
+            "runtime_control": runtime_control,
+        }))?
     );
     Ok(())
 }
@@ -354,4 +403,24 @@ fn parse_model_alias(value: &str) -> anyhow::Result<(String, String)> {
         anyhow::bail!("--model-alias requires the form alias=target");
     }
     Ok((alias.to_string(), target.to_string()))
+}
+
+fn runtime_control_config_from_config(config: &EngineConfig) -> RuntimeControlConfig {
+    RuntimeControlConfig::new(
+        config.tiered_offload.prefetch_window_bytes,
+        config.routing.enabled,
+        config.routing.strategy.clone(),
+        config.routing.max_loaded_models,
+        config.model_keep_alive_secs,
+        config.tiered_offload.enabled,
+        config.tiered_offload.profile,
+        config.tiered_offload.spill_threshold_bytes,
+        config.tiered_offload.max_disk_bytes,
+        config.paged_kv.enabled,
+        config.paged_kv.block_size_tokens,
+        config.paged_kv.page_size_bytes,
+        config.paged_kv.prefix_cache_enabled,
+        config.paged_kv.type_k.clone(),
+        config.paged_kv.type_v.clone(),
+    )
 }

@@ -1,12 +1,12 @@
 ## Project Layout
 
-Loci keeps the executable workspace intentionally small at the repository root.
+Loci keeps the executable workspace intentionally small at the repository root and organizes user-facing entrypoints around two integration shapes: embeddable SDK and standalone local service.
 
 ### Runtime workspace
 
-- `crates/`: core runtime, protocol, backends, CLI, server, SDK
-- `examples/`: in-process embedding and local service examples
-- `docs/`: architecture, backend authoring, MVP and repository docs
+- `crates/`: workspace crates such as `loci-core`, `loci-sdk`, `loci-cli`, `loci-server`, and backend/runtime support crates
+- `examples/`: `sdk-local`, `sdk-service`, and `embedded-pet` (`embedded-local`) user-facing examples
+- `docs/`: architecture, backend authoring, MVP, and repository reference docs
 - `scripts/`: local utility scripts for development workflows
 
 ### Non-runtime assets
@@ -24,3 +24,5 @@ Loci keeps the executable workspace intentionally small at the repository root.
 - Keep third-party reference repositories under `tmp/reference/`.
 - Keep bulky local runtime bundles under `vendor/`.
 - Keep the root focused on buildable workspace content and user-facing documentation.
+- Keep README/example wording aligned with the actual workspace package names and supported SDK/service entrypoints.
+- Keep disk-heavy planner examples consistent across docs unless the runtime defaults change.

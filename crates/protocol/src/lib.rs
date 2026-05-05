@@ -731,7 +731,7 @@ pub enum OpenVinoExecutionMode {
     NpuFirst,
 }
 
-/// Encodes the execution details required by the Candle fallback path.
+/// Encodes the execution details required by the Candle local execution path.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CandleExecutionProfile {
     pub session_key: String,

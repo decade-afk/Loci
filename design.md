@@ -2,9 +2,9 @@
 
 ## What Loci Is
 
-Loci is a lightweight, extensible inference foundation for local AI applications built in Rust.
+Loci is a lightweight, extensible heterogeneous inference foundation built in Rust for edge-first applications and deployers that also need a consistent server path.
 
-Its job is to make model execution usable across real edge environments: laptops, desktops, compact PCs, embedded systems, and future mobile targets. Instead of treating inference as a single backend problem, Loci treats it as a placement and runtime orchestration problem across heterogeneous resources.
+Its job is to make model execution usable across real edge and deployment environments: laptops, desktops, compact PCs, embedded systems, future mobile targets, and server hosts. Instead of treating inference as a single backend problem, Loci treats it as a placement and runtime orchestration problem across heterogeneous resources.
 
 That is why the project is organized around a small control-plane core, portable execution defaults, and optional vendor accelerators.
 
@@ -13,7 +13,7 @@ That is why the project is organized around a small control-plane core, portable
 Loci is designed for teams that need one of two integration styles:
 
 - direct in-process inference through a Rust SDK
-- a standalone local AI service that can be consumed by any host application
+- a standalone AI service that can be consumed by host applications in local or server deployments
 
 Those two modes share the same runtime concepts:
 

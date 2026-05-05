@@ -2,7 +2,7 @@
 
 use loci_core::{
     EmbeddedModelRegistration, EngineConfig, ImageInput, InferenceEngine, InferenceEngineBuilder,
-    PreparedModel, PreparedResidency, Result, SessionRequest, SessionResponse,
+    PreparedModel, PreparedResidency, Result, RoutingStrategy, SessionRequest, SessionResponse,
     TieredOffloadProfile,
 };
 use std::path::PathBuf;
@@ -13,6 +13,12 @@ pub use loci_server;
 /// High-level facade that can be embedded in-process or exposed as a local AI service.
 pub struct Loci {
     engine: InferenceEngine,
+    runtime_control: RuntimeControlState,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeControlState {
+    prefetch_window_bytes: Option<u64>,
 }
 
 /// Stable high-level local model registration request for SDK callers.
@@ -377,6 +383,41 @@ pub struct PreparedModelInfo {
     pub estimated_memory_bytes: Option<u64>,
 }
 
+/// Stable high-level routing controls exposed by the SDK runtime APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeRoutingConfig {
+    pub enabled: bool,
+    pub strategy: RoutingStrategy,
+    pub max_loaded_models: Option<usize>,
+}
+
+/// Stable high-level runtime configuration exposed by the SDK runtime APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeControlConfig {
+    pub model_keep_alive_secs: u64,
+    pub tiered_offload_enabled: bool,
+    pub large_model_mode: TieredOffloadProfile,
+    pub spill_threshold_bytes: Option<u64>,
+    pub max_disk_bytes: Option<u64>,
+    pub prefetch_window_bytes: Option<u64>,
+    pub kv_cache_enabled: bool,
+    pub kv_block_size_tokens: u32,
+    pub kv_page_size_bytes: u64,
+    pub kv_prefix_cache_enabled: bool,
+    pub kv_type_k: String,
+    pub kv_type_v: String,
+    pub routing: RuntimeRoutingConfig,
+}
+
+/// Stable high-level runtime snapshot exposed by the SDK runtime APIs.
+#[derive(Debug, Clone)]
+pub struct RuntimeControlSnapshot {
+    pub config: RuntimeControlConfig,
+    pub model_pool: loci_core::ModelPoolSnapshot,
+    pub tiered_offload_runtime: Option<loci_core::TieredOffloadRuntimeSnapshot>,
+    pub features: loci_core::EngineFeatureSnapshot,
+}
+
 impl From<PreparedModel> for PreparedModelInfo {
     fn from(value: PreparedModel) -> Self {
         Self {
@@ -385,6 +426,98 @@ impl From<PreparedModel> for PreparedModelInfo {
             session_key: value.session_key,
             residency: value.residency,
             estimated_memory_bytes: value.estimated_memory_bytes,
+        }
+    }
+}
+
+/// Stable planner/runtime configuration view exposed by the SDK.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeConfigInfo {
+    pub model_keep_alive_secs: u64,
+    pub tiered_offload_enabled: bool,
+    pub tiered_offload_profile: TieredOffloadProfile,
+    pub spill_threshold_bytes: Option<u64>,
+    pub max_disk_bytes: Option<u64>,
+    pub prefetch_window_bytes: Option<u64>,
+    pub kv_cache_enabled: bool,
+    pub kv_block_size_tokens: u32,
+    pub kv_page_size_bytes: u64,
+    pub kv_prefix_cache_enabled: bool,
+    pub kv_type_k: String,
+    pub kv_type_v: String,
+}
+
+impl From<&loci_core::RuntimeConfigSnapshot> for RuntimeConfigInfo {
+    fn from(value: &loci_core::RuntimeConfigSnapshot) -> Self {
+        Self {
+            model_keep_alive_secs: value.model_keep_alive_secs,
+            tiered_offload_enabled: value.tiered_offload_enabled,
+            tiered_offload_profile: value.tiered_offload_profile,
+            spill_threshold_bytes: value.spill_threshold_bytes,
+            max_disk_bytes: value.max_disk_bytes,
+            prefetch_window_bytes: None,
+            kv_cache_enabled: value.kv_cache_enabled,
+            kv_block_size_tokens: value.kv_block_size_tokens,
+            kv_page_size_bytes: value.kv_page_size_bytes,
+            kv_prefix_cache_enabled: value.kv_prefix_cache_enabled,
+            kv_type_k: value.kv_type_k.clone(),
+            kv_type_v: value.kv_type_v.clone(),
+        }
+    }
+}
+
+/// Stable spill-session view exposed by the SDK.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TieredOffloadSessionInfo {
+    pub session_key: String,
+    pub model_name: String,
+    pub spill_path: String,
+    pub mapped_bytes: u64,
+    pub prefetched_bytes: u64,
+    pub scheduled_prefetch_requests: usize,
+    pub completed_prefetch_requests: usize,
+    pub weights_bytes: u64,
+    pub kv_cache_bytes: u64,
+    pub activations_bytes: u64,
+}
+
+impl From<&loci_core::TieredOffloadSessionSnapshot> for TieredOffloadSessionInfo {
+    fn from(value: &loci_core::TieredOffloadSessionSnapshot) -> Self {
+        Self {
+            session_key: value.session_key.clone(),
+            model_name: value.model_name.clone(),
+            spill_path: value.spill_path.clone(),
+            mapped_bytes: value.mapped_bytes,
+            prefetched_bytes: value.prefetched_bytes,
+            scheduled_prefetch_requests: value.scheduled_prefetch_requests,
+            completed_prefetch_requests: value.completed_prefetch_requests,
+            weights_bytes: value.weights_bytes,
+            kv_cache_bytes: value.kv_cache_bytes,
+            activations_bytes: value.activations_bytes,
+        }
+    }
+}
+
+/// Stable tiered-offload runtime view exposed by the SDK.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TieredOffloadRuntimeInfo {
+    pub root_dir: String,
+    pub total_spill_bytes: u64,
+    pub total_prefetched_bytes: u64,
+    pub sessions: Vec<TieredOffloadSessionInfo>,
+}
+
+impl From<&loci_core::TieredOffloadRuntimeSnapshot> for TieredOffloadRuntimeInfo {
+    fn from(value: &loci_core::TieredOffloadRuntimeSnapshot) -> Self {
+        Self {
+            root_dir: value.root_dir.clone(),
+            total_spill_bytes: value.total_spill_bytes,
+            total_prefetched_bytes: value.total_prefetched_bytes,
+            sessions: value
+                .sessions
+                .iter()
+                .map(TieredOffloadSessionInfo::from)
+                .collect(),
         }
     }
 }
@@ -586,9 +719,119 @@ impl Loci {
             .map(PreparedModelInfo::from)
     }
 
+    /// Returns the stable high-level runtime control configuration.
+    pub fn runtime_control_config(&self) -> RuntimeControlConfig {
+        runtime_control_config_from_snapshot(
+            &self.engine.runtime_snapshot(),
+            self.runtime_control.prefetch_window_bytes,
+        )
+    }
+
+    /// Returns the stable high-level runtime control snapshot.
+    pub fn runtime_control_snapshot(&self) -> RuntimeControlSnapshot {
+        runtime_control_snapshot_from_snapshot(
+            self.engine.runtime_snapshot(),
+            self.runtime_control.prefetch_window_bytes,
+        )
+    }
+
     /// Exposes the underlying runtime snapshot.
     pub fn runtime_snapshot(&self) -> loci_core::RuntimeSnapshot {
         self.engine.runtime_snapshot()
+    }
+
+    /// Updates the model residency keep-alive timeout after build.
+    pub fn set_model_keep_alive_secs(&mut self, keep_alive_secs: u64) {
+        self.engine.set_model_keep_alive_secs(keep_alive_secs);
+    }
+
+    /// Updates the active large-model mode after build.
+    pub fn set_large_model_mode(&mut self, profile: TieredOffloadProfile) {
+        self.engine.set_offload_profile(profile);
+    }
+
+    /// Updates the active tiered-offload profile after build.
+    pub fn set_offload_profile(&mut self, profile: TieredOffloadProfile) {
+        self.set_large_model_mode(profile);
+    }
+
+    /// Updates the spill threshold that activates disk-backed tiering after build.
+    pub fn set_spill_threshold_bytes(&mut self, spill_threshold_bytes: Option<u64>) {
+        self.engine.set_spill_threshold_bytes(spill_threshold_bytes);
+    }
+
+    /// Updates the disk budget available to the tiered-offload runtime after build.
+    pub fn set_max_disk_bytes(&mut self, max_disk_bytes: Option<u64>) {
+        self.engine.set_max_disk_bytes(max_disk_bytes);
+    }
+
+    /// Updates the spill prefetch window used by the disk tier after build.
+    pub fn set_prefetch_window_bytes(&mut self, prefetch_window_bytes: Option<u64>) {
+        self.engine
+            .set_prefetch_window_bytes(prefetch_window_bytes);
+        self.runtime_control.prefetch_window_bytes = prefetch_window_bytes;
+    }
+
+    /// Updates the planner-facing KV block size after build.
+    pub fn set_kv_block_size_tokens(&mut self, block_size_tokens: u32) {
+        self.engine.set_kv_block_size_tokens(block_size_tokens);
+    }
+
+    /// Enables or disables shared prefix caching in the paged-KV planner after build.
+    pub fn set_kv_prefix_cache_enabled(&mut self, enabled: bool) {
+        self.engine.set_kv_prefix_cache_enabled(enabled);
+    }
+
+    /// Updates the planner-facing KV tensor formats after build.
+    pub fn set_kv_types(
+        &mut self,
+        type_k: impl Into<String>,
+        type_v: impl Into<String>,
+    ) {
+        self.engine.set_kv_types(type_k.into(), type_v.into());
+    }
+
+    /// Enables or disables routing after build when the feature is compiled in.
+    pub fn set_routing_enabled(&mut self, enabled: bool) -> Result<()> {
+        self.engine.set_routing_enabled(enabled)
+    }
+
+    /// Updates the routing strategy after build when the feature is compiled in.
+    pub fn set_routing_strategy(&mut self, strategy: RoutingStrategy) -> Result<()> {
+        self.engine.set_routing_strategy(strategy)
+    }
+
+    /// Updates the maximum number of resident models after build.
+    pub fn set_max_loaded_models(&mut self, max_loaded_models: Option<usize>) {
+        self.engine.set_max_loaded_models(max_loaded_models);
+    }
+
+    /// Returns a stable high-level planner/runtime configuration snapshot.
+    pub fn runtime_config(&self) -> RuntimeConfigInfo {
+        let control = self.runtime_control_config();
+        RuntimeConfigInfo {
+            model_keep_alive_secs: control.model_keep_alive_secs,
+            tiered_offload_enabled: control.tiered_offload_enabled,
+            tiered_offload_profile: control.large_model_mode,
+            spill_threshold_bytes: control.spill_threshold_bytes,
+            max_disk_bytes: control.max_disk_bytes,
+            prefetch_window_bytes: control.prefetch_window_bytes,
+            kv_cache_enabled: control.kv_cache_enabled,
+            kv_block_size_tokens: control.kv_block_size_tokens,
+            kv_page_size_bytes: control.kv_page_size_bytes,
+            kv_prefix_cache_enabled: control.kv_prefix_cache_enabled,
+            kv_type_k: control.kv_type_k,
+            kv_type_v: control.kv_type_v,
+        }
+    }
+
+    /// Returns a stable high-level spill runtime snapshot when tiered offload is active.
+    pub fn tiered_offload_runtime(&self) -> Option<TieredOffloadRuntimeInfo> {
+        let snapshot = self.engine.runtime_snapshot();
+        snapshot
+            .tiered_offload_runtime
+            .as_ref()
+            .map(TieredOffloadRuntimeInfo::from)
     }
 
     /// Exposes the inner engine for advanced callers.
@@ -613,10 +856,38 @@ impl Loci {
 
     /// Starts the bundled HTTP service using a stable SDK service config.
     pub fn run_service(self, config: LociServiceConfig) -> anyhow::Result<()> {
-        loci_server::run_server(loci_server::ServerConfig {
-            bind: config.bind,
-            engine: self.engine,
-        })
+        let Loci {
+            engine,
+            runtime_control,
+        } = self;
+        let runtime_snapshot = engine.runtime_snapshot();
+        let runtime_control_view = runtime_control_config_from_snapshot(
+            &runtime_snapshot,
+            runtime_control.prefetch_window_bytes,
+        );
+        loci_server::run_server_with_runtime_control(
+            loci_server::ServerConfig {
+                bind: config.bind,
+                engine,
+            },
+            loci_server::RuntimeControlConfig::new(
+                runtime_control_view.prefetch_window_bytes,
+                runtime_control_view.routing.enabled,
+                runtime_control_view.routing.strategy,
+                runtime_control_view.routing.max_loaded_models,
+                runtime_control_view.model_keep_alive_secs,
+                runtime_control_view.tiered_offload_enabled,
+                runtime_control_view.large_model_mode,
+                runtime_control_view.spill_threshold_bytes,
+                runtime_control_view.max_disk_bytes,
+                runtime_control_view.kv_cache_enabled,
+                runtime_control_view.kv_block_size_tokens,
+                runtime_control_view.kv_page_size_bytes,
+                runtime_control_view.kv_prefix_cache_enabled,
+                runtime_control_view.kv_type_k,
+                runtime_control_view.kv_type_v,
+            ),
+        )
     }
 }
 
@@ -655,6 +926,20 @@ impl LociBuilder {
             .get_or_insert_with(EngineConfig::default)
             .tiered_offload
             .profile = profile;
+        self
+    }
+
+    /// Sets the active large-model mode without requiring direct `EngineConfig` mutation.
+    pub fn large_model_mode(self, profile: TieredOffloadProfile) -> Self {
+        self.tiered_offload_profile(profile)
+    }
+
+    /// Enables or disables tiered offload without requiring direct `EngineConfig` mutation.
+    pub fn tiered_offload_enabled(mut self, enabled: bool) -> Self {
+        self.config
+            .get_or_insert_with(EngineConfig::default)
+            .tiered_offload
+            .enabled = enabled;
         self
     }
 
@@ -732,6 +1017,7 @@ impl LociBuilder {
 
     /// Builds the SDK facade.
     pub fn build(self) -> Result<Loci> {
+        let runtime_control = runtime_control_state_from_config(self.config.as_ref());
         let mut builder = InferenceEngineBuilder::new();
         if let Some(config) = self.config {
             builder = builder.config(config);
@@ -744,7 +1030,61 @@ impl LociBuilder {
         }
         Ok(Loci {
             engine: builder.build()?,
+            runtime_control,
         })
+    }
+}
+
+impl RuntimeControlState {
+    fn from_prefetch_window_bytes(prefetch_window_bytes: Option<u64>) -> Self {
+        Self {
+            prefetch_window_bytes,
+        }
+    }
+}
+
+fn runtime_control_state_from_config(config: Option<&EngineConfig>) -> RuntimeControlState {
+    RuntimeControlState::from_prefetch_window_bytes(
+        config
+            .map(|config| config.tiered_offload.prefetch_window_bytes)
+            .unwrap_or_else(|| EngineConfig::default().tiered_offload.prefetch_window_bytes),
+    )
+}
+
+fn runtime_control_config_from_snapshot(
+    snapshot: &loci_core::RuntimeSnapshot,
+    prefetch_window_bytes: Option<u64>,
+) -> RuntimeControlConfig {
+    RuntimeControlConfig {
+        model_keep_alive_secs: snapshot.config.model_keep_alive_secs,
+        tiered_offload_enabled: snapshot.config.tiered_offload_enabled,
+        large_model_mode: snapshot.config.tiered_offload_profile,
+        spill_threshold_bytes: snapshot.config.spill_threshold_bytes,
+        max_disk_bytes: snapshot.config.max_disk_bytes,
+        prefetch_window_bytes,
+        kv_cache_enabled: snapshot.config.kv_cache_enabled,
+        kv_block_size_tokens: snapshot.config.kv_block_size_tokens,
+        kv_page_size_bytes: snapshot.config.kv_page_size_bytes,
+        kv_prefix_cache_enabled: snapshot.config.kv_prefix_cache_enabled,
+        kv_type_k: snapshot.config.kv_type_k.clone(),
+        kv_type_v: snapshot.config.kv_type_v.clone(),
+        routing: RuntimeRoutingConfig {
+            enabled: snapshot.routing.enabled,
+            strategy: snapshot.routing.strategy.clone(),
+            max_loaded_models: snapshot.routing.max_loaded_models,
+        },
+    }
+}
+
+fn runtime_control_snapshot_from_snapshot(
+    snapshot: loci_core::RuntimeSnapshot,
+    prefetch_window_bytes: Option<u64>,
+) -> RuntimeControlSnapshot {
+    RuntimeControlSnapshot {
+        config: runtime_control_config_from_snapshot(&snapshot, prefetch_window_bytes),
+        model_pool: snapshot.model_pool,
+        tiered_offload_runtime: snapshot.tiered_offload_runtime,
+        features: snapshot.features,
     }
 }
 

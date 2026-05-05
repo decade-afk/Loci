@@ -1,8 +1,8 @@
 # Loci Architecture
 
-Loci is organized as a local inference platform with a small core and explicit execution boundaries.
+Loci is organized as an edge-first heterogeneous inference platform with a small core and explicit execution boundaries.
 
-The architecture is designed for one purpose: let applications run models locally through the same runtime whether they need an embedded SDK, a standalone service, or a backend mix that changes across devices.
+The architecture is designed for one purpose: let applications run models through the same runtime whether they need an embedded SDK, a standalone service, or a backend mix that changes across edge devices and servers.
 
 ## Architectural Overview
 
@@ -86,7 +86,7 @@ The kernel layer is not a dumping ground for backend-private code. It is a curat
 
 ## 5. Memory and Residency Helpers
 
-Local inference is constrained by memory before it is constrained by API shape.
+Heterogeneous inference is often constrained by memory before it is constrained by API shape.
 
 That is why Loci isolates spill and cache support into dedicated crates:
 
@@ -135,7 +135,7 @@ Loci is intentionally dual-surface.
 Applications can:
 
 - link `crates/sdk` and call the runtime directly
-- run `crates/server` and consume a local AI service
+- run `crates/server` and consume a standalone service for local or server deployment
 
 These are not separate products. They are two interfaces over the same runtime model.
 

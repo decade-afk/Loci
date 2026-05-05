@@ -868,7 +868,7 @@ mod tests {
     }
 
     #[test]
-    fn inspect_model_reports_missing_candle_execution_for_gguf() {
+    fn inspect_model_reports_missing_model_path_for_candle_gguf() {
         let model = ModelDescriptor {
             name: "demo".to_string(),
             path: PathBuf::from("D:/models/demo.gguf"),
@@ -885,7 +885,7 @@ mod tests {
         assert!(report
             .backend_readiness
             .iter()
-            .any(|readiness| readiness.backend == "candle" && !readiness.real_execution));
+            .any(|readiness| readiness.backend == "candle" && !readiness.ready));
     }
 
     #[test]

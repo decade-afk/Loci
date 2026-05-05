@@ -3,7 +3,8 @@ use anyhow::Context;
 use loci_core::{read_gguf_metadata_summary, resolve_gguf_architecture};
 use loci_core::{InferenceEngine, LociError};
 use loci_protocol::{
-    ImageInput, ModelDescriptor, RoutingStrategy, SessionRequest, TieredOffloadProfile,
+    ImageInput, ModelDescriptor, RoutingStrategy, SessionRequest, TieredOffloadConfig,
+    TieredOffloadProfile,
 };
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -14,6 +15,107 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct ServerConfig {
     pub bind: String,
     pub engine: InferenceEngine,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeRoutingConfig {
+    pub enabled: bool,
+    pub strategy: RoutingStrategy,
+    pub max_loaded_models: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeControlConfig {
+    pub model_keep_alive_secs: u64,
+    pub tiered_offload_enabled: bool,
+    #[serde(rename = "tiered_offload_profile", alias = "large_model_mode")]
+    pub large_model_mode: TieredOffloadProfile,
+    pub spill_threshold_bytes: Option<u64>,
+    pub max_disk_bytes: Option<u64>,
+    pub prefetch_window_bytes: Option<u64>,
+    pub kv_cache_enabled: bool,
+    pub kv_block_size_tokens: u32,
+    pub kv_page_size_bytes: u64,
+    pub kv_prefix_cache_enabled: bool,
+    pub kv_type_k: String,
+    pub kv_type_v: String,
+    pub routing: RuntimeRoutingConfig,
+}
+
+impl RuntimeControlConfig {
+    pub fn new(
+        prefetch_window_bytes: Option<u64>,
+        routing_enabled: bool,
+        routing_strategy: RoutingStrategy,
+        max_loaded_models: Option<usize>,
+        model_keep_alive_secs: u64,
+        tiered_offload_enabled: bool,
+        large_model_mode: TieredOffloadProfile,
+        spill_threshold_bytes: Option<u64>,
+        max_disk_bytes: Option<u64>,
+        kv_cache_enabled: bool,
+        kv_block_size_tokens: u32,
+        kv_page_size_bytes: u64,
+        kv_prefix_cache_enabled: bool,
+        kv_type_k: String,
+        kv_type_v: String,
+    ) -> Self {
+        Self {
+            model_keep_alive_secs,
+            tiered_offload_enabled,
+            large_model_mode,
+            spill_threshold_bytes,
+            max_disk_bytes,
+            prefetch_window_bytes,
+            kv_cache_enabled,
+            kv_block_size_tokens,
+            kv_page_size_bytes,
+            kv_prefix_cache_enabled,
+            kv_type_k,
+            kv_type_v,
+            routing: RuntimeRoutingConfig {
+                enabled: routing_enabled,
+                strategy: routing_strategy,
+                max_loaded_models,
+            },
+        }
+    }
+
+    fn from_engine_snapshot(
+        snapshot: &loci_core::RuntimeSnapshot,
+        prefetch_window_bytes: Option<u64>,
+    ) -> Self {
+        Self::new(
+            prefetch_window_bytes,
+            snapshot.routing.enabled,
+            snapshot.routing.strategy.clone(),
+            snapshot.routing.max_loaded_models,
+            snapshot.config.model_keep_alive_secs,
+            snapshot.config.tiered_offload_enabled,
+            snapshot.config.tiered_offload_profile,
+            snapshot.config.spill_threshold_bytes,
+            snapshot.config.max_disk_bytes,
+            snapshot.config.kv_cache_enabled,
+            snapshot.config.kv_block_size_tokens,
+            snapshot.config.kv_page_size_bytes,
+            snapshot.config.kv_prefix_cache_enabled,
+            snapshot.config.kv_type_k.clone(),
+            snapshot.config.kv_type_v.clone(),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeControlSnapshot {
+    pub config: RuntimeControlConfig,
+    pub model_pool: loci_core::ModelPoolSnapshot,
+    pub tiered_offload_runtime: Option<loci_core::TieredOffloadRuntimeSnapshot>,
+    pub features: loci_core::EngineFeatureSnapshot,
+}
+
+#[derive(Debug, Clone)]
+struct ServerRuntimeControlState {
+    config: RuntimeControlConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,7 +187,11 @@ struct UpdatePlannerConfigRequest {
     #[serde(default)]
     keep_alive_secs: Option<u64>,
     #[serde(default)]
+    tiered_offload_enabled: Option<bool>,
+    #[serde(default)]
     offload_profile: Option<TieredOffloadProfile>,
+    #[serde(default)]
+    large_model_mode: Option<TieredOffloadProfile>,
     #[serde(default)]
     spill_threshold_bytes: Option<u64>,
     #[serde(default)]
@@ -108,6 +214,38 @@ struct UpdateRoutingConfigRequest {
     enabled: Option<bool>,
     #[serde(default)]
     strategy: Option<RoutingStrategy>,
+    #[serde(default)]
+    max_loaded_models: Option<Option<usize>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateRuntimeControlRequest {
+    #[serde(default)]
+    keep_alive_secs: Option<u64>,
+    #[serde(default)]
+    tiered_offload_enabled: Option<bool>,
+    #[serde(default)]
+    offload_profile: Option<TieredOffloadProfile>,
+    #[serde(default)]
+    large_model_mode: Option<TieredOffloadProfile>,
+    #[serde(default)]
+    spill_threshold_bytes: Option<Option<u64>>,
+    #[serde(default)]
+    max_disk_bytes: Option<Option<u64>>,
+    #[serde(default)]
+    prefetch_window_bytes: Option<Option<u64>>,
+    #[serde(default)]
+    kv_block_size_tokens: Option<u32>,
+    #[serde(default)]
+    kv_prefix_cache_enabled: Option<bool>,
+    #[serde(default)]
+    kv_type_k: Option<String>,
+    #[serde(default)]
+    kv_type_v: Option<String>,
+    #[serde(default)]
+    routing_enabled: Option<bool>,
+    #[serde(default)]
+    routing_strategy: Option<RoutingStrategy>,
     #[serde(default)]
     max_loaded_models: Option<Option<usize>>,
 }
@@ -259,9 +397,24 @@ struct OpenAiChatAssistantMessage {
 }
 
 pub fn run_server(config: ServerConfig) -> anyhow::Result<()> {
+    let snapshot = config.engine.runtime_snapshot();
+    let runtime_control = RuntimeControlConfig::from_engine_snapshot(
+        &snapshot,
+        TieredOffloadConfig::default().prefetch_window_bytes,
+    );
+    run_server_with_runtime_control(config, runtime_control)
+}
+
+pub fn run_server_with_runtime_control(
+    config: ServerConfig,
+    runtime_control: RuntimeControlConfig,
+) -> anyhow::Result<()> {
     let listener = TcpListener::bind(&config.bind)
         .with_context(|| format!("failed to bind server on {}", config.bind))?;
     let mut engine = config.engine;
+    let mut runtime_state = ServerRuntimeControlState {
+        config: runtime_control,
+    };
 
     for stream in listener.incoming() {
         let mut stream = match stream {
@@ -280,7 +433,7 @@ pub fn run_server(config: ServerConfig) -> anyhow::Result<()> {
             }
         };
 
-        let response = handle_request(&mut engine, &request);
+        let response = handle_request_with_runtime_control(&mut engine, &mut runtime_state, &request);
         let _ = stream.write_all(response.as_bytes());
         let _ = stream.flush();
     }
@@ -288,7 +441,23 @@ pub fn run_server(config: ServerConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn handle_request(engine: &mut InferenceEngine, request: &str) -> String {
+    let snapshot = engine.runtime_snapshot();
+    let mut runtime_state = ServerRuntimeControlState {
+        config: RuntimeControlConfig::from_engine_snapshot(
+            &snapshot,
+            TieredOffloadConfig::default().prefetch_window_bytes,
+        ),
+    };
+    handle_request_with_runtime_control(engine, &mut runtime_state, request)
+}
+
+fn handle_request_with_runtime_control(
+    engine: &mut InferenceEngine,
+    runtime_state: &mut ServerRuntimeControlState,
+    request: &str,
+) -> String {
     engine.evict_expired_models();
     let (request_line, body) = parse_request_parts(request);
 
@@ -298,8 +467,14 @@ fn handle_request(engine: &mut InferenceEngine, request: &str) -> String {
     if request_line.starts_with("GET /v1/runtime ") {
         return serialize_response(&engine.runtime_snapshot());
     }
+    if request_line.starts_with("GET /v1/runtime/control ") {
+        return serialize_response(&runtime_control_snapshot(engine, runtime_state));
+    }
     if request_line.starts_with("GET /v1/config ") {
         return serialize_response(&engine.runtime_snapshot().config);
+    }
+    if request_line.starts_with("GET /v1/config/runtime ") {
+        return serialize_response(&runtime_state.config);
     }
     if request_line.starts_with("GET /v1/models ") {
         return serialize_response(&OpenAiModelListResponse {
@@ -386,19 +561,28 @@ fn handle_request(engine: &mut InferenceEngine, request: &str) -> String {
     if request_line.starts_with("POST /v1/config/planner ") {
         return match serde_json::from_str::<UpdatePlannerConfigRequest>(body) {
             Ok(payload) => {
-                apply_planner_config(engine, payload);
-                serialize_response(&engine.runtime_snapshot().config)
+                apply_planner_config(engine, runtime_state, payload);
+                serialize_response(&runtime_state.config)
             }
             Err(error) => bad_request(&format!("invalid planner config payload: {error}")),
         };
     }
     if request_line.starts_with("POST /v1/config/routing ") {
         return match serde_json::from_str::<UpdateRoutingConfigRequest>(body) {
-            Ok(payload) => match apply_routing_config(engine, payload) {
-                Ok(()) => serialize_response(&engine.runtime_snapshot().routing),
+            Ok(payload) => match apply_routing_config(engine, runtime_state, payload) {
+                Ok(()) => serialize_response(&runtime_state.config.routing),
                 Err(error) => map_error(error),
             },
             Err(error) => bad_request(&format!("invalid routing config payload: {error}")),
+        };
+    }
+    if request_line.starts_with("POST /v1/config/runtime ") {
+        return match serde_json::from_str::<UpdateRuntimeControlRequest>(body) {
+            Ok(payload) => match apply_runtime_control(engine, runtime_state, payload) {
+                Ok(()) => serialize_response(&runtime_control_snapshot(engine, runtime_state)),
+                Err(error) => map_error(error),
+            },
+            Err(error) => bad_request(&format!("invalid runtime config payload: {error}")),
         };
     }
     if request_line.starts_with("POST /v1/plan ") {
@@ -556,37 +740,59 @@ fn respond_inference_stream(engine: &mut InferenceEngine, request: SessionReques
     }
 }
 
-fn apply_planner_config(engine: &mut InferenceEngine, payload: UpdatePlannerConfigRequest) {
+fn apply_planner_config(
+    engine: &mut InferenceEngine,
+    runtime_state: &mut ServerRuntimeControlState,
+    payload: UpdatePlannerConfigRequest,
+) {
     if let Some(keep_alive_secs) = payload.keep_alive_secs {
         engine.set_model_keep_alive_secs(keep_alive_secs);
+        runtime_state.config.model_keep_alive_secs = keep_alive_secs;
     }
-    if let Some(offload_profile) = payload.offload_profile {
+    if let Some(tiered_offload_enabled) = payload.tiered_offload_enabled {
+        runtime_state.config.tiered_offload_enabled = tiered_offload_enabled;
+    }
+    if let Some(offload_profile) = payload.large_model_mode.or(payload.offload_profile) {
         engine.set_offload_profile(offload_profile);
+        runtime_state.config.large_model_mode = offload_profile;
     }
     if let Some(spill_threshold_bytes) = payload.spill_threshold_bytes {
         engine.set_spill_threshold_bytes(Some(spill_threshold_bytes));
+        runtime_state.config.spill_threshold_bytes = Some(spill_threshold_bytes);
     }
     if let Some(max_disk_bytes) = payload.max_disk_bytes {
         engine.set_max_disk_bytes(Some(max_disk_bytes));
+        runtime_state.config.max_disk_bytes = Some(max_disk_bytes);
     }
     if let Some(prefetch_window_bytes) = payload.prefetch_window_bytes {
         engine.set_prefetch_window_bytes(Some(prefetch_window_bytes));
+        runtime_state.config.prefetch_window_bytes = Some(prefetch_window_bytes);
     }
     if let Some(block_size_tokens) = payload.kv_block_size_tokens {
         engine.set_kv_block_size_tokens(block_size_tokens);
+        runtime_state.config.kv_block_size_tokens = block_size_tokens;
     }
     if let Some(prefix_cache_enabled) = payload.kv_prefix_cache_enabled {
         engine.set_kv_prefix_cache_enabled(prefix_cache_enabled);
+        runtime_state.config.kv_prefix_cache_enabled = prefix_cache_enabled;
     }
     match (payload.kv_type_k, payload.kv_type_v) {
-        (Some(type_k), Some(type_v)) => engine.set_kv_types(type_k, type_v),
+        (Some(type_k), Some(type_v)) => {
+            engine.set_kv_types(type_k.clone(), type_v.clone());
+            runtime_state.config.kv_type_k = type_k;
+            runtime_state.config.kv_type_v = type_v;
+        }
         (Some(type_k), None) => {
             let existing = engine.runtime_snapshot().config.kv_type_v;
-            engine.set_kv_types(type_k, existing);
+            engine.set_kv_types(type_k.clone(), existing.clone());
+            runtime_state.config.kv_type_k = type_k;
+            runtime_state.config.kv_type_v = existing;
         }
         (None, Some(type_v)) => {
             let existing = engine.runtime_snapshot().config.kv_type_k;
-            engine.set_kv_types(existing, type_v);
+            engine.set_kv_types(existing.clone(), type_v.clone());
+            runtime_state.config.kv_type_k = existing;
+            runtime_state.config.kv_type_v = type_v;
         }
         (None, None) => {}
     }
@@ -594,18 +800,104 @@ fn apply_planner_config(engine: &mut InferenceEngine, payload: UpdatePlannerConf
 
 fn apply_routing_config(
     engine: &mut InferenceEngine,
+    runtime_state: &mut ServerRuntimeControlState,
     payload: UpdateRoutingConfigRequest,
 ) -> Result<(), LociError> {
     if let Some(enabled) = payload.enabled {
         engine.set_routing_enabled(enabled)?;
+        runtime_state.config.routing.enabled = enabled;
     }
     if let Some(strategy) = payload.strategy {
-        engine.set_routing_strategy(strategy)?;
+        engine.set_routing_strategy(strategy.clone())?;
+        runtime_state.config.routing.strategy = strategy;
     }
     if let Some(max_loaded_models) = payload.max_loaded_models {
         engine.set_max_loaded_models(max_loaded_models);
+        runtime_state.config.routing.max_loaded_models = max_loaded_models;
     }
     Ok(())
+}
+
+fn apply_runtime_control(
+    engine: &mut InferenceEngine,
+    runtime_state: &mut ServerRuntimeControlState,
+    payload: UpdateRuntimeControlRequest,
+) -> Result<(), LociError> {
+    if let Some(keep_alive_secs) = payload.keep_alive_secs {
+        engine.set_model_keep_alive_secs(keep_alive_secs);
+        runtime_state.config.model_keep_alive_secs = keep_alive_secs;
+    }
+    if let Some(tiered_offload_enabled) = payload.tiered_offload_enabled {
+        runtime_state.config.tiered_offload_enabled = tiered_offload_enabled;
+    }
+    if let Some(offload_profile) = payload.large_model_mode.or(payload.offload_profile) {
+        engine.set_offload_profile(offload_profile);
+        runtime_state.config.large_model_mode = offload_profile;
+    }
+    if let Some(spill_threshold_bytes) = payload.spill_threshold_bytes {
+        engine.set_spill_threshold_bytes(spill_threshold_bytes);
+        runtime_state.config.spill_threshold_bytes = spill_threshold_bytes;
+    }
+    if let Some(max_disk_bytes) = payload.max_disk_bytes {
+        engine.set_max_disk_bytes(max_disk_bytes);
+        runtime_state.config.max_disk_bytes = max_disk_bytes;
+    }
+    if let Some(prefetch_window_bytes) = payload.prefetch_window_bytes {
+        engine.set_prefetch_window_bytes(prefetch_window_bytes);
+        runtime_state.config.prefetch_window_bytes = prefetch_window_bytes;
+    }
+    if let Some(block_size_tokens) = payload.kv_block_size_tokens {
+        engine.set_kv_block_size_tokens(block_size_tokens);
+        runtime_state.config.kv_block_size_tokens = block_size_tokens;
+    }
+    if let Some(prefix_cache_enabled) = payload.kv_prefix_cache_enabled {
+        engine.set_kv_prefix_cache_enabled(prefix_cache_enabled);
+        runtime_state.config.kv_prefix_cache_enabled = prefix_cache_enabled;
+    }
+    match (payload.kv_type_k, payload.kv_type_v) {
+        (Some(type_k), Some(type_v)) => {
+            engine.set_kv_types(type_k.clone(), type_v.clone());
+            runtime_state.config.kv_type_k = type_k;
+            runtime_state.config.kv_type_v = type_v;
+        }
+        (Some(type_k), None) => {
+            let existing = runtime_state.config.kv_type_v.clone();
+            engine.set_kv_types(type_k.clone(), existing.clone());
+            runtime_state.config.kv_type_k = type_k;
+        }
+        (None, Some(type_v)) => {
+            let existing = runtime_state.config.kv_type_k.clone();
+            engine.set_kv_types(existing.clone(), type_v.clone());
+            runtime_state.config.kv_type_v = type_v;
+        }
+        (None, None) => {}
+    }
+    if let Some(enabled) = payload.routing_enabled {
+        engine.set_routing_enabled(enabled)?;
+        runtime_state.config.routing.enabled = enabled;
+    }
+    if let Some(strategy) = payload.routing_strategy {
+        engine.set_routing_strategy(strategy.clone())?;
+        runtime_state.config.routing.strategy = strategy;
+    }
+    if let Some(max_loaded_models) = payload.max_loaded_models {
+        engine.set_max_loaded_models(max_loaded_models);
+        runtime_state.config.routing.max_loaded_models = max_loaded_models;
+    }
+    Ok(())
+}
+
+fn runtime_control_snapshot(
+    engine: &InferenceEngine,
+    runtime_state: &ServerRuntimeControlState,
+) -> RuntimeControlSnapshot {
+    let snapshot = engine.runtime_snapshot();
+    RuntimeControlSnapshot {
+        config: runtime_state.config.clone(),
+        model_pool: snapshot.model_pool,
+        tiered_offload_runtime: snapshot.tiered_offload_runtime,
+        features: snapshot.features,
+    }
 }
 
 fn serialize_response<T: Serialize>(value: &T) -> String {

@@ -1,60 +1,106 @@
 # Loci
 
-Loci 是一个面向端侧异构执行、分层 offload、Paged KV Cache 与可选动态模型路由的 Rust 推理基础设施项目。
+Loci 是一个面向端侧异构优先、同时覆盖本地与服务器部署的 Rust 推理运行时。
 
-Loci 当前由一组清晰的 workspace crate 组成：
+同一套运行时核心同时支持两种集成形态：
 
-- `loci-protocol` 负责共享契约
-- `loci-core` 负责编排、路由与规划
-- `loci-backend-openvino` 与 `loci-backend-candle` 负责 backend 集成边界
-- `loci-tiered-offload` 与 `loci-paged-kv` 负责专项规划
-- `loci-cli` 与 `loci-server` 提供本地运行入口
+- 作为 embeddable Rust SDK，在应用进程内直接推理
+- 作为 standalone service，通过 CLI/HTTP 暴露本地或服务器能力
 
-`loci-core` 当前暴露这些 feature：
+Loci 负责模型注册、就绪性检查、异构执行规划，以及跨 `CPU`、`GPU`、`NPU`、`Disk` 的分层 offload。
 
-- `openvino`
-- `candle`
-- `tiered-offload`
-- `paged-kv`
-- `power-aware`
-- `dynamic-routing`
+## 当前仓库定位
 
-默认 feature：
+当前 workspace 主要围绕这些用户可见入口组织：
 
-```toml
-default = ["openvino", "power-aware", "tiered-offload", "paged-kv"]
-```
+- `loci-sdk`：进程内嵌入使用
+- `loci-cli` 与 `loci-server`：独立服务与命令行入口
+- `loci-core`：规划、准备、运行时快照与统一控制面
+- `loci-backend-candle`：默认的可移植 Rust backend 形态
+- `loci-backend-openvino`：可选的 Intel 加速路径
 
-基础用法：
+当前文档和示例统一采用偏磁盘的规划配置，也就是 `TieredOffloadProfile::DiskHeavy`，并显式设置 spill/prefetch/KV 参数，反映当前仓库中的真实异构运行方式。
 
-```bash
-cargo run -p loci-cli -- --model-path D:/models/demo.gguf --model-name demo --model-memory-bytes 2147483648
-```
+## 命令行快速开始
+
+本地单次推理，或作为嵌入式/服务端运行：
 
 ```bash
 cargo run -p loci-cli -- \
   --model-path D:/models/demo.gguf \
   --model-name demo \
-  --model-memory-bytes 2147483648 \
+  --offload-profile disk_heavy \
+  --spill-threshold-bytes 536870912 \
+  --max-disk-bytes 68719476736 \
+  --prefetch-window-bytes 134217728 \
+  --block-size-tokens 32 \
+  --type-kv q4_0 \
   --prompt "Explain the current execution plan."
 ```
 
+启动可本地部署或服务器部署的独立服务：
+
 ```bash
 cargo run -p loci-cli -- \
   --model-path D:/models/demo.gguf \
   --model-name demo \
-  --model-memory-bytes 2147483648 \
+  --offload-profile disk_heavy \
+  --spill-threshold-bytes 536870912 \
+  --max-disk-bytes 68719476736 \
+  --prefetch-window-bytes 134217728 \
+  --block-size-tokens 32 \
+  --type-kv q4_0 \
   --server-bind 127.0.0.1:8080
 ```
 
-HTTP 路由：
+## SDK 嵌入示例
 
-- `GET /health`
-- `GET /v1/runtime`
-- `GET /v1/models`
-- `POST /v1/models/register`
-- `POST /v1/models/unregister`
-- `POST /v1/plan`
-- `POST /v1/inference`
-- `POST /v1/completions`
-- `POST /v1/chat/completions`
+```rust
+use loci_sdk::loci_core::TieredOffloadProfile;
+use loci_sdk::{
+    LocalModelRegistrationRequest, Loci, ModelPreparationRequest, TextGenerationRequest,
+};
+
+let mut loci = Loci::builder()
+    .tiered_offload_profile(TieredOffloadProfile::DiskHeavy)
+    .spill_threshold_bytes(512 * 1024 * 1024)
+    .max_disk_bytes(64 * 1024 * 1024 * 1024)
+    .prefetch_window_bytes(128 * 1024 * 1024)
+    .kv_block_size_tokens(32)
+    .kv_types("q8_0", "q4_0")
+    .build()?;
+
+loci.register_model(
+    LocalModelRegistrationRequest::new("D:/models/demo.gguf").name("embedded-demo"),
+)?;
+
+loci.prepare_model(ModelPreparationRequest::new().model("embedded-demo"))?;
+
+let response = loci.generate_text(
+    TextGenerationRequest::new("Reply in one short friendly sentence.")
+        .model("embedded-demo")
+        .max_tokens(48)
+        .temperature(0.7),
+)?;
+```
+
+## 示例入口
+
+- `cargo run -p sdk-local --features openvino -- <model-path>`：直接嵌入 `loci-sdk`
+- `cargo run -p sdk-service --features openvino -- <model-path> 127.0.0.1:18081`：通过 SDK facade 启动独立本地服务
+- `cargo run -p embedded-local --features openvino -- <model-path>`：从 `examples/embedded-pet` 直接使用 `loci-core`
+
+两个进程内示例都展示了当前仓库约定的参数：
+
+- `TieredOffloadProfile::DiskHeavy`
+- `spill_threshold_bytes = 512 MiB`
+- `max_disk_bytes = 64 GiB`
+- `prefetch_window_bytes = 128 MiB`
+- `kv_block_size_tokens = 32`
+- `kv_types = q8_0/q4_0`
+
+## 更多文档
+
+- [仓库布局](./docs/LAYOUT.md)
+- [MVP 计划](./docs/MVP_PLAN.md)
+- [架构说明](./docs/ARCHITECTURE.md)
