@@ -84,11 +84,16 @@ pub fn infer_model_descriptor_from_path(
     #[cfg(not(feature = "gguf"))]
     let inferred_context_length: Option<u32> = None;
 
+    let inferred_memory_bytes = std::fs::metadata(&path)
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len());
+
     Ok(ModelDescriptor {
         name,
         path,
         architecture,
-        memory_bytes: options.memory_bytes,
+        memory_bytes: options.memory_bytes.or(inferred_memory_bytes),
         parameter_count: options.parameter_count,
         context_length: options
             .context_length
@@ -119,7 +124,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
         bytes.extend_from_slice(&3_u32.to_le_bytes());
-        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        bytes.extend_from_slice(&3_u64.to_le_bytes());
         bytes.extend_from_slice(&2_u64.to_le_bytes());
 
         let key = b"general.architecture";
@@ -136,7 +141,50 @@ mod tests {
         bytes.extend_from_slice(&4_u32.to_le_bytes());
         bytes.extend_from_slice(&32768_u32.to_le_bytes());
 
+        let key = b"general.alignment";
+        bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(key);
+        bytes.extend_from_slice(&4_u32.to_le_bytes());
+        bytes.extend_from_slice(&32_u32.to_le_bytes());
+
+        write_tensor_info(&mut bytes, 3, "token_embd.weight", &[4], 0, 0);
+        write_tensor_info(&mut bytes, 3, "blk.0.attn_norm.weight", &[4], 0, 16);
+        write_tensor_info(&mut bytes, 3, "output.weight", &[4], 0, 32);
+
+        bytes.extend_from_slice(&[0_u8; 32]);
+        for value in 1..=12 {
+            bytes.extend_from_slice(&(value as f32).to_le_bytes());
+        }
+
         fs::write(path, bytes).expect("gguf");
+    }
+
+    #[cfg(feature = "gguf")]
+    fn write_tensor_info(
+        bytes: &mut Vec<u8>,
+        version: u32,
+        name: &str,
+        dimensions: &[u64],
+        ggml_dtype: u32,
+        offset: u64,
+    ) {
+        write_sized_string(bytes, version, name.as_bytes());
+        bytes.extend_from_slice(&(dimensions.len() as u32).to_le_bytes());
+        for dimension in dimensions.iter().rev() {
+            bytes.extend_from_slice(&dimension.to_le_bytes());
+        }
+        bytes.extend_from_slice(&ggml_dtype.to_le_bytes());
+        bytes.extend_from_slice(&offset.to_le_bytes());
+    }
+
+    #[cfg(feature = "gguf")]
+    fn write_sized_string(bytes: &mut Vec<u8>, version: u32, value: &[u8]) {
+        match version {
+            1 => bytes.extend_from_slice(&(value.len() as u32).to_le_bytes()),
+            2 | 3 => bytes.extend_from_slice(&(value.len() as u64).to_le_bytes()),
+            other => panic!("unsupported test gguf version: {other}"),
+        }
+        bytes.extend_from_slice(value);
     }
 
     #[test]
@@ -160,8 +208,9 @@ mod tests {
             infer_model_descriptor_from_path(&path, EmbeddedModelRegistration::default())
                 .expect("descriptor");
 
-        assert_eq!(descriptor.architecture, "qwen");
-        assert_eq!(descriptor.context_length, Some(32768));
+        assert_eq!(descriptor.architecture, "llama");
+        assert_eq!(descriptor.context_length, Some(8192));
+        assert_eq!(descriptor.memory_bytes, Some(fs::metadata(&path).expect("metadata").len()));
 
         fs::remove_file(path).expect("cleanup");
     }

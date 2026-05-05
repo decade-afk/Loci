@@ -87,6 +87,12 @@ struct UpdatePlannerConfigRequest {
     #[serde(default)]
     offload_profile: Option<TieredOffloadProfile>,
     #[serde(default)]
+    spill_threshold_bytes: Option<u64>,
+    #[serde(default)]
+    max_disk_bytes: Option<u64>,
+    #[serde(default)]
+    prefetch_window_bytes: Option<u64>,
+    #[serde(default)]
     kv_block_size_tokens: Option<u32>,
     #[serde(default)]
     kv_prefix_cache_enabled: Option<bool>,
@@ -556,6 +562,15 @@ fn apply_planner_config(engine: &mut InferenceEngine, payload: UpdatePlannerConf
     }
     if let Some(offload_profile) = payload.offload_profile {
         engine.set_offload_profile(offload_profile);
+    }
+    if let Some(spill_threshold_bytes) = payload.spill_threshold_bytes {
+        engine.set_spill_threshold_bytes(Some(spill_threshold_bytes));
+    }
+    if let Some(max_disk_bytes) = payload.max_disk_bytes {
+        engine.set_max_disk_bytes(Some(max_disk_bytes));
+    }
+    if let Some(prefetch_window_bytes) = payload.prefetch_window_bytes {
+        engine.set_prefetch_window_bytes(Some(prefetch_window_bytes));
     }
     if let Some(block_size_tokens) = payload.kv_block_size_tokens {
         engine.set_kv_block_size_tokens(block_size_tokens);
@@ -1120,12 +1135,101 @@ fn collect_http_images(images: Vec<HttpImageInput>) -> Result<Vec<ImageInput>, S
 mod tests {
     use super::*;
     use loci_core::{EngineConfig, InferenceEngine};
+    #[cfg(feature = "gguf")]
+    use std::fs;
+    #[cfg(feature = "gguf")]
+    use std::time::{SystemTime, UNIX_EPOCH};
+    #[cfg(feature = "gguf")]
+    const GGUF_MAGIC: u32 = u32::from_le_bytes(*b"GGUF");
+
+    #[cfg(feature = "gguf")]
+    fn unique_temp_path(label: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("loci-server-{label}-{suffix}.gguf"))
+    }
+
+    #[cfg(feature = "gguf")]
+    fn write_minimal_gguf(path: &PathBuf) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        bytes.extend_from_slice(&3_u32.to_le_bytes());
+        bytes.extend_from_slice(&3_u64.to_le_bytes());
+        bytes.extend_from_slice(&2_u64.to_le_bytes());
+
+        let key = b"general.architecture";
+        bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(key);
+        bytes.extend_from_slice(&8_u32.to_le_bytes());
+        let value = b"llama";
+        bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(value);
+
+        let key = b"general.alignment";
+        bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(key);
+        bytes.extend_from_slice(&4_u32.to_le_bytes());
+        bytes.extend_from_slice(&32_u32.to_le_bytes());
+
+        write_tensor_info(&mut bytes, 3, "token_embd.weight", &[4], 0, 0);
+        write_tensor_info(&mut bytes, 3, "blk.0.attn_norm.weight", &[4], 0, 16);
+        write_tensor_info(&mut bytes, 3, "output.weight", &[4], 0, 32);
+
+        bytes.extend_from_slice(&[0_u8; 32]);
+        for value in 1..=12 {
+            bytes.extend_from_slice(&(value as f32).to_le_bytes());
+        }
+
+        fs::write(path, bytes).expect("gguf");
+    }
+
+    #[cfg(feature = "gguf")]
+    fn write_tensor_info(
+        bytes: &mut Vec<u8>,
+        version: u32,
+        name: &str,
+        dimensions: &[u64],
+        ggml_dtype: u32,
+        offset: u64,
+    ) {
+        write_sized_string(bytes, version, name.as_bytes());
+        bytes.extend_from_slice(&(dimensions.len() as u32).to_le_bytes());
+        for dimension in dimensions.iter().rev() {
+            bytes.extend_from_slice(&dimension.to_le_bytes());
+        }
+        bytes.extend_from_slice(&ggml_dtype.to_le_bytes());
+        bytes.extend_from_slice(&offset.to_le_bytes());
+    }
+
+    #[cfg(feature = "gguf")]
+    fn write_sized_string(bytes: &mut Vec<u8>, version: u32, value: &[u8]) {
+        match version {
+            1 => bytes.extend_from_slice(&(value.len() as u32).to_le_bytes()),
+            2 | 3 => bytes.extend_from_slice(&(value.len() as u64).to_le_bytes()),
+            other => panic!("unsupported test gguf version: {other}"),
+        }
+        bytes.extend_from_slice(value);
+    }
+
+    #[cfg(feature = "gguf")]
+    fn test_model_path(name: &str) -> PathBuf {
+        let path = unique_temp_path(name);
+        write_minimal_gguf(&path);
+        path
+    }
+
+    #[cfg(not(feature = "gguf"))]
+    fn test_model_path(name: &str) -> PathBuf {
+        PathBuf::from(format!("D:/models/{name}.gguf"))
+    }
 
     fn engine_with_model() -> InferenceEngine {
         InferenceEngine::builder()
             .model(ModelDescriptor {
                 name: "demo".to_string(),
-                path: PathBuf::from("D:/models/demo.gguf"),
+                path: test_model_path("demo"),
                 architecture: "llama".to_string(),
                 memory_bytes: Some(2 * 1024 * 1024 * 1024),
                 parameter_count: Some(1_000_000_000),
@@ -1220,7 +1324,7 @@ mod tests {
             .config(EngineConfig::default())
             .model(ModelDescriptor {
                 name: "demo".to_string(),
-                path: PathBuf::from("D:/models/demo.gguf"),
+                path: test_model_path("demo-config"),
                 architecture: "llama".to_string(),
                 memory_bytes: Some(2 * 1024 * 1024 * 1024),
                 parameter_count: Some(1_000_000_000),
@@ -1259,7 +1363,7 @@ mod tests {
             .config(EngineConfig::default())
             .model(ModelDescriptor {
                 name: "demo".to_string(),
-                path: PathBuf::from("D:/models/demo.gguf"),
+                path: test_model_path("demo-route-a"),
                 architecture: "llama".to_string(),
                 memory_bytes: Some(2 * 1024 * 1024 * 1024),
                 parameter_count: Some(1_000_000_000),
@@ -1268,7 +1372,7 @@ mod tests {
             })
             .model(ModelDescriptor {
                 name: "demo-2".to_string(),
-                path: PathBuf::from("D:/models/demo-2.gguf"),
+                path: test_model_path("demo-route-b"),
                 architecture: "llama".to_string(),
                 memory_bytes: Some(2 * 1024 * 1024 * 1024),
                 parameter_count: Some(2_000_000_000),
@@ -1400,7 +1504,7 @@ mod tests {
             .config(EngineConfig::default())
             .model(ModelDescriptor {
                 name: "small".to_string(),
-                path: PathBuf::from("D:/models/small.gguf"),
+                path: test_model_path("small"),
                 architecture: "llama".to_string(),
                 memory_bytes: Some(2 * 1024 * 1024 * 1024),
                 parameter_count: Some(1_000_000_000),
@@ -1409,7 +1513,7 @@ mod tests {
             })
             .model(ModelDescriptor {
                 name: "large".to_string(),
-                path: PathBuf::from("D:/models/large.gguf"),
+                path: test_model_path("large"),
                 architecture: "llama".to_string(),
                 memory_bytes: Some(8 * 1024 * 1024 * 1024),
                 parameter_count: Some(8_000_000_000),

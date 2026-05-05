@@ -30,6 +30,8 @@ pub struct GgufMetadataSummary {
     pub general_name: Option<String>,
     pub alignment: Option<u64>,
     pub selected_metadata: BTreeMap<String, String>,
+    pub tokenizer_tokens: Option<Vec<String>>,
+    pub tokenizer_types: Option<Vec<u32>>,
     pub tensor_table: GgufTensorTableSummary,
 }
 
@@ -48,6 +50,8 @@ pub struct GgufTensorTableSummary {
     pub alignment: u64,
     pub tensor_data_offset: u64,
     pub preview_names: Vec<String>,
+    pub candidate_names: Vec<String>,
+    pub tensor_infos: Vec<GgufTensorInfoSummary>,
     pub first_tensor: Option<GgufTensorInfoSummary>,
     pub last_tensor: Option<GgufTensorInfoSummary>,
     pub max_rank: u32,
@@ -56,6 +60,13 @@ pub struct GgufTensorTableSummary {
     pub norm_tensor_count: u32,
     pub contains_output_weight: bool,
     pub contains_token_embedding: bool,
+}
+
+/// A small prefix of a real GGUF tensor payload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GgufTensorPrefix {
+    pub info: GgufTensorInfoSummary,
+    pub values_f32: Vec<f32>,
 }
 
 #[derive(Debug)]
@@ -186,6 +197,16 @@ pub fn read_gguf_metadata_summary(
     parse_gguf_metadata_summary_bytes(&bytes)
 }
 
+/// Reads a named GGUF tensor prefix and converts the first values into f32.
+pub fn read_gguf_tensor_prefix_f32(
+    path: impl AsRef<Path>,
+    tensor_name: &str,
+    max_elements: usize,
+) -> Result<Option<GgufTensorPrefix>, GgufHeaderError> {
+    let bytes = std::fs::read(path)?;
+    parse_gguf_tensor_prefix_f32_bytes(&bytes, tensor_name, max_elements)
+}
+
 /// Parses a GGUF header from an in-memory buffer.
 pub fn parse_gguf_header_bytes(bytes: &[u8]) -> Result<GgufHeader, GgufHeaderError> {
     let mut cursor = Cursor::new(bytes);
@@ -225,6 +246,8 @@ pub fn parse_gguf_metadata_summary_bytes(
     let mut general_name = None;
     let mut alignment = None;
     let mut selected_metadata = BTreeMap::new();
+    let mut tokenizer_tokens = None;
+    let mut tokenizer_types = None;
 
     for _ in 0..header.metadata_count {
         let key = read_sized_string(&mut cursor, header.version, "metadata_key")?;
@@ -245,6 +268,10 @@ pub fn parse_gguf_metadata_summary_bytes(
             }
         } else if key == "general.alignment" {
             alignment = value.as_u64();
+        } else if key == "tokenizer.ggml.tokens" {
+            tokenizer_tokens = value.as_string_array();
+        } else if key == "tokenizer.ggml.token_type" {
+            tokenizer_types = value.as_u32_array();
         }
 
         if should_capture_metadata_key(&key) {
@@ -266,8 +293,48 @@ pub fn parse_gguf_metadata_summary_bytes(
         general_name,
         alignment,
         selected_metadata,
+        tokenizer_tokens,
+        tokenizer_types,
         tensor_table,
     })
+}
+
+/// Parses an in-memory GGUF buffer and returns a named tensor prefix when available.
+pub fn parse_gguf_tensor_prefix_f32_bytes(
+    bytes: &[u8],
+    tensor_name: &str,
+    max_elements: usize,
+) -> Result<Option<GgufTensorPrefix>, GgufHeaderError> {
+    let mut cursor = Cursor::new(bytes);
+    let header = parse_header_from_cursor(&mut cursor)?;
+    let mut alignment = None;
+
+    for _ in 0..header.metadata_count {
+        let key = read_sized_string(&mut cursor, header.version, "metadata_key")?;
+        let value_type = read_u32(&mut cursor, "metadata_value_type")?;
+        let value = read_metadata_value(&mut cursor, header.version, value_type)?;
+        if key == "general.alignment" {
+            alignment = value.as_u64();
+        }
+    }
+
+    let tensor_table = read_tensor_table_summary(
+        &mut cursor,
+        header.version,
+        header.tensor_count,
+        alignment.unwrap_or(32),
+    )?;
+    let info = match tensor_table
+        .tensor_infos
+        .iter()
+        .find(|tensor| tensor.name == tensor_name)
+        .cloned()
+    {
+        Some(info) => info,
+        None => return Ok(None),
+    };
+    let values_f32 = read_tensor_prefix_values_f32(bytes, &tensor_table, &info, max_elements)?;
+    Ok(Some(GgufTensorPrefix { info, values_f32 }))
 }
 
 fn parse_header_from_cursor(cursor: &mut Cursor<&[u8]>) -> Result<GgufHeader, GgufHeaderError> {
@@ -359,6 +426,33 @@ impl GgufMetadataValue {
             Self::F64(value) => format!("{value}"),
         }
     }
+
+    fn as_string_array(&self) -> Option<Vec<String>> {
+        match self {
+            Self::Array(values) => Some(
+                values
+                    .iter()
+                    .filter_map(|value| match value {
+                        Self::String(text) => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
+    fn as_u32_array(&self) -> Option<Vec<u32>> {
+        match self {
+            Self::Array(values) => Some(
+                values
+                    .iter()
+                    .filter_map(|value| value.as_u32())
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
 }
 
 fn should_capture_metadata_key(key: &str) -> bool {
@@ -407,6 +501,18 @@ fn read_tensor_table_summary(
         .take(6)
         .map(|tensor| tensor.name.clone())
         .collect::<Vec<_>>();
+    let candidate_names = tensor_infos
+        .iter()
+        .filter(|tensor| {
+            tensor.name.contains("norm")
+                || tensor.name.contains("output")
+                || tensor.name.contains("embd")
+                || tensor.name.contains("embed")
+                || tensor.name.contains("lm_head")
+        })
+        .take(32)
+        .map(|tensor| tensor.name.clone())
+        .collect::<Vec<_>>();
     let attention_tensor_count = tensor_infos
         .iter()
         .filter(|tensor| tensor.name.contains("attn"))
@@ -437,6 +543,8 @@ fn read_tensor_table_summary(
         alignment,
         tensor_data_offset,
         preview_names,
+        candidate_names,
+        tensor_infos: tensor_infos.clone(),
         first_tensor: tensor_infos.first().cloned(),
         last_tensor: tensor_infos.last().cloned(),
         max_rank,
@@ -446,6 +554,187 @@ fn read_tensor_table_summary(
         contains_output_weight,
         contains_token_embedding,
     })
+}
+
+fn read_tensor_prefix_values_f32(
+    bytes: &[u8],
+    table: &GgufTensorTableSummary,
+    info: &GgufTensorInfoSummary,
+    max_elements: usize,
+) -> Result<Vec<f32>, GgufHeaderError> {
+    let available = tensor_element_count(&info.dimensions) as usize;
+    let start = table.tensor_data_offset.saturating_add(info.offset) as usize;
+    if start >= bytes.len() {
+        return Ok(Vec::new());
+    }
+    match info.ggml_dtype {
+        0 => read_plain_tensor_prefix_values_f32(bytes, start, available, max_elements, 4, |chunk| {
+            f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+        }),
+        1 => read_plain_tensor_prefix_values_f32(bytes, start, available, max_elements, 2, |chunk| {
+            f16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]]))
+        }),
+        2 => read_q4_0_tensor_prefix_values_f32(bytes, start, available, max_elements),
+        8 => read_q8_0_tensor_prefix_values_f32(bytes, start, available, max_elements),
+        _ => Err(GgufHeaderError::UnexpectedEof("unsupported_tensor_dtype")),
+    }
+}
+
+fn read_plain_tensor_prefix_values_f32(
+    bytes: &[u8],
+    start: usize,
+    available: usize,
+    max_elements: usize,
+    bytes_per_elem: usize,
+    decode: impl Fn(&[u8]) -> f32,
+) -> Result<Vec<f32>, GgufHeaderError> {
+    let available_by_file = (bytes.len() - start) / bytes_per_elem;
+    let elements = available.min(max_elements).min(available_by_file);
+    if elements == 0 {
+        return Ok(Vec::new());
+    }
+    let end = start.saturating_add(elements.saturating_mul(bytes_per_elem));
+    if end > bytes.len() {
+        return Err(GgufHeaderError::UnexpectedEof("tensor_payload"));
+    }
+
+    Ok(bytes[start..end]
+        .chunks_exact(bytes_per_elem)
+        .map(decode)
+        .collect())
+}
+
+fn read_q4_0_tensor_prefix_values_f32(
+    bytes: &[u8],
+    start: usize,
+    available: usize,
+    max_elements: usize,
+) -> Result<Vec<f32>, GgufHeaderError> {
+    read_quantized_tensor_prefix_values_f32(
+        bytes,
+        start,
+        available,
+        max_elements,
+        32,
+        18,
+        dequantize_block_q4_0,
+    )
+}
+
+fn read_q8_0_tensor_prefix_values_f32(
+    bytes: &[u8],
+    start: usize,
+    available: usize,
+    max_elements: usize,
+) -> Result<Vec<f32>, GgufHeaderError> {
+    read_quantized_tensor_prefix_values_f32(
+        bytes,
+        start,
+        available,
+        max_elements,
+        32,
+        34,
+        dequantize_block_q8_0,
+    )
+}
+
+fn read_quantized_tensor_prefix_values_f32(
+    bytes: &[u8],
+    start: usize,
+    available: usize,
+    max_elements: usize,
+    block_elements: usize,
+    block_bytes: usize,
+    decode_block: impl Fn(&[u8], &mut Vec<f32>) -> Result<(), GgufHeaderError>,
+) -> Result<Vec<f32>, GgufHeaderError> {
+    let requested = available.min(max_elements);
+    if requested == 0 {
+        return Ok(Vec::new());
+    }
+
+    let blocks_by_tensor = available.div_ceil(block_elements);
+    let blocks_by_request = requested.div_ceil(block_elements);
+    let blocks_by_file = (bytes.len() - start) / block_bytes;
+    let blocks = blocks_by_tensor.min(blocks_by_request).min(blocks_by_file);
+    if blocks == 0 {
+        return Ok(Vec::new());
+    }
+
+    let end = start.saturating_add(blocks.saturating_mul(block_bytes));
+    if end > bytes.len() {
+        return Err(GgufHeaderError::UnexpectedEof("tensor_payload"));
+    }
+
+    let mut values = Vec::with_capacity(blocks.saturating_mul(block_elements));
+    for block in bytes[start..end].chunks_exact(block_bytes) {
+        decode_block(block, &mut values)?;
+    }
+    values.truncate(requested);
+    Ok(values)
+}
+
+fn dequantize_block_q4_0(block: &[u8], out: &mut Vec<f32>) -> Result<(), GgufHeaderError> {
+    if block.len() != 18 {
+        return Err(GgufHeaderError::UnexpectedEof("q4_0_block"));
+    }
+    let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+    let qs = &block[2..];
+    for byte in qs {
+        let low = ((byte & 0x0f) as i16 - 8) as f32;
+        out.push(low * d);
+    }
+    for byte in qs {
+        let high = ((byte >> 4) as i16 - 8) as f32;
+        out.push(high * d);
+    }
+    Ok(())
+}
+
+fn dequantize_block_q8_0(block: &[u8], out: &mut Vec<f32>) -> Result<(), GgufHeaderError> {
+    if block.len() != 34 {
+        return Err(GgufHeaderError::UnexpectedEof("q8_0_block"));
+    }
+    let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+    for value in &block[2..] {
+        out.push((*value as i8) as f32 * d);
+    }
+    Ok(())
+}
+
+fn tensor_element_count(dimensions: &[u64]) -> u64 {
+    if dimensions.is_empty() {
+        return 0;
+    }
+    dimensions
+        .iter()
+        .copied()
+        .fold(1_u64, |acc, value| acc.saturating_mul(value.max(1)))
+}
+
+fn f16_to_f32(bits: u16) -> f32 {
+    let sign = ((bits >> 15) & 0x1) as u32;
+    let exp = ((bits >> 10) & 0x1f) as u32;
+    let frac = (bits & 0x03ff) as u32;
+    let fbits = if exp == 0 {
+        if frac == 0 {
+            sign << 31
+        } else {
+            let mut frac = frac;
+            let mut exp = 127 - 15 + 1;
+            while (frac & 0x0400) == 0 {
+                frac <<= 1;
+                exp -= 1;
+            }
+            frac &= 0x03ff;
+            (sign << 31) | (exp << 23) | (frac << 13)
+        }
+    } else if exp == 0x1f {
+        (sign << 31) | 0x7f80_0000 | (frac << 13)
+    } else {
+        let exp = exp + (127 - 15);
+        (sign << 31) | (exp << 23) | (frac << 13)
+    };
+    f32::from_bits(fbits)
 }
 
 fn read_metadata_value(
@@ -806,5 +1095,112 @@ mod tests {
 
         let summary = parse_gguf_metadata_summary_bytes(&bytes).expect("summary");
         assert_eq!(summary.architecture.as_deref(), Some("llama"));
+    }
+
+    #[test]
+    fn reads_q8_0_tensor_prefix_values() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0x3800_u16.to_le_bytes());
+        payload.extend((0..32).map(|value| value as i8 as u8));
+
+        let bytes = write_single_tensor_gguf("output.weight", &[32], 8, &payload);
+        let tensor = parse_gguf_tensor_prefix_f32_bytes(&bytes, "output.weight", 6)
+            .expect("tensor")
+            .expect("prefix");
+
+        assert_eq!(tensor.info.ggml_dtype, 8);
+        assert_eq!(tensor.values_f32, vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5]);
+    }
+
+    #[test]
+    fn reads_q4_0_tensor_prefix_values() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0x3400_u16.to_le_bytes());
+        payload.extend(std::iter::repeat_n(0x98_u8, 16));
+
+        let bytes = write_single_tensor_gguf("output.weight", &[32], 2, &payload);
+        let tensor = parse_gguf_tensor_prefix_f32_bytes(&bytes, "output.weight", 20)
+            .expect("tensor")
+            .expect("prefix");
+
+        assert_eq!(tensor.info.ggml_dtype, 2);
+        assert_eq!(tensor.values_f32.len(), 20);
+        assert!(tensor.values_f32[..16].iter().all(|value| *value == 0.0));
+        assert!(tensor.values_f32[16..].iter().all(|value| *value == 0.25));
+    }
+
+    #[test]
+    fn reads_real_qwen_fp16_gguf_metadata_when_available() {
+        let path = PathBuf::from(
+            "D:/Code/Loci/tmp/models/qwen2.5-0.5b-instruct-gguf-ms/qwen2.5-0.5b-instruct-fp16.gguf",
+        );
+        if !path.exists() {
+            return;
+        }
+
+        let bytes = fs::read(&path).expect("read");
+        if bytes.starts_with(b"version https://git-lfs.github.com/spec") {
+            return;
+        }
+
+        let summary = parse_gguf_metadata_summary_bytes(&bytes).expect("summary");
+        assert!(summary.header.tensor_count > 0);
+        assert!(summary.header.metadata_count > 0);
+        assert!(summary.tensor_table.tensor_data_offset > 0);
+        assert!(!summary.tensor_table.tensor_infos.is_empty());
+    }
+
+    fn write_single_tensor_gguf(
+        name: &str,
+        dimensions: &[u64],
+        ggml_dtype: u32,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let version = 3_u32;
+        let alignment = 32_u32;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        bytes.extend_from_slice(&version.to_le_bytes());
+        bytes.extend_from_slice(&1_u64.to_le_bytes());
+        bytes.extend_from_slice(&1_u64.to_le_bytes());
+
+        let key = b"general.alignment";
+        bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(key);
+        bytes.extend_from_slice(&4_u32.to_le_bytes());
+        bytes.extend_from_slice(&alignment.to_le_bytes());
+
+        write_tensor_info(&mut bytes, version, name, dimensions, ggml_dtype, 0);
+        while bytes.len() % alignment as usize != 0 {
+            bytes.push(0);
+        }
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    fn write_tensor_info(
+        bytes: &mut Vec<u8>,
+        version: u32,
+        name: &str,
+        dimensions: &[u64],
+        ggml_dtype: u32,
+        offset: u64,
+    ) {
+        write_sized_string(bytes, version, name.as_bytes());
+        bytes.extend_from_slice(&(dimensions.len() as u32).to_le_bytes());
+        for dimension in dimensions.iter().rev() {
+            bytes.extend_from_slice(&dimension.to_le_bytes());
+        }
+        bytes.extend_from_slice(&ggml_dtype.to_le_bytes());
+        bytes.extend_from_slice(&offset.to_le_bytes());
+    }
+
+    fn write_sized_string(bytes: &mut Vec<u8>, version: u32, value: &[u8]) {
+        match version {
+            1 => bytes.extend_from_slice(&(value.len() as u32).to_le_bytes()),
+            2 | 3 => bytes.extend_from_slice(&(value.len() as u64).to_le_bytes()),
+            other => panic!("unsupported test gguf version: {other}"),
+        }
+        bytes.extend_from_slice(value);
     }
 }

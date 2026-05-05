@@ -28,11 +28,15 @@ struct CliArgs {
     kv_type: Option<String>,
     block_size_tokens: Option<u32>,
     offload_profile: Option<TieredOffloadProfile>,
+    spill_threshold_bytes: Option<u64>,
+    max_disk_bytes: Option<u64>,
+    prefetch_window_bytes: Option<u64>,
     model_aliases: Vec<(String, String)>,
     structured_output: bool,
     tool_calling: bool,
     max_tokens: u32,
     inspect_models: bool,
+    runtime_snapshot: bool,
 }
 
 impl CliArgs {
@@ -115,6 +119,18 @@ impl CliArgs {
                         "--offload-profile",
                     )?)?);
                 }
+                "--spill-threshold-bytes" => {
+                    parsed.spill_threshold_bytes =
+                        Some(next_arg(&mut args, "--spill-threshold-bytes")?.parse()?);
+                }
+                "--max-disk-bytes" => {
+                    parsed.max_disk_bytes =
+                        Some(next_arg(&mut args, "--max-disk-bytes")?.parse()?);
+                }
+                "--prefetch-window-bytes" => {
+                    parsed.prefetch_window_bytes =
+                        Some(next_arg(&mut args, "--prefetch-window-bytes")?.parse()?);
+                }
                 "--model-alias" => {
                     parsed
                         .model_aliases
@@ -131,6 +147,9 @@ impl CliArgs {
                 }
                 "--inspect-models" => {
                     parsed.inspect_models = true;
+                }
+                "--runtime-snapshot" => {
+                    parsed.runtime_snapshot = true;
                 }
                 other => anyhow::bail!("unknown argument: {other}"),
             }
@@ -167,6 +186,15 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(offload_profile) = args.offload_profile {
         config.tiered_offload.profile = offload_profile;
+    }
+    if let Some(spill_threshold_bytes) = args.spill_threshold_bytes {
+        config.tiered_offload.spill_threshold_bytes = Some(spill_threshold_bytes);
+    }
+    if let Some(max_disk_bytes) = args.max_disk_bytes {
+        config.tiered_offload.max_disk_bytes = Some(max_disk_bytes);
+    }
+    if let Some(prefetch_window_bytes) = args.prefetch_window_bytes {
+        config.tiered_offload.prefetch_window_bytes = Some(prefetch_window_bytes);
     }
     for (alias, target) in &args.model_aliases {
         config.model_aliases.insert(alias.clone(), target.clone());
@@ -210,7 +238,13 @@ fn main() -> anyhow::Result<()> {
             structured_output: args.structured_output,
             tool_calling: args.tool_calling,
         })?;
-        println!("{}", serde_json::to_string_pretty(&prepared)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "prepared": prepared,
+                "runtime": engine.runtime_snapshot(),
+            }))?
+        );
         return Ok(());
     }
 
@@ -226,6 +260,14 @@ fn main() -> anyhow::Result<()> {
                 serde_json::to_string_pretty(&engine.inspect_models())?
             );
         }
+        return Ok(());
+    }
+
+    if args.runtime_snapshot {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&engine.runtime_snapshot())?
+        );
         return Ok(());
     }
 

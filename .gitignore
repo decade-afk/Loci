@@ -46,6 +46,15 @@ runtime/
 !plugins/example-ui-shell/runtime/plugin.dll
 sessions/
 tmp/
+.cargo-local/
+vendor/
+deps/reference/
+*.stdout.log
+*.stderr.log
+server-out.log
+server-err.log
+sample-image.jpg
+test-image.png
 examples/**/output/
 examples/**/target/
 target-ninja/

@@ -9,7 +9,7 @@ use loci_protocol::{
     ModelDescriptor, ModelFormat, OpenVinoExecutionMode, OpenVinoExecutionProfile, PipelineStage,
     PlacementDecision, PowerState, PreparedModel, PreparedResidency, SessionRequest, ThermalState,
 };
-use openvino::{Core, DeviceType, ElementType, Shape, Tensor};
+use openvino::{CompiledModel, Core, DeviceType, ElementType, Shape, Tensor};
 use openvino_genai::{
     DecodedResults, GenerationConfig, LlmPipeline, VlmDecodedResults, VlmPipeline,
 };
@@ -186,6 +186,11 @@ struct RealSession {
 enum RealPipeline {
     Llm(LlmPipeline),
     Vlm(VlmPipeline),
+    Onnx(OnnxSession),
+}
+
+struct OnnxSession {
+    compiled_model: CompiledModel,
 }
 
 struct FallbackSession {
@@ -272,7 +277,10 @@ impl PreparedArtifactResolver {
         if source_root.is_file()
             && matches!(
                 model.inferred_format(),
-                ModelFormat::Gguf | ModelFormat::OpenVinoIr | ModelFormat::OpenVinoBlob
+                ModelFormat::Gguf
+                    | ModelFormat::Onnx
+                    | ModelFormat::OpenVinoIr
+                    | ModelFormat::OpenVinoBlob
             )
         {
             return self.outcome_to_state(PreparationJobOutcome {
@@ -1507,9 +1515,7 @@ impl OpenVinoRuntime {
             SessionSlot::Real(session) => {
                 self.run_real_session(session, model, request, plan, profile)
             }
-            SessionSlot::Fallback(session) => {
-                Ok(run_fallback_session(session, model, request, plan, profile))
-            }
+            SessionSlot::Fallback(session) => fallback_behavior(session, model, request, plan, profile),
         }
     }
 
@@ -1649,6 +1655,14 @@ impl OpenVinoRuntime {
 
                 Ok(BackendOutput { text, telemetry })
             }
+            RealPipeline::Onnx(session) => {
+                if !request.images.is_empty() {
+                    return Err(BackendError {
+                        message: "OpenVINO ONNX text pipeline cannot accept image inputs".to_string(),
+                    });
+                }
+                run_onnx_session(session, model, request, plan, profile)
+            }
             RealPipeline::Vlm(pipeline) => {
                 let image_tensors = load_image_tensors(&request.images)?;
                 let image_ptrs: Vec<_> = image_tensors.iter().map(Tensor::as_c_ptr).collect();
@@ -1687,6 +1701,9 @@ fn create_pipeline(
         .collect();
 
     if model_root.is_file() {
+        if model.inferred_format() == ModelFormat::Onnx {
+            return create_onnx_pipeline(model_root, device_name).map(RealPipeline::Onnx);
+        }
         return LlmPipeline::with_properties(
             &model_root.to_string_lossy(),
             device_name,
@@ -1707,17 +1724,42 @@ fn create_pipeline(
     }
 }
 
+fn create_onnx_pipeline(model_root: &Path, _device_name: &str) -> Result<OnnxSession, String> {
+    if !model_root.is_file() {
+        return Err(format!(
+            "onnx model root `{}` is not a file",
+            model_root.display()
+        ));
+    }
+    Err(format!(
+        "OpenVINO ONNX text execution is not implemented for `{}`: the runtime accepts ONNX as a direct asset layout, but Loci does not yet have a real tokenizer + decode loop on this path",
+        model_root.display()
+    ))
+}
+
+fn run_onnx_session(
+    session: &mut OnnxSession,
+    model: &ModelDescriptor,
+    _request: &SessionRequest,
+    _plan: &ExecutionPlan,
+    _profile: &OpenVinoExecutionProfile,
+) -> BackendResult<BackendOutput> {
+    let _ = &session.compiled_model;
+    Err(BackendError {
+        message: format!(
+            "OpenVINO ONNX execution for model `{}` is not implemented: the direct runtime lane exists, but Loci does not yet provide a real tokenizer + autoregressive decode loop for this backend",
+            model.name
+        ),
+    })
+}
+
 fn validate_model_root_layout(model: &ModelDescriptor, model_root: &Path) -> Result<(), String> {
     if model_root.is_file() {
         return match model.inferred_format() {
-            ModelFormat::Gguf => Ok(()),
-            ModelFormat::Onnx => Err(format!(
-                "model file `{}` is an ONNX asset; convert it to an OpenVINO IR directory before using the OpenVINO GenAI text pipeline",
-                model_root.display()
-            )),
+            ModelFormat::Gguf | ModelFormat::Onnx => Ok(()),
             ModelFormat::OpenVinoIr | ModelFormat::OpenVinoBlob => Ok(()),
             ModelFormat::SafeTensors | ModelFormat::PytorchBin | ModelFormat::Unknown | ModelFormat::Directory => Err(format!(
-                "model file `{}` is not directly executable by the OpenVINO text pipeline; expected GGUF or OpenVINO IR/Blob assets",
+                "model file `{}` is not directly executable by the OpenVINO text pipeline; expected GGUF, ONNX, or OpenVINO IR/Blob assets",
                 model_root.display()
             )),
         };
@@ -1968,6 +2010,34 @@ fn run_fallback_session(
             generated_tokens: request.max_tokens.min(128),
         },
     }
+}
+
+fn fallback_behavior(
+    session: &FallbackSession,
+    model: &ModelDescriptor,
+    request: &SessionRequest,
+    plan: &ExecutionPlan,
+    profile: &OpenVinoExecutionProfile,
+) -> BackendResult<BackendOutput> {
+    let allow_fallback = env::var("LOCI_OPENVINO_ALLOW_FALLBACK")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+
+    if allow_fallback {
+        return Ok(run_fallback_session(session, model, request, plan, profile));
+    }
+
+    Err(BackendError {
+        message: format!(
+            "OpenVINO real execution is unavailable for model `{}`: {}. Set LOCI_OPENVINO_ALLOW_FALLBACK=1 to re-enable diagnostic fallback output.",
+            model.name, session.reason
+        ),
+    })
 }
 
 fn ensure_runtime_bootstrap() -> Option<&'static RuntimeBootstrap> {
@@ -3164,7 +3234,38 @@ mod tests {
     }
 
     #[test]
-    fn execute_uses_cached_fallback_when_openvino_bootstrap_fails() {
+    fn execute_rejects_cached_fallback_when_openvino_real_execution_is_unavailable() {
+        env::remove_var("LOCI_OPENVINO_ALLOW_FALLBACK");
+
+        let backend = OpenVinoBackend::default();
+        let plan = openvino_plan();
+        let prepared = backend.prepare(&demo_model(), &plan).expect("prepared");
+
+        let error = backend
+            .execute(
+                &prepared,
+                &demo_model(),
+                &SessionRequest {
+                    prompt: "hello from test".to_string(),
+                    max_tokens: 16,
+                    temperature: 0.0,
+                    target_model: Some("demo".to_string()),
+                    images: Vec::new(),
+                    structured_output: false,
+                    tool_calling: false,
+                },
+                &plan,
+            )
+            .expect_err("fallback should now be rejected by default");
+
+        assert!(error.message.contains("OpenVINO real execution is unavailable"));
+        assert!(error.message.contains("LOCI_OPENVINO_ALLOW_FALLBACK=1"));
+    }
+
+    #[test]
+    fn execute_allows_cached_fallback_when_explicitly_enabled() {
+        env::set_var("LOCI_OPENVINO_ALLOW_FALLBACK", "1");
+
         let backend = OpenVinoBackend::default();
         let plan = openvino_plan();
         let prepared = backend.prepare(&demo_model(), &plan).expect("prepared");
@@ -3189,6 +3290,7 @@ mod tests {
         assert!(output.text.contains("[openvino-fallback:demo]"));
         assert!(output.text.contains("reason="));
         assert!(output.telemetry.generated_tokens > 0);
+        env::remove_var("LOCI_OPENVINO_ALLOW_FALLBACK");
     }
 
     #[test]
@@ -3228,6 +3330,27 @@ mod tests {
     fn gguf_files_are_treated_as_direct_openvino_text_inputs() {
         let file = unique_temp_dir("gguf-file").with_extension("gguf");
         fs::write(&file, "gguf").expect("gguf");
+
+        let model = ModelDescriptor {
+            name: "demo".to_string(),
+            path: file.clone(),
+            architecture: "llama".to_string(),
+            memory_bytes: Some(1),
+            parameter_count: Some(1),
+            context_length: Some(128),
+            preferred_backend: Some("openvino".to_string()),
+        };
+
+        let result = validate_model_root_layout(&model, &file);
+        assert!(result.is_ok());
+
+        fs::remove_file(file).expect("cleanup");
+    }
+
+    #[test]
+    fn onnx_files_are_treated_as_direct_openvino_text_inputs() {
+        let file = unique_temp_dir("onnx-file").with_extension("onnx");
+        fs::write(&file, "onnx").expect("onnx");
 
         let model = ModelDescriptor {
             name: "demo".to_string(),

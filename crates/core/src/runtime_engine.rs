@@ -212,6 +212,21 @@ impl InferenceEngine {
         self.config.tiered_offload.profile = profile;
     }
 
+    /// Updates the spill threshold that activates disk-backed tiering.
+    pub fn set_spill_threshold_bytes(&mut self, spill_threshold_bytes: Option<u64>) {
+        self.config.tiered_offload.spill_threshold_bytes = spill_threshold_bytes;
+    }
+
+    /// Updates the maximum disk budget available to the spill runtime.
+    pub fn set_max_disk_bytes(&mut self, max_disk_bytes: Option<u64>) {
+        self.config.tiered_offload.max_disk_bytes = max_disk_bytes;
+    }
+
+    /// Updates the spill prefetch window used by the disk tier.
+    pub fn set_prefetch_window_bytes(&mut self, prefetch_window_bytes: Option<u64>) {
+        self.config.tiered_offload.prefetch_window_bytes = prefetch_window_bytes;
+    }
+
     /// Updates the planner-facing KV block size.
     pub fn set_kv_block_size_tokens(&mut self, block_size_tokens: u32) {
         self.config.paged_kv.block_size_tokens = block_size_tokens;
@@ -715,18 +730,102 @@ mod tests {
     #[cfg(feature = "dynamic-routing")]
     use loci_protocol::{PowerState, RoutingConfig};
     use loci_protocol::{SessionRequest, ThermalState};
+    #[cfg(feature = "gguf")]
+    use loci_gguf::GGUF_MAGIC;
+    #[cfg(feature = "gguf")]
+    use std::fs;
     use std::path::PathBuf;
+    #[cfg(feature = "gguf")]
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn demo_model(name: &str, memory_bytes: u64, parameter_count: u64) -> ModelDescriptor {
         ModelDescriptor {
             name: name.to_string(),
-            path: PathBuf::from(format!("D:/models/{name}.gguf")),
+            path: demo_model_path(name),
             architecture: "llama".to_string(),
             memory_bytes: Some(memory_bytes),
             parameter_count: Some(parameter_count),
             context_length: Some(8192),
             preferred_backend: None,
         }
+    }
+
+    #[cfg(feature = "gguf")]
+    fn demo_model_path(name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("loci-runtime-{name}-{suffix}.gguf"));
+        write_minimal_gguf(&path);
+        path
+    }
+
+    #[cfg(not(feature = "gguf"))]
+    fn demo_model_path(name: &str) -> PathBuf {
+        PathBuf::from(format!("D:/models/{name}.gguf"))
+    }
+
+    #[cfg(feature = "gguf")]
+    fn write_minimal_gguf(path: &PathBuf) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        bytes.extend_from_slice(&3_u32.to_le_bytes());
+        bytes.extend_from_slice(&3_u64.to_le_bytes());
+        bytes.extend_from_slice(&2_u64.to_le_bytes());
+
+        let key = b"general.architecture";
+        bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(key);
+        bytes.extend_from_slice(&8_u32.to_le_bytes());
+        let value = b"llama";
+        bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(value);
+
+        let key = b"general.alignment";
+        bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(key);
+        bytes.extend_from_slice(&4_u32.to_le_bytes());
+        bytes.extend_from_slice(&32_u32.to_le_bytes());
+
+        write_tensor_info(&mut bytes, 3, "token_embd.weight", &[4], 0, 0);
+        write_tensor_info(&mut bytes, 3, "blk.0.attn_norm.weight", &[4], 0, 16);
+        write_tensor_info(&mut bytes, 3, "output.weight", &[4], 0, 32);
+
+        bytes.extend_from_slice(&[0_u8; 32]);
+        for value in 1..=12 {
+            bytes.extend_from_slice(&(value as f32).to_le_bytes());
+        }
+
+        fs::write(path, bytes).expect("gguf");
+    }
+
+    #[cfg(feature = "gguf")]
+    fn write_tensor_info(
+        bytes: &mut Vec<u8>,
+        version: u32,
+        name: &str,
+        dimensions: &[u64],
+        ggml_dtype: u32,
+        offset: u64,
+    ) {
+        write_sized_string(bytes, version, name.as_bytes());
+        bytes.extend_from_slice(&(dimensions.len() as u32).to_le_bytes());
+        for dimension in dimensions.iter().rev() {
+            bytes.extend_from_slice(&dimension.to_le_bytes());
+        }
+        bytes.extend_from_slice(&ggml_dtype.to_le_bytes());
+        bytes.extend_from_slice(&offset.to_le_bytes());
+    }
+
+    #[cfg(feature = "gguf")]
+    fn write_sized_string(bytes: &mut Vec<u8>, version: u32, value: &[u8]) {
+        match version {
+            1 => bytes.extend_from_slice(&(value.len() as u32).to_le_bytes()),
+            2 | 3 => bytes.extend_from_slice(&(value.len() as u64).to_le_bytes()),
+            other => panic!("unsupported test gguf version: {other}"),
+        }
+        bytes.extend_from_slice(value);
     }
 
     #[test]

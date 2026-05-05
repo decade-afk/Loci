@@ -206,7 +206,7 @@ impl ModelDescriptor {
             Some("onnx") => ModelFormat::Onnx,
             Some("gguf") => ModelFormat::Gguf,
             Some("safetensors") => ModelFormat::SafeTensors,
-            Some("bin") => ModelFormat::PytorchBin,
+            Some("bin") | Some("pt") | Some("pth") => ModelFormat::PytorchBin,
             Some("blob") => ModelFormat::OpenVinoBlob,
             Some(_) => ModelFormat::Unknown,
             None => ModelFormat::Unknown,
@@ -904,5 +904,26 @@ mod tests {
 
         assert_eq!(model.inferred_format(), ModelFormat::Directory);
         fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn inferred_format_recognizes_pt_and_pth_as_pytorch_bin() {
+        for extension in ["pt", "pth"] {
+            let path = unique_temp_path(&format!("torch-{extension}")).with_extension(extension);
+            fs::write(&path, "weights").expect("weights");
+
+            let model = ModelDescriptor {
+                name: "demo".to_string(),
+                path: path.clone(),
+                architecture: "llama".to_string(),
+                memory_bytes: None,
+                parameter_count: None,
+                context_length: None,
+                preferred_backend: None,
+            };
+
+            assert_eq!(model.inferred_format(), ModelFormat::PytorchBin);
+            fs::remove_file(path).expect("cleanup");
+        }
     }
 }

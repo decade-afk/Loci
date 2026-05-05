@@ -117,7 +117,7 @@ pub fn detect_asset_layout(model: &ModelDescriptor) -> ModelAssetLayout {
             Some("onnx") => ModelAssetLayout::OnnxModel,
             Some("gguf") => ModelAssetLayout::GgufFile,
             Some("safetensors") => ModelAssetLayout::SafeTensorsFile,
-            Some("bin") => ModelAssetLayout::PytorchBinFile,
+            Some("bin") | Some("pt") | Some("pth") => ModelAssetLayout::PytorchBinFile,
             Some(_) | None => ModelAssetLayout::UnknownFile,
         };
     }
@@ -144,7 +144,9 @@ pub fn detect_asset_layout(model: &ModelDescriptor) -> ModelAssetLayout {
     if contains_extension(path, "safetensors") {
         return ModelAssetLayout::SafeTensorsDirectory;
     }
-    if path.join("pytorch_model.bin").is_file() || contains_extension(path, "bin") {
+    if path.join("pytorch_model.bin").is_file()
+        || contains_any_extension(path, &["bin", "pt", "pth"])
+    {
         return ModelAssetLayout::PytorchCheckpointDirectory;
     }
     if contains_extension(path, "xml") && contains_extension(path, "bin") {
@@ -301,11 +303,11 @@ fn inspect_openvino_backend(
         ),
         ModelAssetLayout::OnnxModel => (
             false,
-            true,
-            true,
+            false,
+            false,
             true,
             false,
-            "ONNX assets are ingestible by the OpenVINO path, but Loci still requires conversion into an executable OpenVINO artifact before text generation".to_string(),
+            "ONNX assets are accepted as a direct OpenVINO input layout, but the current Loci Intel path does not yet implement a real tokenizer + decode execution chain".to_string(),
         ),
         ModelAssetLayout::GgufFile | ModelAssetLayout::GgufDirectory => (
             true,
@@ -368,14 +370,16 @@ fn inspect_candle_backend(
     }
 
     let reason = match asset_layout {
-        ModelAssetLayout::GgufFile
-        | ModelAssetLayout::GgufDirectory
-        | ModelAssetLayout::SafeTensorsFile
+        ModelAssetLayout::GgufFile | ModelAssetLayout::GgufDirectory => {
+            "asset layout is acceptable and the current Candle backend can execute the direct local text path"
+                .to_string()
+        }
+        ModelAssetLayout::SafeTensorsFile
         | ModelAssetLayout::SafeTensorsDirectory
         | ModelAssetLayout::PytorchBinFile
         | ModelAssetLayout::PytorchCheckpointDirectory
         | ModelAssetLayout::TransformersCheckpoint => {
-            "asset layout is acceptable, but the real Candle tensor execution path is still incomplete"
+            "asset layout is recognized, but the current Candle execution path is only ready for direct GGUF execution"
                 .to_string()
         }
         ModelAssetLayout::Missing => "model path does not exist on disk".to_string(),
@@ -383,7 +387,18 @@ fn inspect_candle_backend(
             .to_string(),
     };
 
-    (false, false, false, false, false, reason)
+    match asset_layout {
+        ModelAssetLayout::GgufFile | ModelAssetLayout::GgufDirectory => {
+            (true, true, false, false, true, reason)
+        }
+        ModelAssetLayout::SafeTensorsFile
+        | ModelAssetLayout::SafeTensorsDirectory
+        | ModelAssetLayout::PytorchBinFile
+        | ModelAssetLayout::PytorchCheckpointDirectory
+        | ModelAssetLayout::TransformersCheckpoint => (false, false, false, false, false, reason),
+        ModelAssetLayout::Missing => (false, false, false, false, false, reason),
+        _ => (false, false, false, false, false, reason),
+    }
 }
 
 fn inspect_generic_backend(
@@ -505,6 +520,10 @@ fn format_supported_by_backend_fallback(
 }
 
 fn contains_extension(path: &Path, extension: &str) -> bool {
+    contains_any_extension(path, &[extension])
+}
+
+fn contains_any_extension(path: &Path, extensions: &[&str]) -> bool {
     path.read_dir()
         .ok()
         .into_iter()
@@ -514,7 +533,7 @@ fn contains_extension(path: &Path, extension: &str) -> bool {
                 .path()
                 .extension()
                 .and_then(|value| value.to_str())
-                .map(|value| value.eq_ignore_ascii_case(extension))
+                .map(|value| extensions.iter().any(|extension| value.eq_ignore_ascii_case(extension)))
                 .unwrap_or(false)
         })
 }
@@ -568,7 +587,7 @@ fn infer_shard_format(path: &Path) -> ModelFormat {
         Some("onnx") => ModelFormat::Onnx,
         Some("gguf") => ModelFormat::Gguf,
         Some("safetensors") => ModelFormat::SafeTensors,
-        Some("bin") => ModelFormat::PytorchBin,
+        Some("bin") | Some("pt") | Some("pth") => ModelFormat::PytorchBin,
         Some(_) | None => ModelFormat::Unknown,
     }
 }
@@ -899,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn inspect_model_marks_openvino_onnx_as_convert_required() {
+    fn inspect_model_marks_openvino_onnx_as_non_executable_until_runtime_is_implemented() {
         let file = unique_temp_dir("onnx-file").with_extension("onnx");
         fs::write(&file, "onnx").expect("onnx");
 
@@ -921,9 +940,32 @@ mod tests {
             .expect("openvino readiness");
 
         assert!(!readiness.ready);
-        assert!(readiness.real_execution);
-        assert!(readiness.requires_conversion);
+        assert!(!readiness.real_execution);
+        assert!(!readiness.requires_conversion);
 
         fs::remove_file(file).expect("cleanup");
+    }
+
+    #[test]
+    fn detect_asset_layout_recognizes_pt_and_pth_files_as_pytorch() {
+        for extension in ["pt", "pth"] {
+            let file = unique_temp_dir(&format!("torch-{extension}")).with_extension(extension);
+            fs::write(&file, "weights").expect("weights");
+
+            let model = ModelDescriptor {
+                name: "demo".to_string(),
+                path: file.clone(),
+                architecture: "llama".to_string(),
+                memory_bytes: None,
+                parameter_count: None,
+                context_length: None,
+                preferred_backend: None,
+            };
+
+            assert_eq!(detect_asset_layout(&model), ModelAssetLayout::PytorchBinFile);
+            assert_eq!(infer_shard_format(&file), ModelFormat::PytorchBin);
+
+            fs::remove_file(file).expect("cleanup");
+        }
     }
 }

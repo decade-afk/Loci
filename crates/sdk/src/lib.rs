@@ -658,6 +658,59 @@ impl LociBuilder {
         self
     }
 
+    /// Overrides the spill threshold that activates disk-backed tiering.
+    pub fn spill_threshold_bytes(mut self, spill_threshold_bytes: u64) -> Self {
+        self.config
+            .get_or_insert_with(EngineConfig::default)
+            .tiered_offload
+            .spill_threshold_bytes = Some(spill_threshold_bytes);
+        self
+    }
+
+    /// Caps the total disk budget available to the tiered offload runtime.
+    pub fn max_disk_bytes(mut self, max_disk_bytes: u64) -> Self {
+        self.config
+            .get_or_insert_with(EngineConfig::default)
+            .tiered_offload
+            .max_disk_bytes = Some(max_disk_bytes);
+        self
+    }
+
+    /// Overrides the spill prefetch window used by the disk tier.
+    pub fn prefetch_window_bytes(mut self, prefetch_window_bytes: u64) -> Self {
+        self.config
+            .get_or_insert_with(EngineConfig::default)
+            .tiered_offload
+            .prefetch_window_bytes = Some(prefetch_window_bytes);
+        self
+    }
+
+    /// Overrides the planner-facing paged-KV block size.
+    pub fn kv_block_size_tokens(mut self, block_size_tokens: u32) -> Self {
+        self.config
+            .get_or_insert_with(EngineConfig::default)
+            .paged_kv
+            .block_size_tokens = block_size_tokens;
+        self
+    }
+
+    /// Enables or disables shared prefix caching in the paged-KV planner.
+    pub fn kv_prefix_cache_enabled(mut self, enabled: bool) -> Self {
+        self.config
+            .get_or_insert_with(EngineConfig::default)
+            .paged_kv
+            .prefix_cache_enabled = enabled;
+        self
+    }
+
+    /// Overrides the planner-facing KV tensor formats.
+    pub fn kv_types(mut self, type_k: impl Into<String>, type_v: impl Into<String>) -> Self {
+        let config = self.config.get_or_insert_with(EngineConfig::default);
+        config.paged_kv.type_k = type_k.into();
+        config.paged_kv.type_v = type_v.into();
+        self
+    }
+
     /// Limits the number of resident models without requiring direct `EngineConfig` mutation.
     pub fn max_loaded_models(mut self, max_loaded_models: usize) -> Self {
         self.config
@@ -718,8 +771,8 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
         bytes.extend_from_slice(&3_u32.to_le_bytes());
-        bytes.extend_from_slice(&0_u64.to_le_bytes());
-        bytes.extend_from_slice(&1_u64.to_le_bytes());
+        bytes.extend_from_slice(&3_u64.to_le_bytes());
+        bytes.extend_from_slice(&2_u64.to_le_bytes());
 
         let key = b"general.architecture";
         bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
@@ -729,7 +782,50 @@ mod tests {
         bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
         bytes.extend_from_slice(value);
 
+        let key = b"general.alignment";
+        bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(key);
+        bytes.extend_from_slice(&4_u32.to_le_bytes());
+        bytes.extend_from_slice(&32_u32.to_le_bytes());
+
+        write_tensor_info(&mut bytes, 3, "token_embd.weight", &[4], 0, 0);
+        write_tensor_info(&mut bytes, 3, "blk.0.attn_norm.weight", &[4], 0, 16);
+        write_tensor_info(&mut bytes, 3, "output.weight", &[4], 0, 32);
+
+        bytes.extend_from_slice(&[0_u8; 32]);
+        for value in 1..=12 {
+            bytes.extend_from_slice(&(value as f32).to_le_bytes());
+        }
+
         fs::write(path, bytes).expect("gguf");
+    }
+
+    #[cfg(feature = "gguf")]
+    fn write_tensor_info(
+        bytes: &mut Vec<u8>,
+        version: u32,
+        name: &str,
+        dimensions: &[u64],
+        ggml_dtype: u32,
+        offset: u64,
+    ) {
+        write_sized_string(bytes, version, name.as_bytes());
+        bytes.extend_from_slice(&(dimensions.len() as u32).to_le_bytes());
+        for dimension in dimensions.iter().rev() {
+            bytes.extend_from_slice(&dimension.to_le_bytes());
+        }
+        bytes.extend_from_slice(&ggml_dtype.to_le_bytes());
+        bytes.extend_from_slice(&offset.to_le_bytes());
+    }
+
+    #[cfg(feature = "gguf")]
+    fn write_sized_string(bytes: &mut Vec<u8>, version: u32, value: &[u8]) {
+        match version {
+            1 => bytes.extend_from_slice(&(value.len() as u32).to_le_bytes()),
+            2 | 3 => bytes.extend_from_slice(&(value.len() as u64).to_le_bytes()),
+            other => panic!("unsupported test gguf version: {other}"),
+        }
+        bytes.extend_from_slice(value);
     }
 
     #[cfg(feature = "gguf")]
@@ -909,6 +1005,12 @@ mod tests {
             .model_keep_alive_secs(45)
             .max_loaded_models(2)
             .tiered_offload_profile(TieredOffloadProfile::GpuResident)
+            .spill_threshold_bytes(2 * 1024 * 1024 * 1024)
+            .max_disk_bytes(32 * 1024 * 1024 * 1024)
+            .prefetch_window_bytes(64 * 1024 * 1024)
+            .kv_block_size_tokens(64)
+            .kv_prefix_cache_enabled(false)
+            .kv_types("q8_0", "q4_0")
             .build()
             .expect("loci");
 
@@ -919,6 +1021,18 @@ mod tests {
             snapshot.config.tiered_offload_profile,
             TieredOffloadProfile::GpuResident
         );
+        assert_eq!(
+            snapshot.config.spill_threshold_bytes,
+            Some(2 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(
+            snapshot.config.max_disk_bytes,
+            Some(32 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(snapshot.config.kv_block_size_tokens, 64);
+        assert!(!snapshot.config.kv_prefix_cache_enabled);
+        assert_eq!(snapshot.config.kv_type_k, "q8_0");
+        assert_eq!(snapshot.config.kv_type_v, "q4_0");
     }
 }
 

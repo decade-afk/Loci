@@ -88,9 +88,6 @@ pub fn choose_backend<'a>(
         if require_ready && !readiness.ready {
             return false;
         }
-        if !require_ready && !readiness.format_supported {
-            return false;
-        }
         if require_npu && !descriptor.supports_npu {
             return false;
         }
@@ -133,7 +130,7 @@ pub fn choose_backend<'a>(
         if let Some(name) = preferred {
             if let Some(backend) = backends
                 .iter()
-                .find(|backend| matches_candidate(&backend.descriptor(), false, false, Some(name)))
+                .find(|backend| matches_candidate(&backend.descriptor(), true, false, Some(name)))
             {
                 return Ok(backend.as_ref());
             }
@@ -142,11 +139,11 @@ pub fn choose_backend<'a>(
 
     backends
         .iter()
-        .find(|backend| matches_candidate(&backend.descriptor(), false, true, None))
+        .find(|backend| matches_candidate(&backend.descriptor(), true, true, None))
         .or_else(|| {
             backends
                 .iter()
-                .find(|backend| matches_candidate(&backend.descriptor(), false, false, None))
+                .find(|backend| matches_candidate(&backend.descriptor(), true, false, None))
         })
         .map(|backend| backend.as_ref())
         .ok_or_else(|| LociError::NoCompatibleBackend {
@@ -1733,6 +1730,10 @@ mod tests {
 
     #[test]
     fn choose_backend_skips_non_multimodal_backends_for_image_requests() {
+        let dir = unique_temp_dir("multimodal-openvino-ready");
+        fs::create_dir_all(&dir).expect("dir");
+        fs::write(dir.join("openvino_model.xml"), "<xml/>").expect("xml");
+
         let backends: Vec<Box<dyn Backend>> = vec![
             Box::new(MockBackend {
                 descriptor: BackendDescriptor {
@@ -1761,6 +1762,15 @@ mod tests {
                 supports_model: true,
             }),
         ];
+        let multimodal_model = ModelDescriptor {
+            name: "demo".to_string(),
+            path: dir.clone(),
+            architecture: "minicpm-v".to_string(),
+            memory_bytes: Some(1),
+            parameter_count: Some(1),
+            context_length: Some(128),
+            preferred_backend: Some("candle".to_string()),
+        };
 
         let mut multimodal_request = request();
         multimodal_request
@@ -1769,10 +1779,11 @@ mod tests {
                 path: PathBuf::from("D:/images/demo.png"),
             });
 
-        let selected = choose_backend(&backends, &model(), &multimodal_request, Some("candle"))
+        let selected = choose_backend(&backends, &multimodal_model, &multimodal_request, Some("candle"))
             .expect("backend");
 
         assert_eq!(selected.descriptor().name, "openvino");
+        fs::remove_dir_all(dir).expect("cleanup");
     }
 
     #[test]
@@ -1876,5 +1887,46 @@ mod tests {
         assert_eq!(selected.descriptor().name, "openvino");
 
         fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn choose_backend_rejects_non_ready_candle_checkpoint_paths() {
+        let file = unique_temp_dir("torch-checkpoint").with_extension("pt");
+        fs::write(&file, "weights").expect("weights");
+
+        let model = ModelDescriptor {
+            name: "demo".to_string(),
+            path: file.clone(),
+            architecture: "llama".to_string(),
+            memory_bytes: Some(1),
+            parameter_count: Some(1),
+            context_length: Some(128),
+            preferred_backend: Some("candle".to_string()),
+        };
+
+        let backends: Vec<Box<dyn Backend>> = vec![Box::new(MockBackend {
+            descriptor: BackendDescriptor {
+                name: "candle".to_string(),
+                runtime_family: loci_protocol::BackendRuntimeFamily::Candle,
+                supports_cpu: true,
+                supports_gpu: true,
+                supports_npu: false,
+                supports_disk_tiering: true,
+                supports_paged_kv: true,
+                supports_multimodal: false,
+            },
+            supports_model: true,
+        })];
+
+        let error = match choose_backend(&backends, &model, &request(), Some("candle")) {
+            Ok(_) => panic!("non-ready backend should be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            LociError::NoCompatibleBackend { .. }
+        ));
+
+        fs::remove_file(file).expect("cleanup");
     }
 }
