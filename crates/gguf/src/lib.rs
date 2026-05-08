@@ -444,12 +444,7 @@ impl GgufMetadataValue {
 
     fn as_u32_array(&self) -> Option<Vec<u32>> {
         match self {
-            Self::Array(values) => Some(
-                values
-                    .iter()
-                    .filter_map(|value| value.as_u32())
-                    .collect(),
-            ),
+            Self::Array(values) => Some(values.iter().filter_map(|value| value.as_u32()).collect()),
             _ => None,
         }
     }
@@ -568,12 +563,16 @@ fn read_tensor_prefix_values_f32(
         return Ok(Vec::new());
     }
     match info.ggml_dtype {
-        0 => read_plain_tensor_prefix_values_f32(bytes, start, available, max_elements, 4, |chunk| {
-            f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
-        }),
-        1 => read_plain_tensor_prefix_values_f32(bytes, start, available, max_elements, 2, |chunk| {
-            f16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]]))
-        }),
+        0 => {
+            read_plain_tensor_prefix_values_f32(bytes, start, available, max_elements, 4, |chunk| {
+                f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+            })
+        }
+        1 => {
+            read_plain_tensor_prefix_values_f32(bytes, start, available, max_elements, 2, |chunk| {
+                f16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]]))
+            })
+        }
         2 => read_q4_0_tensor_prefix_values_f32(bytes, start, available, max_elements),
         8 => read_q8_0_tensor_prefix_values_f32(bytes, start, available, max_elements),
         _ => Err(GgufHeaderError::UnexpectedEof("unsupported_tensor_dtype")),

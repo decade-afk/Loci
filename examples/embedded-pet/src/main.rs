@@ -1,5 +1,7 @@
 use anyhow::Context;
-use loci_core::{EmbeddedModelRegistration, EngineConfig, InferenceEngine, SessionRequest, TieredOffloadProfile};
+use loci_core::{
+    EmbeddedModelRegistration, EngineConfig, InferenceEngine, SessionRequest, TieredOffloadProfile,
+};
 
 const SPILL_THRESHOLD_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_DISK_BYTES: u64 = 64 * 1024 * 1024 * 1024;

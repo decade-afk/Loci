@@ -10,3 +10,5 @@ loci-protocol = { path = "../protocol" }
 loci-gguf = { path = "../gguf" }
 loci-kernels-llama = { path = "../kernels-llama" }
 candle-core = { git = "https://github.com/huggingface/candle", package = "candle-core" }
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }

@@ -6,11 +6,12 @@ license.workspace = true
 authors.workspace = true
 
 [features]
-default = ["candle", "gguf", "kernels-llama"]
+default = ["candle", "gguf", "kernels-llama", "service"]
 candle = ["loci-sdk/candle"]
 gguf = ["loci-sdk/gguf"]
 kernels-llama = ["loci-sdk/kernels-llama"]
 openvino = ["loci-sdk/openvino"]
+service = ["loci-sdk/service"]
 
 [dependencies]
 loci-sdk = { path = "../../crates/sdk" }

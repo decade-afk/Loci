@@ -210,7 +210,10 @@ mod tests {
 
         assert_eq!(descriptor.architecture, "llama");
         assert_eq!(descriptor.context_length, Some(8192));
-        assert_eq!(descriptor.memory_bytes, Some(fs::metadata(&path).expect("metadata").len()));
+        assert_eq!(
+            descriptor.memory_bytes,
+            Some(fs::metadata(&path).expect("metadata").len())
+        );
 
         fs::remove_file(path).expect("cleanup");
     }

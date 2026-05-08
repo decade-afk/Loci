@@ -9,15 +9,18 @@ use crate::model_inspector::{inspect_model, inspect_models};
 use crate::model_registry::ModelRegistry;
 use crate::planner::{build_plan, choose_backend, merge_topologies};
 use crate::router::select_model;
+#[cfg(feature = "tiered-offload")]
+use crate::runtime_engine_helpers::segment_bytes;
+use crate::runtime_engine_helpers::{builtin_backends, feature_snapshot, session_key};
 use crate::snapshot::{
     EngineFeatureSnapshot, HostCapabilitySnapshot, ModelPoolSnapshot, RoutingSnapshot,
     RuntimeConfigSnapshot, RuntimeSnapshot, TieredOffloadRuntimeSnapshot,
     TieredOffloadSessionSnapshot,
 };
 use loci_protocol::{
-    Backend, BackendExecutionProfile, BackendOutput, ExecutionPlan, HardwareTopology, KvCachePlan,
-    ModelDescriptor, ModelReadinessReport, PreparedModel, SessionRequest, SessionResponse,
-    TieredOffloadPlan, TieredOffloadProfile,
+    Backend, BackendOutput, ExecutionPlan, HardwareTopology, KvCachePlan, ModelDescriptor,
+    ModelReadinessReport, PreparedModel, SessionRequest, SessionResponse, TieredOffloadPlan,
+    TieredOffloadProfile,
 };
 #[cfg(feature = "tiered-offload")]
 use loci_tiered_offload::{HostTieringHints, SpillTensorKind, TieredOffloadRuntime};
@@ -390,6 +393,7 @@ impl InferenceEngine {
         self.evict_expired_models();
         let (plan, model, backend_index, prepared) = self.prepare_request(&request)?;
         let model_name = model.name.clone();
+        self.prepare_tiered_offload_for_inference(&plan, &request)?;
         let backend = self.backends[backend_index].as_ref();
 
         let BackendOutput { text, telemetry } = backend
@@ -595,6 +599,52 @@ impl InferenceEngine {
         Ok(())
     }
 
+    /// Schedules an execution-time spill prefetch window after the model is
+    /// prepared and before backend execution begins.
+    ///
+    /// The preparation step only warms the first spill window. Real decode
+    /// requests need another prefetch pass so the runtime can stage the next
+    /// contiguous segment range while the backend is about to execute.
+    fn prepare_tiered_offload_for_inference(
+        &self,
+        plan: &ExecutionPlan,
+        request: &SessionRequest,
+    ) -> Result<()> {
+        #[cfg(feature = "tiered-offload")]
+        {
+            let Some(tiered_plan) = &plan.tiered_offload else {
+                return Ok(());
+            };
+
+            let session_key = session_key(plan);
+            let session = self
+                .tiered_offload_runtime
+                .session_snapshot(session_key)
+                .map_err(|error| {
+                    LociError::Backend(format!("tiered offload snapshot failed: {error}"))
+                })?
+                .ok_or_else(|| {
+                    LociError::Backend(format!(
+                        "tiered offload session `{session_key}` is missing before execution"
+                    ))
+                })?;
+
+            let ranges = build_inference_prefetch_ranges(&session, tiered_plan, request);
+            if !ranges.is_empty() {
+                self.tiered_offload_runtime
+                    .schedule_prefetch(session_key, ranges)
+                    .map_err(|error| {
+                        LociError::Backend(format!(
+                            "tiered offload execution prefetch failed: {error}"
+                        ))
+                    })?;
+            }
+        }
+
+        let _ = (plan, request);
+        Ok(())
+    }
+
     /// Builds a snapshot of the active spill runtime when the feature is compiled in.
     fn tiered_offload_runtime_snapshot(&self) -> Option<TieredOffloadRuntimeSnapshot> {
         #[cfg(feature = "tiered-offload")]
@@ -671,666 +721,59 @@ impl InferenceEngine {
     }
 }
 
-/// Instantiates the statically compiled backend set for this build.
-fn builtin_backends() -> Vec<Box<dyn Backend>> {
-    let mut backends: Vec<Box<dyn Backend>> = Vec::new();
+#[cfg(test)]
+#[path = "runtime_engine_tests.rs"]
+mod tests;
 
-    #[cfg(feature = "candle")]
-    backends.push(loci_backend_candle::boxed_backend());
-
-    #[cfg(feature = "openvino")]
-    backends.push(loci_backend_openvino::boxed_backend());
-
-    backends
-}
-
-/// Extracts the backend-specific session key from an execution plan.
-fn session_key(plan: &ExecutionPlan) -> &str {
-    match &plan.backend_profile {
-        BackendExecutionProfile::OpenVino(profile) => &profile.session_key,
-        BackendExecutionProfile::Candle(profile) => &profile.session_key,
-        BackendExecutionProfile::Generic(profile) => &profile.session_key,
-    }
-}
-
-/// Computes the feature snapshot for the current configuration.
-fn feature_snapshot(config: &EngineConfig) -> EngineFeatureSnapshot {
-    EngineFeatureSnapshot {
-        openvino: cfg!(feature = "openvino"),
-        candle: cfg!(feature = "candle"),
-        gguf: cfg!(feature = "gguf"),
-        kernels_llama: cfg!(feature = "kernels-llama"),
-        tiered_offload: cfg!(feature = "tiered-offload") && config.tiered_offload.enabled,
-        paged_kv: cfg!(feature = "paged-kv") && config.paged_kv.enabled,
-        power_aware: cfg!(feature = "power-aware"),
-        dynamic_routing: cfg!(feature = "dynamic-routing") && config.routing.enabled,
-        mobile: cfg!(feature = "mobile"),
-        neon: cfg!(feature = "neon"),
-        coreml: cfg!(feature = "coreml"),
-        qnn: cfg!(feature = "qnn"),
-    }
-}
-
+/// Derives the next spill ranges that should be touched before one inference
+/// call executes.
+///
+/// The first warmup pass always faults in the leading prefetch window. This
+/// helper advances past that warmup span and requests one or more additional
+/// contiguous windows based on decode length so larger generations stage more
+/// of the spill file ahead of execution.
 #[cfg(feature = "tiered-offload")]
-fn segment_bytes(
+fn build_inference_prefetch_ranges(
     session: &loci_tiered_offload::TieredSessionSnapshot,
-    tensor: SpillTensorKind,
-) -> u64 {
+    plan: &TieredOffloadPlan,
+    request: &SessionRequest,
+) -> Vec<(u64, u64)> {
+    if plan.prefetch_window_bytes == 0 || session.mapped_bytes == 0 {
+        return Vec::new();
+    }
+
+    let decode_multiplier = match request.max_tokens {
+        0..=1 => 1,
+        2..=32 => 2,
+        33..=128 => 3,
+        _ => 4,
+    };
+    let start = plan.prefetch_window_bytes.min(session.mapped_bytes);
+    let length = plan
+        .prefetch_window_bytes
+        .saturating_mul(decode_multiplier)
+        .min(session.mapped_bytes.saturating_sub(start));
+    if length == 0 {
+        return Vec::new();
+    }
+
+    let end = start.saturating_add(length);
     session
         .segments
         .iter()
-        .filter(|segment| segment.tensor == tensor)
-        .map(|segment| segment.length_bytes)
-        .sum()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[cfg(feature = "dynamic-routing")]
-    use loci_protocol::{PowerState, RoutingConfig};
-    use loci_protocol::{SessionRequest, ThermalState};
-    #[cfg(feature = "gguf")]
-    use loci_gguf::GGUF_MAGIC;
-    #[cfg(feature = "gguf")]
-    use std::fs;
-    use std::path::PathBuf;
-    #[cfg(feature = "gguf")]
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn demo_model(name: &str, memory_bytes: u64, parameter_count: u64) -> ModelDescriptor {
-        ModelDescriptor {
-            name: name.to_string(),
-            path: demo_model_path(name),
-            architecture: "llama".to_string(),
-            memory_bytes: Some(memory_bytes),
-            parameter_count: Some(parameter_count),
-            context_length: Some(8192),
-            preferred_backend: None,
-        }
-    }
-
-    #[cfg(feature = "gguf")]
-    fn demo_model_path(name: &str) -> PathBuf {
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("loci-runtime-{name}-{suffix}.gguf"));
-        write_minimal_gguf(&path);
-        path
-    }
-
-    #[cfg(not(feature = "gguf"))]
-    fn demo_model_path(name: &str) -> PathBuf {
-        PathBuf::from(format!("D:/models/{name}.gguf"))
-    }
-
-    #[cfg(feature = "gguf")]
-    fn write_minimal_gguf(path: &PathBuf) {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
-        bytes.extend_from_slice(&3_u32.to_le_bytes());
-        bytes.extend_from_slice(&3_u64.to_le_bytes());
-        bytes.extend_from_slice(&2_u64.to_le_bytes());
-
-        let key = b"general.architecture";
-        bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(key);
-        bytes.extend_from_slice(&8_u32.to_le_bytes());
-        let value = b"llama";
-        bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(value);
-
-        let key = b"general.alignment";
-        bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(key);
-        bytes.extend_from_slice(&4_u32.to_le_bytes());
-        bytes.extend_from_slice(&32_u32.to_le_bytes());
-
-        write_tensor_info(&mut bytes, 3, "token_embd.weight", &[4], 0, 0);
-        write_tensor_info(&mut bytes, 3, "blk.0.attn_norm.weight", &[4], 0, 16);
-        write_tensor_info(&mut bytes, 3, "output.weight", &[4], 0, 32);
-
-        bytes.extend_from_slice(&[0_u8; 32]);
-        for value in 1..=12 {
-            bytes.extend_from_slice(&(value as f32).to_le_bytes());
-        }
-
-        fs::write(path, bytes).expect("gguf");
-    }
-
-    #[cfg(feature = "gguf")]
-    fn write_tensor_info(
-        bytes: &mut Vec<u8>,
-        version: u32,
-        name: &str,
-        dimensions: &[u64],
-        ggml_dtype: u32,
-        offset: u64,
-    ) {
-        write_sized_string(bytes, version, name.as_bytes());
-        bytes.extend_from_slice(&(dimensions.len() as u32).to_le_bytes());
-        for dimension in dimensions.iter().rev() {
-            bytes.extend_from_slice(&dimension.to_le_bytes());
-        }
-        bytes.extend_from_slice(&ggml_dtype.to_le_bytes());
-        bytes.extend_from_slice(&offset.to_le_bytes());
-    }
-
-    #[cfg(feature = "gguf")]
-    fn write_sized_string(bytes: &mut Vec<u8>, version: u32, value: &[u8]) {
-        match version {
-            1 => bytes.extend_from_slice(&(value.len() as u32).to_le_bytes()),
-            2 | 3 => bytes.extend_from_slice(&(value.len() as u64).to_le_bytes()),
-            other => panic!("unsupported test gguf version: {other}"),
-        }
-        bytes.extend_from_slice(value);
-    }
-
-    #[test]
-    fn engine_prefers_best_available_decode_device_for_available_backend() {
-        let engine = InferenceEngine::builder()
-            .model(demo_model("tiny", 2 * 1024 * 1024 * 1024, 1_000_000_000))
-            .build()
-            .expect("engine");
-
-        let plan = engine
-            .plan(&SessionRequest {
-                prompt: "hello".to_string(),
-                max_tokens: 64,
-                temperature: 0.2,
-                target_model: None,
-                images: Vec::new(),
-                structured_output: false,
-                tool_calling: false,
-            })
-            .expect("plan");
-
-        assert_eq!(
-            plan.backend,
-            if cfg!(feature = "openvino") {
-                "openvino"
+        .filter_map(|segment| {
+            let segment_start = segment.offset_bytes;
+            let segment_end = segment
+                .offset_bytes
+                .saturating_add(segment.length_bytes)
+                .min(session.mapped_bytes);
+            let range_start = start.max(segment_start);
+            let range_end = end.min(segment_end);
+            if range_end > range_start {
+                Some((range_start, range_end.saturating_sub(range_start)))
             } else {
-                "candle"
+                None
             }
-        );
-        let expected_target = if engine
-            .runtime_snapshot()
-            .topology
-            .devices
-            .iter()
-            .any(|device| device.kind == loci_protocol::AcceleratorKind::Npu)
-        {
-            loci_protocol::AcceleratorKind::Npu
-        } else {
-            loci_protocol::AcceleratorKind::Gpu
-        };
-        assert!(plan.placements.iter().any(|placement| {
-            placement.stage == loci_protocol::PipelineStage::Decode
-                && placement.target == expected_target
-        }));
-        assert_eq!(
-            engine.runtime_snapshot().topology.power.thermal_state,
-            ThermalState::Nominal
-        );
-    }
-
-    #[test]
-    fn register_model_replaces_existing_descriptor_with_same_name() {
-        let mut engine = InferenceEngine::builder()
-            .model(demo_model("demo", 1, 1))
-            .build()
-            .expect("engine");
-
-        engine.register_model(demo_model("demo", 2, 3));
-
-        let models = engine.models();
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].memory_bytes, Some(2));
-        assert_eq!(models[0].parameter_count, Some(3));
-        assert_eq!(
-            engine.runtime_snapshot().model_pool.resident_models,
-            vec!["demo"]
-        );
-        assert!(engine
-            .runtime_snapshot()
-            .model_pool
-            .prepared_models
-            .is_empty());
-        assert!(engine.runtime_snapshot().model_pool.resident_budget_bytes > 0);
-    }
-
-    #[test]
-    fn runtime_snapshot_exposes_alias_and_planner_configuration() {
-        let mut config = EngineConfig::default();
-        config.model_keep_alive_secs = 42;
-        config
-            .model_aliases
-            .insert("tiny".to_string(), "demo".to_string());
-        config.tiered_offload.profile = loci_protocol::TieredOffloadProfile::DiskHeavy;
-        config.paged_kv.block_size_tokens = 32;
-        config.paged_kv.type_k = "q8_0".to_string();
-        config.paged_kv.type_v = "q4_0".to_string();
-
-        let engine = InferenceEngine::builder()
-            .config(config)
-            .model(demo_model("demo", 1, 1))
-            .build()
-            .expect("engine");
-
-        let snapshot = engine.runtime_snapshot();
-        assert!(!snapshot.backend_assets.is_empty());
-        assert!(!snapshot.backend_lowering.is_empty());
-        assert!(snapshot.host.logical_cores >= 1);
-        assert!(snapshot.host.total_memory_bytes >= snapshot.host.available_memory_bytes);
-        assert_eq!(snapshot.config.model_keep_alive_secs, 42);
-        assert_eq!(snapshot.model_diagnostics.len(), 1);
-        assert_eq!(
-            snapshot
-                .config
-                .model_aliases
-                .get("tiny")
-                .map(String::as_str),
-            Some("demo")
-        );
-        assert_eq!(
-            snapshot.config.tiered_offload_profile,
-            loci_protocol::TieredOffloadProfile::DiskHeavy
-        );
-        assert_eq!(snapshot.config.kv_block_size_tokens, 32);
-        assert_eq!(snapshot.config.kv_type_k, "q8_0");
-        assert_eq!(snapshot.config.kv_type_v, "q4_0");
-    }
-
-    #[test]
-    fn runtime_config_can_be_updated_after_build() {
-        let mut engine = InferenceEngine::builder()
-            .model(demo_model("demo", 1, 1))
-            .build()
-            .expect("engine");
-
-        engine.register_alias("tiny", "demo");
-        engine.set_model_keep_alive_secs(77);
-        engine.set_offload_profile(TieredOffloadProfile::GpuResident);
-        engine.set_kv_block_size_tokens(64);
-        engine.set_kv_prefix_cache_enabled(false);
-        engine.set_kv_types("q8_0".to_string(), "q4_0".to_string());
-        engine.set_max_loaded_models(Some(2));
-
-        let snapshot = engine.runtime_snapshot();
-        assert_eq!(snapshot.config.model_keep_alive_secs, 77);
-        assert_eq!(
-            snapshot
-                .config
-                .model_aliases
-                .get("tiny")
-                .map(String::as_str),
-            Some("demo")
-        );
-        assert_eq!(
-            snapshot.config.tiered_offload_profile,
-            TieredOffloadProfile::GpuResident
-        );
-        assert_eq!(snapshot.config.kv_block_size_tokens, 64);
-        assert!(!snapshot.config.kv_prefix_cache_enabled);
-        assert_eq!(snapshot.config.kv_type_k, "q8_0");
-        assert_eq!(snapshot.config.kv_type_v, "q4_0");
-        assert_eq!(snapshot.routing.max_loaded_models, Some(2));
-    }
-
-    #[test]
-    fn unregister_model_removes_existing_entry() {
-        let mut engine = InferenceEngine::builder()
-            .model(demo_model("demo", 1, 1))
-            .build()
-            .expect("engine");
-
-        assert!(engine.unregister_model("demo"));
-        assert!(engine.models().is_empty());
-        assert!(!engine.unregister_model("missing"));
-    }
-
-    #[test]
-    fn evict_and_unregister_accept_alias_resolution() {
-        let mut config = EngineConfig::default();
-        config
-            .model_aliases
-            .insert("tiny".to_string(), "demo".to_string());
-
-        let mut engine = InferenceEngine::builder()
-            .config(config)
-            .model(demo_model("demo", 1, 1))
-            .build()
-            .expect("engine");
-
-        engine
-            .prepare(SessionRequest {
-                prompt: "warmup".to_string(),
-                max_tokens: 1,
-                temperature: 0.0,
-                target_model: Some("tiny".to_string()),
-                images: Vec::new(),
-                structured_output: false,
-                tool_calling: false,
-            })
-            .expect("prepared");
-
-        assert!(engine.evict_model("tiny"));
-        assert!(engine.unregister_model("tiny"));
-        assert!(engine.models().is_empty());
-    }
-
-    #[test]
-    fn model_pool_tracks_recent_models_with_capacity_limit() {
-        let mut config = EngineConfig::default();
-        config.routing.max_loaded_models = Some(2);
-
-        let mut engine = InferenceEngine::builder()
-            .config(config)
-            .model(demo_model("a", 1, 1))
-            .model(demo_model("b", 1, 1))
-            .build()
-            .expect("engine");
-
-        engine.register_model(demo_model("c", 1, 1));
-
-        let snapshot = engine.runtime_snapshot();
-        assert_eq!(snapshot.model_pool.resident_models, vec!["b", "c"]);
-        assert!(snapshot.model_pool.prepared_models.is_empty());
-    }
-
-    #[test]
-    fn max_loaded_models_can_be_reduced_after_build() {
-        let mut config = EngineConfig::default();
-        config.routing.max_loaded_models = Some(3);
-
-        let mut engine = InferenceEngine::builder()
-            .config(config)
-            .model(demo_model("a", 1, 1))
-            .model(demo_model("b", 1, 1))
-            .model(demo_model("c", 1, 1))
-            .build()
-            .expect("engine");
-
-        engine.set_max_loaded_models(Some(1));
-
-        let snapshot = engine.runtime_snapshot();
-        assert_eq!(snapshot.routing.max_loaded_models, Some(1));
-        assert_eq!(snapshot.model_pool.resident_models.len(), 1);
-    }
-
-    #[cfg(not(feature = "dynamic-routing"))]
-    #[test]
-    fn build_rejects_enabled_routing_without_feature() {
-        let mut config = EngineConfig::default();
-        config.routing.enabled = true;
-
-        let error = match InferenceEngine::builder()
-            .config(config)
-            .model(demo_model("demo", 1, 1))
-            .build()
-        {
-            Ok(_) => panic!("routing should be rejected"),
-            Err(error) => error,
-        };
-
-        assert!(matches!(error, LociError::InvalidRequest(_)));
-    }
-
-    #[test]
-    fn infer_prepares_and_tracks_backend_session() {
-        let mut engine = InferenceEngine::builder()
-            .model(demo_model("demo", 1, 1))
-            .build()
-            .expect("engine");
-
-        let response = engine
-            .infer(SessionRequest {
-                prompt: "hello".to_string(),
-                max_tokens: 32,
-                temperature: 0.2,
-                target_model: Some("demo".to_string()),
-                images: Vec::new(),
-                structured_output: false,
-                tool_calling: false,
-            })
-            .expect("response");
-
-        assert_eq!(
-            response.backend,
-            if cfg!(feature = "openvino") {
-                "openvino"
-            } else {
-                "candle"
-            }
-        );
-        let prepared = &engine.runtime_snapshot().model_pool.prepared_models;
-        assert_eq!(prepared.len(), 1);
-        assert_eq!(prepared[0].model_name, "demo");
-        assert_eq!(prepared[0].backend, response.backend);
-        assert!(engine.runtime_snapshot().model_pool.resident_memory_bytes > 0);
-    }
-
-    #[test]
-    fn prepare_warms_model_without_running_inference() {
-        let mut engine = InferenceEngine::builder()
-            .model(demo_model("demo", 1, 1))
-            .build()
-            .expect("engine");
-
-        let prepared = engine
-            .prepare(SessionRequest {
-                prompt: "warmup".to_string(),
-                max_tokens: 1,
-                temperature: 0.0,
-                target_model: Some("demo".to_string()),
-                images: Vec::new(),
-                structured_output: false,
-                tool_calling: false,
-            })
-            .expect("prepared");
-
-        assert_eq!(prepared.model_name, "demo");
-        assert_eq!(
-            engine.runtime_snapshot().model_pool.prepared_models.len(),
-            1
-        );
-    }
-
-    #[test]
-    fn prepare_materializes_tiered_offload_runtime_for_disk_backed_models() {
-        let mut config = EngineConfig::default();
-        config.tiered_offload.spill_threshold_bytes = Some(1);
-        config.tiered_offload.max_disk_bytes = Some(16 * 1024 * 1024);
-        config.tiered_offload.prefetch_window_bytes = Some(512 * 1024);
-
-        let mut engine = InferenceEngine::builder()
-            .config(config)
-            .model(demo_model(
-                "oversized",
-                40 * 1024 * 1024 * 1024,
-                20_000_000_000,
-            ))
-            .build()
-            .expect("engine");
-
-        engine
-            .prepare(SessionRequest {
-                prompt: "warmup".to_string(),
-                max_tokens: 1,
-                temperature: 0.0,
-                target_model: Some("oversized".to_string()),
-                images: Vec::new(),
-                structured_output: false,
-                tool_calling: false,
-            })
-            .expect("prepared");
-
-        let snapshot = engine.runtime_snapshot();
-        let runtime = snapshot
-            .tiered_offload_runtime
-            .expect("tiered offload runtime snapshot");
-        assert_eq!(runtime.sessions.len(), 1);
-        assert_eq!(runtime.sessions[0].model_name, "oversized");
-        assert!(runtime.sessions[0].mapped_bytes > 0);
-        assert!(runtime.sessions[0].weights_bytes > 0);
-    }
-
-    #[test]
-    fn evict_model_drops_resident_and_prepared_state_but_keeps_registration() {
-        let mut engine = InferenceEngine::builder()
-            .model(demo_model("demo", 1, 1))
-            .build()
-            .expect("engine");
-
-        engine
-            .prepare(SessionRequest {
-                prompt: "warmup".to_string(),
-                max_tokens: 1,
-                temperature: 0.0,
-                target_model: Some("demo".to_string()),
-                images: Vec::new(),
-                structured_output: false,
-                tool_calling: false,
-            })
-            .expect("prepared");
-
-        assert!(engine.evict_model("demo"));
-        assert_eq!(engine.models().len(), 1);
-        assert!(engine
-            .runtime_snapshot()
-            .model_pool
-            .resident_models
-            .is_empty());
-        assert!(engine
-            .runtime_snapshot()
-            .model_pool
-            .prepared_models
-            .is_empty());
-    }
-
-    #[test]
-    fn expired_models_are_evicted_using_keep_alive_policy() {
-        let mut config = EngineConfig::default();
-        config.model_keep_alive_secs = 1;
-
-        let mut engine = InferenceEngine::builder()
-            .config(config)
-            .model(demo_model("demo", 1, 1))
-            .build()
-            .expect("engine");
-
-        engine.register_model(demo_model("demo", 1, 1));
-        engine
-            .registry
-            .mark_last_used_for_test("demo", Instant::now() - Duration::from_secs(5));
-
-        let evicted = engine.evict_expired_models();
-        assert_eq!(evicted, vec!["demo".to_string()]);
-        assert!(engine
-            .runtime_snapshot()
-            .model_pool
-            .resident_models
-            .is_empty());
-    }
-
-    #[cfg(feature = "dynamic-routing")]
-    #[test]
-    fn engine_routes_simple_prompts_to_smaller_models() {
-        let mut config = EngineConfig::default();
-        config.routing = RoutingConfig {
-            enabled: true,
-            max_loaded_models: Some(2),
-            strategy: loci_protocol::RoutingStrategy::PromptComplexity,
-        };
-
-        let engine = InferenceEngine::builder()
-            .config(config)
-            .model(demo_model("small", 1, 1))
-            .model(demo_model("large", 10, 10))
-            .build()
-            .expect("engine");
-
-        let plan = engine
-            .plan(&SessionRequest {
-                prompt: "hi".to_string(),
-                max_tokens: 8,
-                temperature: 0.2,
-                target_model: None,
-                images: Vec::new(),
-                structured_output: false,
-                tool_calling: false,
-            })
-            .expect("plan");
-
-        assert_eq!(plan.route.selected_model, "small");
-    }
-
-    #[test]
-    fn engine_resolves_target_model_alias_before_planning() {
-        let mut config = EngineConfig::default();
-        config
-            .model_aliases
-            .insert("tiny".to_string(), "demo".to_string());
-
-        let engine = InferenceEngine::builder()
-            .config(config)
-            .model(demo_model("demo", 1, 1))
-            .build()
-            .expect("engine");
-
-        let plan = engine
-            .plan(&SessionRequest {
-                prompt: "hello".to_string(),
-                max_tokens: 8,
-                temperature: 0.2,
-                target_model: Some("tiny".to_string()),
-                images: Vec::new(),
-                structured_output: false,
-                tool_calling: false,
-            })
-            .expect("plan");
-
-        assert_eq!(plan.route.selected_model, "demo");
-    }
-
-    #[cfg(feature = "dynamic-routing")]
-    #[test]
-    fn power_aware_routing_prefers_smaller_model_under_thermal_pressure() {
-        let mut config = EngineConfig::default();
-        config.routing = RoutingConfig {
-            enabled: true,
-            max_loaded_models: Some(2),
-            strategy: loci_protocol::RoutingStrategy::PowerAware,
-        };
-
-        let mut engine = InferenceEngine::builder()
-            .config(config)
-            .model(demo_model("small", 1, 1))
-            .model(demo_model("large", 10, 10))
-            .build()
-            .expect("engine");
-
-        engine.topology.power = PowerState {
-            battery_powered: true,
-            battery_percent: Some(10),
-            thermal_state: ThermalState::Hot,
-            power_budget_watts: Some(15),
-        };
-
-        let plan = engine
-            .plan(&SessionRequest {
-                prompt: "summarize".to_string(),
-                max_tokens: 256,
-                temperature: 0.2,
-                target_model: None,
-                images: Vec::new(),
-                structured_output: false,
-                tool_calling: false,
-            })
-            .expect("plan");
-
-        assert_eq!(plan.route.selected_model, "small");
-    }
+        })
+        .collect()
 }

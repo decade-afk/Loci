@@ -56,9 +56,9 @@ cargo run -p loci-cli -- \
 ## SDK 嵌入示例
 
 ```rust
-use loci_sdk::loci_core::TieredOffloadProfile;
 use loci_sdk::{
     LocalModelRegistrationRequest, Loci, ModelPreparationRequest, TextGenerationRequest,
+    TieredOffloadProfile,
 };
 
 let mut loci = Loci::builder()
@@ -98,6 +98,25 @@ let response = loci.generate_text(
 - `prefetch_window_bytes = 128 MiB`
 - `kv_block_size_tokens = 32`
 - `kv_types = q8_0/q4_0`
+
+## 当前 MVP 状态
+
+`v0.2.0` 是当前最小可发布版本线。
+
+当前 MVP 已经明确保证：
+
+- `GGUF` 优先的本地模型注册与 readiness 检查
+- `loci-backend-candle` 作为默认真实执行链
+- 进程内 SDK 会话、CLI 与 HTTP 服务三种入口
+- 带磁盘分层快照的异构规划能力
+- 当前 Candle 本地生成链可以接受多模态输入
+
+当前 MVP 不宣称：
+
+- 默认路径完整直执行 `Safetensors` / `ONNX` / `PyTorch`
+- 完整 VLM 级别的多模态解码语义
+- 所有 OpenVINO 资产布局都已具备生产级 materialization
+- 真正的 paged-KV 执行或完整 llama.cpp 级 kernel 覆盖
 
 ## 更多文档
 

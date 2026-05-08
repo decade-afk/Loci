@@ -11,7 +11,7 @@ The MVP is:
 - one control-plane runtime that can register and inspect models
 - one real execution backend path that can plan, prepare, and execute
 - one stable runtime snapshot plus SDK/HTTP/CLI integration surfaces
-- one honest fallback path for the future pure Rust direction
+- one honest optional acceleration path beyond the default Rust runtime
 
 ## MVP Scope
 
@@ -23,8 +23,8 @@ The MVP is:
 - heterogeneous execution planning across `CPU/GPU/NPU/Disk`
 - disk-heavy tiered-offload planning and runtime snapshot exposure
 - paged-KV configuration that can be surfaced through SDK, CLI, and service layers
-- `Candle` as the default generic execution path
-- `OpenVINO` as an optional real execution backend
+- `Candle` as the default real execution path
+- `OpenVINO` as an optional Intel-oriented execution backend
 - static kernel catalog reporting
 - embeddable SDK entrypoints plus CLI and HTTP endpoints for inspect, plan, prewarm, infer, and runtime snapshot
 
@@ -41,14 +41,14 @@ The MVP is:
 
 For the MVP:
 
-- `Candle` is the default generic path
-- `OpenVINO` is an optional real execution path
+- `Candle` is the default real path
+- `OpenVINO` is an optional platform-specific path
 - readiness and planning must be honest about which backend is actually ready
 
 This means documentation and runtime behavior must both reflect:
 
 - long-term direction: `Candle` + `GGUF` + portable kernels
-- MVP reality: `OpenVINO` can execute today when enabled, while `Candle` defines the generic architecture
+- MVP reality: `Candle` already owns the minimum local execution chain, while `OpenVINO` remains an optional acceleration path with narrower asset readiness
 - current operating profile: examples and docs should show the disk-heavy planner path instead of pretending local memory is always sufficient
 
 ## MVP Deliverables
@@ -74,23 +74,25 @@ The backend selector must:
 - exclude non-multimodal backends for image requests
 - use readiness inspection as the source of truth
 
-### 3. OpenVINO Execution Path
+### 3. Candle Execution Path
+
+The default Candle path must:
+
+- accept direct local `GGUF` assets
+- prepare reusable backend sessions
+- execute prompt requests through the current local decode chain
+- surface multimodal input acceptance honestly for the current image-conditioned local generation flow
+- expose kernel provenance and planner-visible capabilities without leaking backend internals into the core runtime
+
+### 4. Optional OpenVINO Path
 
 The OpenVINO path must:
 
 - accept ready IR / GenAI-exported assets
 - reject raw checkpoints with clear adaptation/export errors
 - prepare reusable backend sessions
-- execute text requests or return a deterministic fallback when runtime bootstrap is unavailable
-- support multimodal only for architectures and assets that are actually executable
-
-### 4. Candle Generic Path
-
-The Candle path must:
-
-- compile and expose topology, asset capabilities, lowering capabilities, and kernel catalog
-- remain the default generic backend shape
-- never block the control plane even when OpenVINO is disabled
+- execute when a supported Intel runtime path is actually available
+- never redefine the baseline MVP when disabled or partially ready
 
 ### 5. Kernel Catalog
 
@@ -137,7 +139,7 @@ The MVP is complete when all of the following are true:
 8. Preferred backend fallback works:
    - if preferred backend is not ready, a ready backend is chosen instead
 9. Multimodal exclusion works:
-   - image requests do not select a text-only backend
+   - image requests do not select a backend that declares itself non-multimodal
 10. Default `candle` build compiles without requiring `openvino`
 
 ## Implementation Plan
@@ -153,6 +155,7 @@ The MVP is complete when all of the following are true:
 - keep `runtime_snapshot()` stable and complete
 - ensure SDK, CLI, and server routes expose MVP state correctly
 - ensure kernel catalog appears in snapshot outputs
+- ensure README and examples describe the real `v0.2.0` MVP boundary
 - keep user-facing examples aligned with the documented disk-heavy planner profile
 
 ### Phase C: Verification
@@ -167,5 +170,5 @@ After MVP, the next practical steps are:
 
 - planner-driven kernel selection from `KernelRegistry`
 - first real imported kernel path: quantized matmul or decode attention
-- real Candle execution for one narrow architecture path
-- GGUF-first loader/executor path
+- deeper Candle execution for one narrow architecture path
+- broader `GGUF`-first loader/executor coverage beyond the current minimal chain

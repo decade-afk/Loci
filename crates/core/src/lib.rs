@@ -22,6 +22,7 @@ mod model_registry;
 mod planner;
 mod router;
 mod runtime_engine;
+mod runtime_engine_helpers;
 mod snapshot;
 
 #[cfg(feature = "gguf")]

@@ -85,6 +85,46 @@ pub fn rope_f32(
     Ok(output)
 }
 
+/// Projects one hidden state against a row-major output matrix and returns one
+/// score per candidate row.
+///
+/// This is the portable baseline for the logits/projection hotspot that sits
+/// underneath greedy token selection in the current Candle path.
+pub fn projection_scores_f32(
+    hidden_state: &[f32],
+    row_major_weights: &[f32],
+    row_width: usize,
+    candidate_count: usize,
+) -> Result<Vec<f32>, String> {
+    if row_width == 0 {
+        return Err("projection row_width must be greater than zero".to_string());
+    }
+    if hidden_state.is_empty() {
+        return Err("projection hidden_state must not be empty".to_string());
+    }
+
+    let row_count = row_major_weights.len() / row_width;
+    if row_count == 0 {
+        return Err("projection weights do not contain any complete rows".to_string());
+    }
+    if candidate_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let hidden_width = hidden_state.len().min(row_width);
+    Ok((0..candidate_count.min(row_count))
+        .map(|row_index| {
+            let start = row_index * row_width;
+            let row = &row_major_weights[start..start + row_width];
+            row.iter()
+                .zip(hidden_state.iter())
+                .take(hidden_width)
+                .map(|(weight, hidden)| weight * hidden)
+                .sum::<f32>()
+        })
+        .collect())
+}
+
 /// Returns the curated MVP kernel catalog for llama.cpp-inspired ports.
 pub fn curated_kernel_descriptors() -> Vec<KernelDescriptor> {
     vec![
@@ -140,6 +180,31 @@ pub fn curated_kernel_descriptors() -> Vec<KernelDescriptor> {
         },
         KernelDescriptor {
             backend: "candle".to_string(),
+            kernel_name: "llama_projection_score_port".to_string(),
+            operator_class: ChipOperatorClass::Matmul,
+            implementation: KernelImplementationKind::Rust,
+            maturity: KernelMaturity::Integrated,
+            origin: KernelOrigin {
+                project: "llama.cpp".to_string(),
+                component: "output projection".to_string(),
+                license: Some("MIT".to_string()),
+                notes: vec![
+                    "portable safe Rust baseline landed in loci-kernels-llama".to_string(),
+                    "future quantized path should preserve row-major score ordering".to_string(),
+                ],
+            },
+            supported_targets: vec![AcceleratorKind::Cpu, AcceleratorKind::Gpu],
+            supported_formats: vec![ModelFormat::Gguf],
+            supported_architectures: vec![
+                "llama".to_string(),
+                "mistral".to_string(),
+                "qwen".to_string(),
+            ],
+            dispatch_keys: vec!["projection".to_string(), "decode".to_string()],
+            notes: vec!["MVP logits scoring baseline".to_string()],
+        },
+        KernelDescriptor {
+            backend: "candle".to_string(),
             kernel_name: "llama_quantized_matmul_port".to_string(),
             operator_class: ChipOperatorClass::Matmul,
             implementation: KernelImplementationKind::Rust,
@@ -173,6 +238,9 @@ mod tests {
         assert!(kernels
             .iter()
             .any(|kernel| kernel.kernel_name == "llama_rmsnorm_port"));
+        assert!(kernels
+            .iter()
+            .any(|kernel| kernel.kernel_name == "llama_projection_score_port"));
         assert!(kernels
             .iter()
             .all(|kernel| kernel.origin.project == "llama.cpp"));
@@ -244,5 +312,30 @@ mod tests {
 
         let error = rope_f32(&[1.0, 2.0, 3.0, 4.0], 1, 10_000.0, 3).expect_err("error");
         assert!(error.contains("rotary_dim must be even"));
+    }
+
+    #[test]
+    fn projection_scores_match_reference_rows() {
+        let hidden = [1.0_f32, 2.0, 3.0];
+        let weights = [
+            1.0_f32, 0.0, 0.0, //
+            0.0, 1.0, 0.0, //
+            0.5, 0.5, 0.5,
+        ];
+
+        let scores = projection_scores_f32(&hidden, &weights, 3, 3).expect("scores");
+        assert_eq!(scores.len(), 3);
+        assert!((scores[0] - 1.0).abs() < 1e-6);
+        assert!((scores[1] - 2.0).abs() < 1e-6);
+        assert!((scores[2] - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn projection_scores_reject_invalid_shapes() {
+        let error = projection_scores_f32(&[1.0], &[1.0], 0, 1).expect_err("error");
+        assert!(error.contains("row_width"));
+
+        let error = projection_scores_f32(&[], &[1.0], 1, 1).expect_err("error");
+        assert!(error.contains("hidden_state"));
     }
 }

@@ -1,8 +1,8 @@
 use anyhow::Context;
 use loci_sdk::{
-    LocalModelRegistrationRequest, Loci, ModelPreparationRequest, TextGenerationRequest,
+    LocalModelRegistrationRequest, Loci, ModelPreparationRequest, TextSessionConfig,
+    TieredOffloadProfile,
 };
-use loci_sdk::loci_core::TieredOffloadProfile;
 
 const SPILL_THRESHOLD_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_DISK_BYTES: u64 = 64 * 1024 * 1024 * 1024;
@@ -26,11 +26,21 @@ fn main() -> anyhow::Result<()> {
         loci.register_model(LocalModelRegistrationRequest::new(model_path).name("sdk-demo"))?;
     let inspection = loci.inspect_model("sdk-demo")?;
     let prepared = loci.prepare_model(ModelPreparationRequest::new().model("sdk-demo"))?;
-    let response = loci.generate_text(
-        TextGenerationRequest::new("Reply in one short sentence as a local assistant.")
+    let mut session = loci.open_text_session(
+        TextSessionConfig::new()
             .model("sdk-demo")
+            .system_prompt("you are a local assistant")
             .max_tokens(48)
             .temperature(0.7),
+    )?;
+    let response = loci.generate_in_text_session_with_callback(
+        &mut session,
+        "Reply in one short sentence as a local assistant.",
+        |chunk| {
+            if !chunk.delta.is_empty() {
+                println!("chunk: {}", chunk.delta);
+            }
+        },
     )?;
 
     println!("registered: {} ({})", registered.name, registered.format);
@@ -46,6 +56,7 @@ fn main() -> anyhow::Result<()> {
         KV_BLOCK_SIZE_TOKENS
     );
     println!("prepared session: {}", prepared.session_key);
+    println!("session prepared: {}", session.prepared().session_key);
     println!("prepared residency: {:?}", prepared.residency);
     println!(
         "prepared estimated_memory_bytes: {:?}",

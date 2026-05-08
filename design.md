@@ -192,6 +192,13 @@ Loci should feel natural in both of these shapes:
 - as an SDK linked directly into an application process
 - as a local service that exposes stable inference APIs
 
+These two shapes share the same core, but they are not the same build target:
+
+- `loci-sdk` is the embedded-first surface for direct in-process use
+- `loci-server` is the standalone service layer
+- the service layer is optional and should stay feature-gated so embedded users do not inherit server-only dependencies
+- advanced control-plane types remain available for escape-hatch integration, but they are not the default surface area
+
 That matters because some products want zero network hops and others want isolation, supervision, or multi-client access. Loci should support both without splitting into two runtimes.
 
 ## Design Standard

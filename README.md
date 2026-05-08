@@ -67,9 +67,9 @@ cargo run -p loci-cli -- \
 Embed Loci directly in a Rust application:
 
 ```rust
-use loci_sdk::loci_core::TieredOffloadProfile;
 use loci_sdk::{
     LocalModelRegistrationRequest, Loci, ModelPreparationRequest, TextGenerationRequest,
+    TieredOffloadProfile,
 };
 
 let mut loci = Loci::builder()
@@ -122,6 +122,25 @@ Loci keeps the control plane backend-agnostic:
 - tiered offload and paged-KV configuration stay visible in runtime snapshots and service APIs
 
 The intent is one runtime model that can be embedded as a library or deployed as a local or server-side service without changing how applications reason about models, readiness, or planner state.
+
+## MVP Status
+
+`v0.2.0` is the current minimum viable release line.
+
+The current MVP guarantees:
+
+- `GGUF`-first local model registration and readiness inspection
+- one real default execution path through `loci-backend-candle`
+- in-process SDK sessions plus standalone CLI and HTTP service entrypoints
+- heterogeneous planning with disk-tiered runtime snapshots
+- multimodal input acceptance on the current Candle local generation chain
+
+The current MVP does not claim:
+
+- full `Safetensors` / `ONNX` / `PyTorch` direct execution on the default path
+- full VLM-grade multimodal decoding semantics
+- production-complete Intel conversion/materialization for every OpenVINO asset layout
+- real paged-KV execution or full llama.cpp-class kernel coverage
 
 ## Learn More
 
